@@ -42,11 +42,11 @@
 // documents the gap.
 
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { extractBashPathTokens } from "../src/engine/domain.ts";
+import { extractBashPathTokens, filterBashPathTokens } from "../src/engine/domain.ts";
 
 interface BashFixture {
   cwd: string;
@@ -544,23 +544,113 @@ test("summary — a correct fix must PRESERVE real-path extraction", () => {
   }
 });
 
-test("summary — a correct fix must DROP ref-arg extraction (FAILS TODAY; PASSES AFTER FIX)", () => {
-  // These are the canonical false-positive tokens a fix MUST drop. The
-  // test asserts the CURRENT (broken) behavior so it will fail once the
-  // fix is in place; flip the assertion to the empty set when
-  // implementing the fix.
+test("summary — a correct fix must DROP ref-arg extraction via filterBashPathTokens (PASSES AFTER FIX)", () => {
+  // These are the canonical false-positive tokens a fix MUST drop.
+  // The regex alone still extracts them; the post-extraction filter
+  // `filterBashPathTokens` drops them when the resolved path AND its
+  // immediate parent do not exist. The filter is read-kind only:
+  // upsert/delete-kind bash keeps all tokens so legitimate CREATE/DELETE
+  // targets like `.worktrees/<dir>/` still pass.
   const fx = freshFixture();
   try {
-    const drop: Array<[string, string[]]> = [
-      ["git log feature/foo", []],
-      ["git log origin/main", []],
-      ["git log refs/heads/main", []],
-      ["git worktree add .worktrees/foo -b bar/baz main", [".worktrees/foo"]],
-      ["git push --delete origin feature/foo", []],
-      ["git show origin/docs/handoff-after-pr-348:HANDOFF.md", []],
-      ["git -C . branch -d docs/handoff-after-pr-348", []],
+    const cwd = fx.cwd;
+    const ctx = { cwd } as any;
+
+    const drop: Array<[string, "read" | "upsert" | "delete" | "command", string[]]> = [
+      // Read-kind: ref args are dropped (neither path nor parent exists).
+      ["git log feature/foo", "read", []],
+      ["git log origin/main", "read", []],
+      ["git log refs/heads/main", "read", []],
+      // Read-kind: worktree-path token kept (parent exists), branch dropped.
+      ["git worktree add .worktrees/foo -b bar/baz main", "read", [".worktrees/foo"]],
+      // Read-kind: ref arg with embedded path (`origin/<branch>:HANDOFF.md`)
+      // drops the leading ref; HANDOFF.md is past the `:` and not extracted.
+      ["git show origin/docs/handoff-after-pr-348:HANDOFF.md", "read", []],
+      ["git -C . branch -d docs/handoff-after-pr-348", "read", []],
+      // Upsert-kind: filter does NOT run; all tokens kept (existing
+      // allowMissing logic authorizes CREATE/DELETE targets).
+      ["git push --delete origin feature/foo", "upsert", ["feature/foo"]],
+      // Delete-kind: same as upsert; all tokens kept.
+      ["rm ./app/models/user.rb", "delete", ["./app/models/user.rb"]],
+      // Upsert-kind: legitimate CREATE target kept even though the path
+      // does not exist yet — the upsert scope authorizes the creation.
+      ["touch /tmp/new/dir/file.txt", "upsert", ["/tmp/new/dir/file.txt"]],
     ];
-    for (const [cmd, expected] of drop) assertExtracts(cmd, expected);
+    for (const [cmd, kind, expected] of drop) {
+      const raw = extractBashPathTokens(cmd);
+      const filtered = filterBashPathTokens(ctx, raw, kind);
+      assert.deepEqual(
+        sortTokens(filtered),
+        sortTokens(expected),
+        cmd,
+      );
+    }
+  } finally {
+    cleanup(fx);
+  }
+});
+
+test("filterBashPathTokens — PRESERVE cases that already pass (sanity check)", () => {
+  const fx = freshFixture();
+  try {
+    const cwd = fx.cwd;
+    const ctx = { cwd } as any;
+
+    const preserve: Array<[string, "read" | "upsert" | "delete" | "command", string[]]> = [
+      ["cat ./app/models/user.rb", "read", ["./app/models/user.rb"]], // parent exists
+      ["cat /etc/hosts", "read", ["/etc/hosts"]], // path probably exists on test runner
+      ["touch /tmp/foo/bar.txt", "upsert", ["/tmp/foo/bar.txt"]], // upsert keeps all
+      ["rm ./app/models/user.rb", "delete", ["./app/models/user.rb"]], // delete keeps all
+      ["mv ./src/foo.rb ./src/bar.rb", "upsert", ["./src/foo.rb", "./src/bar.rb"]],
+    ];
+    for (const [cmd, kind, expected] of preserve) {
+      const raw = extractBashPathTokens(cmd);
+      const filtered = filterBashPathTokens(ctx, raw, kind);
+      assert.deepEqual(
+        sortTokens(filtered),
+        sortTokens(expected),
+        cmd,
+      );
+    }
+  } finally {
+    cleanup(fx);
+  }
+});
+
+test("filterBashPathTokens — path-or-parent existence is the discriminating heuristic", () => {
+  const fx = freshFixture();
+  try {
+    const cwd = fx.cwd;
+    const ctx = { cwd } as any;
+
+    // Path exists → kept.
+    writeFileSync(join(cwd, "real-file.txt"), "x");
+    assert.deepEqual(
+      sortTokens(filterBashPathTokens(ctx, extractBashPathTokens("cat real-file.txt"), "read")),
+      sortTokens([]), // no `/`, not extracted
+      "no-slash arg stays un-extracted",
+    );
+
+    // Path does not exist, parent exists → kept.
+    assert.deepEqual(
+      sortTokens(filterBashPathTokens(ctx, extractBashPathTokens("cat ./real-file.txt"), "read")),
+      sortTokens(["./real-file.txt"]),
+      "parent-exists path is kept",
+    );
+
+    // Path does not exist, parent does not exist → dropped.
+    assert.deepEqual(
+      sortTokens(filterBashPathTokens(ctx, extractBashPathTokens("cat ./missing-dir/missing.txt"), "read")),
+      sortTokens([]),
+      "neither-path-nor-parent is dropped",
+    );
+
+    // Same token in upsert context → kept (filter does not run).
+    assert.deepEqual(
+      sortTokens(filterBashPathTokens(ctx, extractBashPathTokens("touch ./missing-dir/missing.txt"), "upsert")),
+      sortTokens(["./missing-dir/missing.txt"]),
+      "upsert keeps tokens even when path and parent do not exist",
+    );
   } finally {
     cleanup(fx);
   }
