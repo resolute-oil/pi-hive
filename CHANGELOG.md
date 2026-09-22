@@ -27,6 +27,17 @@ without a corresponding section.
   "may drop paths the agent could otherwise reach" limitation noted in
   HANDOFF.md and AGENTS.md.
 
+### Added
+
+- `buildBudgetVisibility` surfaces a worker's remaining budget in the system
+  prompt at session start, so the agent can self-regulate before hitting the
+  wall. Shows worker-tier (`runs`, `tokens`, `cost`, `distiller`) and
+  team-tier (`runs`, `tokens`, `cost`) limits with `Math.max(0, limit - used)`
+  remaining values. Returns "" when no budget is configured; `buildWorkerPrompt`
+  omits the section in that case. Tokens are formatted with K/M suffix
+  (e.g. `tokens=1.0M`, `tokens=250.0K`). An up-to-the-turn view is still
+  available via `team_status`.
+
 ## [0.1.0] - 2026-07-05
 
 ### Added
