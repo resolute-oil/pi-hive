@@ -96,8 +96,22 @@ test("tool renderers remain bounded for partial, expanded, success, and error st
   const state = toolState(dir);
   const delegate = (buildHiveTools(state, "Orchestrator") as any[]).find((tool) => tool.name === "delegate_agent");
 
-  assert.deepEqual(delegate.renderCall({}, theme).render(1), []);
-  assert.equal(delegate.renderCall({ agent: "Tiny", task: "inspect" }, theme).render(80).length, 1);
+  // delegate_agent renders the full prompt verbatim — header on its own line,
+  // every line of the task below it. No character or width cap so the
+  // orchestrator's actual prompt is visible to the human.
+  const headerOnly = delegate.renderCall({}, theme).render(1);
+  assert.equal(headerOnly.length, 1);
+  assert.match(headerOnly[0], /delegate_agent/);
+  const withTask = delegate.renderCall({ agent: "Tiny", task: "inspect" }, theme).render(80);
+  assert.equal(withTask.length, 2);
+  assert.match(withTask[0], /delegate_agent/);
+  assert.match(withTask[0], /Tiny/);
+  assert.equal(withTask[1], "inspect");
+  const multiLine = delegate.renderCall(
+    { agent: "Tiny", task: "line one\nline two\nline three" },
+    theme,
+  ).render(80);
+  assert.deepEqual(multiLine, [withTask[0], "line one", "line two", "line three"]);
   assert.deepEqual(delegate.renderResult({ details: { status: "running" } }, { isPartial: true }, theme).render(80), []);
   assert.equal(delegate.renderResult({ details: { agent: "Tiny", status: "done", elapsed: 1_500, outputPreview: "ok" } }, { expanded: true }, theme).render(80).length, 2);
   assert.equal(delegate.renderResult({ details: { agent: "missing", status: "error" } }, {}, theme).render(80).length, 1);

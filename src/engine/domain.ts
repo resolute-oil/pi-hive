@@ -1,5 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { relative, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, relative, resolve } from "node:path";
 import type { AgentRuntime, DomainScope, HiveState } from "../core/types";
 import { currentAgentName } from "./session";
 import { resolveRuntime } from "./agent-lookup";
@@ -73,13 +74,19 @@ function domainScopeMatch(ctx: ExtensionContext, scope: DomainScope, target: str
 //     narrower "upsert tests only" rule.
 //   - On an exact specificity tie, DENY wins (fail safe).
 //   - If no scope matches, the default is DENY.
-export function domainAllows(ctx: ExtensionContext, runtime: AgentRuntime, rawPath: string, capability: "read" | "upsert" | "delete"): boolean {
+export function domainAllows(ctx: ExtensionContext, runtime: AgentRuntime, rawPath: string, capability: "read" | "upsert" | "delete", options?: { allowMissing?: boolean }): boolean {
   if (hasForeignAbsoluteSyntax(rawPath)) return false;
   const target = resolveDomainPath(ctx, rawPath);
   let bestSpecificity = -1;
   let decision = false;
+  // Default: upsert allows non-existent targets (CREATE targets are
+  // authorized before they exist on disk). Read/delete require the
+  // target to already exist. Bash callers pass `allowMissing: true`
+  // because bash path tokens are heuristics, not authoritative
+  // existence checks; the shell surfaces "no such file" at run time.
+  const allowMissing = options?.allowMissing ?? (capability === "upsert");
   for (const scope of runtime.config.domain || []) {
-    const match = domainScopeMatch(ctx, scope, target, capability === "upsert");
+    const match = domainScopeMatch(ctx, scope, target, allowMissing);
     if (!match.matches) continue;
     const opinion = scope[capability];
     if (match.specificity > bestSpecificity) {
@@ -143,6 +150,35 @@ export function extractBashPathTokens(command: string): string[] {
   return Array.from(new Set(matches
     .map((match) => match.trim())
     .filter((token) => !token.startsWith("http://") && !token.startsWith("https://"))));
+}
+
+// Bash path tokens are a regex match, so they conflate real paths with
+// git ref / branch / remote-ref arguments (anything shaped `<word>/<word>`
+// looks the same to the regex). `filterBashPathTokens` is a post-extraction
+// pass that drops tokens which the regex picked up but which are almost
+// certainly NOT filesystem paths: the resolved path does not exist AND
+// its immediate parent directory does not exist. Git ref arguments never
+// materialize as on-disk paths and rarely have an existing parent in
+// the cwd; real paths either exist (the common case for reads and
+// deletes) or have an existing parent (the common case for CREATE
+// targets like `.worktrees/<dir>/`).
+//
+// The filter is applied only to read-classified bash. For upsert/delete
+// bash (which covers legitimate `touch`, `mkdir`, `mv`, `cp`, `rm`, `git
+// push --delete`, etc.) the original tokens are kept: the domain check
+// already handles non-existent CREATE targets via `allowMissing: true`,
+// and the pathless-mutation fail-safe continues to apply.
+export function filterBashPathTokens(ctx: ExtensionContext, tokens: string[], kind: "read" | "upsert" | "delete" | "command"): string[] {
+  if (kind !== "read" && kind !== "command") return tokens;
+  return tokens.filter((token) => isLikelyFilesystemPath(ctx, token));
+}
+
+function isLikelyFilesystemPath(ctx: ExtensionContext, token: string): boolean {
+  const resolved = resolveDomainPath(ctx, token);
+  if (existsSync(resolved)) return true;
+  const parent = dirname(resolved);
+  if (existsSync(parent)) return true;
+  return false;
 }
 
 type ParsedCommand = { words: string[]; operatorBefore?: string };
@@ -469,7 +505,12 @@ export function enforceDomainForTool(state: HiveState, event: any, ctx: Extensio
 
     const kind = bashMutationKind(command);
     const capability = kind === "read" ? "read" : kind;
-    const paths = extractBashPathTokens(command);
+    // Extract raw path tokens, then filter out git ref / branch arguments
+    // that the regex mistakenly picked up. Filter is read-only by kind
+    // (see `filterBashPathTokens`); upsert/delete bash keeps all tokens
+    // so legitimate CREATE/DELETE targets like `.worktrees/<dir>/` still
+    // pass via the `allowMissing: true` path below.
+    const paths = filterBashPathTokens(ctx, extractBashPathTokens(command), kind);
     // Reserved-path matching also inspects bare shell words. Normal domain
     // extraction intentionally ignores bare words because they are ambiguous,
     // but known secret/authority names must never inherit that fail-open rule.
@@ -503,7 +544,13 @@ export function enforceDomainForTool(state: HiveState, event: any, ctx: Extensio
       if (reservedBlock) return { block: true, reason: reservedBlock };
       const typeBlock = enforceTypePolicyForPath(runtime, ctx, path, policyAction);
       if (typeBlock) return { block: true, reason: typeBlock };
-      if (!domainAllows(ctx, runtime, path, capability)) {
+      // Bash path tokens are regex matches, not authoritative existence
+      // checks; let the shell report missing files at run time. The
+      // domain check is about authorization (is this path inside the
+      // agent's granted scope?), not existence (does this file exist?).
+      // Reserved-path and type-policy layers above already enforce the
+      // strict rules for sensitive locations and write-capable types.
+      if (!domainAllows(ctx, runtime, path, capability, { allowMissing: true })) {
         return { block: true, reason: `${runtime.config.name} cannot ${capability} ${path} via bash. Allowed ${capability} domains: ${formatDomainRules(runtime, capability)}` };
       }
     }
