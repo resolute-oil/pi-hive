@@ -38,6 +38,20 @@ without a corresponding section.
   (e.g. `tokens=1.0M`, `tokens=250.0K`). An up-to-the-turn view is still
   available via `team_status`.
 
+### Fixed
+
+- `extractBashPathTokens` skips the first non-flag positional argument for
+  `grep`, `egrep`, and `fgrep`. The pattern (the search regex/literal) is
+  DATA, not a path; without this skip, a slash inside the pattern (e.g.
+  `grep /tmp/foo file.txt`) would fire a domain check on the pattern as if
+  it were a path under the agent's domain. Scope is intentionally limited to
+  grep variants — awk and sed have similar inline-data-as-first-positional
+  cases but commonly pair the script with `-f FILE` or `-e SCRIPT` flag-value
+  pairs where the value IS a path, and distinguishing flag values from
+  positional values requires per-flag-value knowledge that's documented as
+  a deferred hardening. Addresses the AGENTS.md "Bare bash read paths may
+  evade static domain extraction" accepted risk in a small, targeted way.
+
 ## [0.1.0] - 2026-07-05
 
 ### Added
