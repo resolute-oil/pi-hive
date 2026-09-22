@@ -298,8 +298,13 @@ export async function dispatchAgent(
   // assembled worker context (new/fresh) or the lean task alone (resume).
   const sessionFileExisted = existsSync(runtime.sessionFile);
   // Governance accounting is monotonic even when fresh=true archives the SDK
-  // transcript and resets its session-lifetime counters.
-  runtime.governanceTokens ??= runtime.inputTokens + runtime.outputTokens + runtime.cacheReadTokens + runtime.cacheWriteTokens + runtime.reasoningTokens;
+  // transcript and resets its session-lifetime counters. The budget tracks
+  // either input+output only or the full token total, depending on the
+  // configured scope; default "all" preserves the legacy behavior.
+  const tokenBudgetScope = effectiveWorkerGovernance(state, runtime).tokenBudgetScope ?? "all";
+  runtime.governanceTokens ??= tokenBudgetScope === "input_output"
+    ? runtime.inputTokens + runtime.outputTokens
+    : runtime.inputTokens + runtime.outputTokens + runtime.cacheReadTokens + runtime.cacheWriteTokens + runtime.reasoningTokens;
   runtime.governanceCostUsd ??= runtime.costUsd;
   // fresh=true starts this agent's conversation clean. Rather than DELETE the
   // prior session (which would lose the transcript of earlier runs while their
@@ -798,8 +803,13 @@ export async function dispatchAgent(
     reasoningTokens: nonneg(runtime.reasoningTokens - (runtime.runStartReasoningTokens ?? 0)),
     costUsd: nonneg(runtime.costUsd - (runtime.runStartCostUsd ?? 0)),
   };
+  // Scope-aware governance accumulation: input_output keeps the budget aligned
+  // with what fills the model's context window; "all" (default) preserves the
+  // legacy behavior that includes cache reads/writes and reasoning.
   runtime.governanceTokens = (runtime.governanceTokens || 0)
-    + delta.inputTokens + delta.outputTokens + delta.cacheReadTokens + delta.cacheWriteTokens + delta.reasoningTokens;
+    + (tokenBudgetScope === "input_output"
+      ? delta.inputTokens + delta.outputTokens
+      : delta.inputTokens + delta.outputTokens + delta.cacheReadTokens + delta.cacheWriteTokens + delta.reasoningTokens);
   runtime.governanceCostUsd = (runtime.governanceCostUsd || 0) + delta.costUsd;
   if (runtime.config.agentType === "reviewer") {
     // Persist per-artifact reviewer clearance whenever a review prompt is
