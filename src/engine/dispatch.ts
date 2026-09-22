@@ -206,6 +206,7 @@ export async function dispatchAgent(
   state: HiveState, agentName: string, task: string, ctx: ExtensionContext, fresh = false,
   createSession: CreateAgentSession = createAgentSession,
   abortSignal?: AbortSignal,
+  isReadOnly?: boolean,
 ): Promise<{ output: string; exitCode: number; elapsed: number }> {
   if (!state.config || !state.session) throw new Error("hive is not initialized");
   const caller = currentAgentName();
@@ -240,7 +241,7 @@ export async function dispatchAgent(
       return { output: `Delegation blocked: execution agents require an approved plan. Draft the OpenSpec change in plan mode (/opsx-propose), get the tasks artifact approved in the review UI, then run /hive:execute <change-id>. Active change: ${changeId || "none"}.`, exitCode: 1, elapsed: 0 };
     }
   }
-  const permission = canDelegateTo(state, caller, agentSlug(runtime.config));
+  const permission = canDelegateTo(state, caller, agentSlug(runtime.config), isReadOnly);
   if (!permission.ok) {
     return { output: `Delegation blocked: ${permission.reason}`, exitCode: 1, elapsed: 0 };
   }

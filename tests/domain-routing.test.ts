@@ -346,3 +346,80 @@ test("routeAgents prefers Operations for HANDOFF/worktree/push/PR-open task stri
     );
   });
 });
+
+// --- Option B: read-only opt-out for canDelegateTo widening ---
+// PR #10 widened canDelegateTo to allow any caller to reach typed specialists
+// (coder/tester/reviewer/planner) for read-only inspections. Option B adds an
+// explicit opt-out: when the caller passes isReadOnly: false, the widening is
+// blocked and only tree-match delegation succeeds. Use this to force
+// tree-bound delegation when the caller KNOWS the target is a write-capable
+// specialist and wants to keep the delegation in the lead tree (e.g.
+// orchestrator explicitly routing a worktree-class task to operations).
+
+test("canDelegateTo: isReadOnly=false blocks widening to typed specialist (Option B opt-out)", () => {
+  const state = stateWith([
+    runtime("Orchestrator", { role: "orchestrator", allowedAgents: ["Operations"] }),
+    runtime("Operations", { role: "lead", agentType: "lead", groupName: "Operations" }),
+    runtime("Frontend Coder", { role: "member", agentType: "coder", groupName: "Engineering" }),
+  ]);
+  runAsAgent("Orchestrator", () => {
+    // Default (no isReadOnly): widening allows the delegation.
+    assert.deepEqual(canDelegateTo(state, "Orchestrator", "Frontend Coder"), { ok: true });
+    // Explicit isReadOnly=true: widening still allows.
+    assert.deepEqual(canDelegateTo(state, "Orchestrator", "Frontend Coder", true), { ok: true });
+    // Explicit isReadOnly=false: widening BLOCKED. Reason names the type.
+    const result = canDelegateTo(state, "Orchestrator", "Frontend Coder", false);
+    assert.equal(result.ok, false);
+    assert.match(result.reason ?? "", /refused to widen/);
+    assert.match(result.reason ?? "", /Frontend Coder/);
+    assert.match(result.reason ?? "", /isReadOnly=false/);
+  });
+});
+
+test("canDelegateTo: isReadOnly=false does not block tree-match delegation", () => {
+  const state = stateWith([
+    runtime("Orchestrator", { role: "orchestrator", allowedAgents: ["Operations"] }),
+    runtime("Operations", { role: "lead", agentType: "lead", groupName: "Operations" }),
+    runtime("Frontend Coder", { role: "member", agentType: "coder", groupName: "Engineering" }),
+  ]);
+  runAsAgent("Orchestrator", () => {
+    // Operations is a direct report — tree-match wins regardless of isReadOnly.
+    assert.deepEqual(canDelegateTo(state, "Orchestrator", "Operations"), { ok: true });
+    assert.deepEqual(canDelegateTo(state, "Orchestrator", "Operations", false), { ok: true });
+    assert.deepEqual(canDelegateTo(state, "Orchestrator", "Operations", true), { ok: true });
+  });
+});
+
+test("canDelegateTo: isReadOnly=false blocks widening to ALL typed specialist kinds", () => {
+  const state = stateWith([
+    runtime("Orchestrator", { role: "orchestrator", allowedAgents: [] }),
+    runtime("Tester", { role: "member", agentType: "tester", groupName: "QA" }),
+    runtime("Reviewer", { role: "member", agentType: "reviewer", groupName: "Validation" }),
+    runtime("Planner", { role: "member", agentType: "planner", groupName: "Planning" }),
+  ]);
+  runAsAgent("Orchestrator", () => {
+    // All four widening-eligible types are blocked when isReadOnly=false.
+    for (const target of ["Tester", "Reviewer", "Planner"]) {
+      const result = canDelegateTo(state, "Orchestrator", target, false);
+      assert.equal(result.ok, false, `${target} should be blocked with isReadOnly=false`);
+      assert.match(result.reason ?? "", /refused to widen/);
+    }
+  });
+});
+
+test("canDelegateTo: lead-typed targets stay tree-bound regardless of isReadOnly value", () => {
+  // lead-typed agents are NOT in the widening set; they stay tree-bound.
+  // isReadOnly is irrelevant for them. The widening block only fires for
+  // the four widening-eligible types.
+  const state = stateWith([
+    runtime("Orchestrator", { role: "orchestrator", allowedAgents: [] }),
+    runtime("Sub-Lead", { role: "lead", agentType: "lead", groupName: "Engineering" }),
+  ]);
+  runAsAgent("Orchestrator", () => {
+    // Sub-Lead is blocked because it's a non-direct-report lead (regardless
+    // of isReadOnly — the widening set excludes lead types).
+    assert.equal(canDelegateTo(state, "Orchestrator", "Sub-Lead").ok, false);
+    assert.equal(canDelegateTo(state, "Orchestrator", "Sub-Lead", false).ok, false);
+    assert.equal(canDelegateTo(state, "Orchestrator", "Sub-Lead", true).ok, false);
+  });
+});

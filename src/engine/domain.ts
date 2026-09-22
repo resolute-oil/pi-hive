@@ -15,7 +15,7 @@ function runtimeForCaller(state: HiveState, callerName: string): AgentRuntime | 
   return resolveRuntime(state, callerName);
 }
 
-export function canDelegateTo(state: HiveState, callerName: string, targetName: string): { ok: boolean; reason?: string } {
+export function canDelegateTo(state: HiveState, callerName: string, targetName: string, isReadOnly?: boolean): { ok: boolean; reason?: string } {
   const caller = runtimeForCaller(state, callerName);
   if (!caller) return { ok: true };
   // Delegation is scoped to direct reports for EVERY node, including the
@@ -32,7 +32,17 @@ export function canDelegateTo(state: HiveState, callerName: string, targetName: 
   // (WRITABLE_CLASSES, readOnlyCommandDecision, commit-field gate) still
   // applies to the delegated worker session regardless of who delegated to
   // it; the widening is a permission, not a sandbox.
+  //
+  // Option B opt-out: `isReadOnly === false` blocks the widening so the
+  // caller can force tree-match-only delegation. Use this when the caller
+  // KNOWS the delegation is for a write-capable target and wants to keep
+  // the delegation in the tree (e.g. orchestrator explicitly routing a
+  // worktree-class task to operations instead of a coder). Default
+  // (isReadOnly undefined or true) preserves the PR #10 widening behavior.
   if (target && ["coder", "tester", "reviewer", "planner"].includes(target.config.agentType || "")) {
+    if (isReadOnly === false) {
+      return { ok: false, reason: `${caller.config.name} refused to widen to typed specialist "${target.config.name}" because isReadOnly=false (write-class delegation restricted to direct reports).` };
+    }
     return { ok: true };
   }
   if (allowed?.length === 0 || caller.config.role === "member") {
