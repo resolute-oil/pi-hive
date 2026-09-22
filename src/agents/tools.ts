@@ -212,11 +212,24 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
     },
     renderCall(args: unknown, theme: any) {
       const agent = (args as any).agent || "?";
-      const task = truncateMiddle(String((args as any).task || ""), 500);
-      const line = theme.fg("toolTitle", theme.bold("delegate_agent ")) +
-        agentColored(agent, theme) +
-        theme.fg("dim", task ? ` — ${task}` : "");
-      return boundedToolRender([line], theme.fg("dim", "…"));
+      const task = String((args as any).task || "");
+      const header = theme.fg("toolTitle", theme.bold("delegate_agent ")) +
+        agentColored(agent, theme);
+      // Show the full prompt verbatim. The LLM already received the complete
+      // task as the tool argument — this is only the TUI display of the call,
+      // and middle/width truncation hides what the orchestrator actually said
+      // to the agent. Render every line of the task as its own row beneath
+      // the header, with no character cap and no terminal-width cap.
+      const dim = (line: string) => theme.fg("dim", line);
+      const lines = task
+        ? [header, ...task.split(/\r?\n/).map(dim)]
+        : [header];
+      return {
+        invalidate() {},
+        render(_width: number): string[] {
+          return lines;
+        },
+      };
     },
     renderResult(result: any, options: ToolRenderOptions, theme: any) {
       const details = result.details as any;
