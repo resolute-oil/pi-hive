@@ -1,9 +1,10 @@
 import type { HiveState } from "../core/types";
 import { agentSlug } from "../core/utils";
-import { currentAgentName } from "./session";
+import { currentAgentName, currentChangeId } from "./session";
 import { canDelegateTo } from "./domain";
+import { isExecutionGateOpen } from "./openspec";
 
-export function routeAgents(state: HiveState, task: string, limit = 5): Array<{ slug: string; name: string; group: string; score: number; reasons: string[] }> {
+export function routeAgents(state: HiveState, task: string, limit = 5, cwd?: string): Array<{ slug: string; name: string; group: string; score: number; reasons: string[] }> {
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(100, Math.floor(limit)) : 5;
   const terms = task.toLowerCase().split(/[^a-z0-9_-]+/).filter((term) => term.length > 2);
   const caller = currentAgentName();
@@ -12,6 +13,17 @@ export function routeAgents(state: HiveState, task: string, limit = 5): Array<{ 
     // Plan mode routing surfaces planners, leads, and reviewers (Phase 5.1) —
     // mirrors the dispatch guard; reviewers are delegable in planning (read-only).
     .filter((runtime) => state.mode !== "plan" || ["planner", "lead", "reviewer"].includes(runtime.config.agentType || ""))
+    // Mirror dispatch's hive execution gate (dispatch.ts hive-mode gate): a
+    // coder/tester is only delegable in hive mode when the execution gate is
+    // open for the active change. Without a cwd we can't verify the gate, so
+    // we keep the recommendation and let dispatch be the final authority.
+    .filter((runtime) => {
+      if (!cwd || state.mode !== "hive") return true;
+      if (runtime.config.agentType !== "coder" && runtime.config.agentType !== "tester") return true;
+      const changeId = currentChangeId() || state.activeChangeId || "";
+      if (!changeId) return true;
+      return isExecutionGateOpen(cwd, changeId);
+    })
     .filter((runtime) => canDelegateTo(state, caller, agentSlug(runtime.config)).ok)
     .map((runtime) => {
       const searchableParts = [

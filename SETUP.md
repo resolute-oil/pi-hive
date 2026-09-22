@@ -48,7 +48,7 @@ The two teams are configured as **two required blocks** in `hive-config.yaml` �
 - a **lead** if it's a top-level agent **or** has `members:`,
 - a **member** if it has no `members:`.
 
-Delegation permission follows the same tree: **a node may delegate only to its direct reports.** The orchestrator's reports are the top-level agents; a lead's reports are its `members`. You never declare permissions — you express them by nesting.
+Delegation permission follows the same tree: **a node may delegate to its direct reports, and additionally to any configured agent whose `agent-type` is in {coder, tester, reviewer, planner}.** The orchestrator's reports are the top-level agents; a lead's reports are its `members`. `lead`-typed agents stay tree-bound — they coordinate work, they don't answer inspections directly. You never declare permissions — you express them by nesting.
 
 ---
 
@@ -306,7 +306,7 @@ These extension tools can be granted via an agent's `tools` list:
 
 | Tool | Grant to | Purpose |
 |---|---|---|
-| `delegate_agent` | **leads only** (anyone with members) | Delegate a focused task to a direct report and get its answer. The core fan-out tool. |
+| `delegate_agent` | **leads only** (anyone with members) | Delegate a focused task to a direct report, or to a typed specialist (`coder`/`tester`/`reviewer`/`planner`) for a read-only inspection. `lead`-typed targets stay tree-bound. The core fan-out tool. |
 | `route_agent` | leads / orchestrator | Score which agent should handle a task before delegating. |
 | `team_status` | any | Inspect live session, active runs, per-agent tokens/cost. |
 | `team_conversation` | any | Read **one named agent's** transcript (scoped; requires an `agent` arg). Used to inspect e.g. what a reviewer found. |
@@ -365,6 +365,16 @@ The old `requirements` stage is normalized to `specs` only for config compatibil
 Denials return an explanatory tool error (naming the type, class, and reason); the agent reads it and adapts—it is not killed. This matches the domain-denial UX.
 
 **Accepted enforcement limits.** Bash classification recognizes known command forms; it cannot infer writes hidden inside general-purpose interpreters or package scripts. Bare filename reads may also evade static path extraction. Write-capable workers are therefore a trust boundary. Use registered `read`/`edit`/`write` tools and recognized shell commands, never interpreter indirection to bypass policy. See [SECURITY.md](SECURITY.md#accepted-risks) for the complete threat model.
+
+#### 7.1.1 Delegation reach (the inspection-capable exception)
+
+The default delegation gate (`canDelegateTo` in `src/engine/domain.ts`) is the tree-derived `allowedAgents` on each agent's runtime config, computed from `members`/`children` nesting. After the widening, the same gate also permits a caller to delegate to any configured agent whose `agent-type` is in `{coder, tester, reviewer, planner}`.
+
+**Why this exists.** Read-only inspection tasks ("ask the frontend-coder about `ui/src/App.tsx`") are cheap and side-effect-free. Forcing them through a parent lead adds latency and consumes the lead's context budget. The widening lets the orchestrator route a focused inspection directly to a typed specialist.
+
+**What stays tree-bound.** `lead`-typed agents (the orchestrator and any sub-lead) remain reachable only via the existing tree-derived rule. The widening is **additive**, not a replacement.
+
+**What still gates the delegated worker.** The downstream bash/file policy (`WRITABLE_CLASSES`, `readOnlyCommandDecision`, the `commit:` field gate) still applies to the worker session regardless of who delegated to it. The widening is a permission, not a sandbox. In hive mode, `coder`/`tester` delegations additionally require the execution gate to be open for the active change (per `dispatch.ts:236-241`); in plan mode, only `planner`/`lead`/`reviewer` may be targets at all.
 
 ---
 
@@ -491,7 +501,7 @@ You are the only user-facing voice. You route work, coordinate leads, preserve t
 
 ## Operating Principles
 - Do not pretend to inspect files or run commands yourself. Delegate substantive work to the team leads.
-- Delegate ONLY to the top-level team leads. Each lead fans work out to its own members — never delegate to a member directly.
+- Delegate to the top-level team leads for coordinated work. For read-only inspections (asking a typed specialist to look at a specific file or component), you may also delegate directly to any agent whose `agent-type` is in {coder, tester, reviewer, planner}. `operations` remains the preferred owner of HANDOFF cycle rotation, worktree create, preflight, push, and PR-open — prefer routing those there.
 - Use the smallest useful pattern: one lead for bounded work, multiple leads for cross-cutting or high-risk work.
 - Give each delegation a focused objective, the expected output shape, and relevant constraints.
 - Ask for evidence and file paths when code is involved. Resolve disagreement explicitly.
@@ -788,7 +798,7 @@ done
 
 ## 12. Anti-patterns (do not do these)
 
-- **Declaring tree roles or delegation permissions in frontmatter.** The *tree role* (orchestrator/lead/member) and delegation permissions are derived from the `members` nesting in `hive-config.yaml`. Don't add `role:` or `allowed-agents:` to frontmatter. (The `agent-type` capability field **is** required in frontmatter — that's a different axis; see §7.1.)
+- **Declaring tree roles or delegation permissions in frontmatter.** The *tree role* (orchestrator/lead/member) and delegation permissions are derived from the `members` nesting in `hive-config.yaml`. Don't add `role:` or `allowed-agents:` to frontmatter. (The `agent-type` capability field **is** required in frontmatter — that's a different axis; see §7.1. The agent-type axis widens `canDelegateTo` to reach typed specialists directly, but `lead`-typed agents stay tree-bound — they don't get the widening even though their `agent-type` is also declared in frontmatter.)
 - **Giving a lead or the orchestrator a mutating agent-type.** Leads (including the orchestrator) are `agent-type: lead`; registered mutation tools deny their writes. Route all edits to `coder`/`tester` members.
 - **Giving the orchestrator file tools.** It routes and synthesizes only.
 - **Granting `edit`/`write` without a matching `upsert` domain** (or vice versa) — the agent will be blocked or unable to act.

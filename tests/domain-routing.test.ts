@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bashMutationKind, domainAllows, enforceDomainForTool, pathWithin } from "../src/engine/domain.ts";
+import { bashMutationKind, canDelegateTo, domainAllows, enforceDomainForTool, pathWithin } from "../src/engine/domain.ts";
 import { routeAgents } from "../src/engine/routing.ts";
 import { runAsAgent } from "../src/engine/session.ts";
 import { buildOrchestratorPrompt } from "../src/agents/prompts.ts";
@@ -207,4 +207,83 @@ test("buildOrchestratorPrompt routes to the ACTUAL configured leads, nothing har
   assert.match(prompt, /Work matching "mapping requirements and specs" → cartographer \(Cartographer\)\./);
   // Nothing hardcoded from the example teams leaks in.
   assert.doesNotMatch(prompt, /Engineering Lead|Planning Lead/);
+});
+
+// --- Orchestrator delegation widening (T1-T5) ---
+// The orchestrator's allowedAgents is derived from members/children nesting
+// (typically the top-level leads). To let the orchestrator route read-only
+// inspections directly to typed specialists (coder/tester/reviewer/planner)
+// without going through a parent lead, canDelegateTo adds a second axis:
+// after the tree-match check, if the target's agent-type is in
+// {coder, tester, reviewer, planner}, the call is allowed. lead-typed
+// targets stay tree-bound. See `src/engine/domain.ts:18-31`.
+
+test("canDelegateTo widens to typed specialists (non-direct-report coder)", () => {
+  const state = stateWith([
+    runtime("Orchestrator", { role: "orchestrator", allowedAgents: ["Engineering Lead"] }),
+    runtime("Engineering Lead", { role: "lead", agentType: "lead", groupName: "Engineering" }),
+    runtime("Frontend Coder", { role: "member", agentType: "coder", groupName: "Engineering" }),
+  ]);
+  runAsAgent("Orchestrator", () => {
+    assert.deepEqual(canDelegateTo(state, "Orchestrator", "Frontend Coder"), { ok: true });
+  });
+});
+
+test("canDelegateTo keeps lead-typed non-reports tree-bound after widening", () => {
+  const state = stateWith([
+    runtime("Orchestrator", { role: "orchestrator", allowedAgents: ["Engineering Lead"] }),
+    runtime("Engineering Lead", { role: "lead", agentType: "lead", groupName: "Engineering" }),
+    runtime("Sub-Lead", { role: "lead", agentType: "lead", groupName: "Engineering" }),
+  ]);
+  runAsAgent("Orchestrator", () => {
+    const result = canDelegateTo(state, "Orchestrator", "Sub-Lead");
+    assert.equal(result.ok, false);
+    assert.match(result.reason ?? "", /can only delegate to/);
+  });
+});
+
+test("canDelegateTo widens for all four inspection-capable agent types", () => {
+  const state = stateWith([
+    runtime("Orchestrator", { role: "orchestrator", allowedAgents: ["Engineering Lead"] }),
+    runtime("Engineering Lead", { role: "lead", agentType: "lead", groupName: "Engineering" }),
+    runtime("Frontend Coder", { role: "member", agentType: "coder", groupName: "Engineering" }),
+    runtime("QA Tester", { role: "member", agentType: "tester", groupName: "Validation" }),
+    runtime("Spec Reviewer", { role: "member", agentType: "reviewer", groupName: "Validation" }),
+    runtime("Plan Specialist", { role: "member", agentType: "planner", groupName: "Planning" }),
+  ]);
+  runAsAgent("Orchestrator", () => {
+    for (const target of ["Frontend Coder", "QA Tester", "Spec Reviewer", "Plan Specialist"]) {
+      assert.deepEqual(canDelegateTo(state, "Orchestrator", target), { ok: true }, `${target} should be reachable via type widening`);
+    }
+  });
+});
+
+test("canDelegateTo denial reason names both the tree-allowed list and the type-allowed set", () => {
+  const state = stateWith([
+    runtime("Orchestrator", { role: "orchestrator", allowedAgents: ["Engineering Lead"] }),
+    runtime("Engineering Lead", { role: "lead", agentType: "lead", groupName: "Engineering" }),
+    runtime("Stranger", { role: "lead", agentType: "lead", groupName: "Other" }),
+  ]);
+  runAsAgent("Orchestrator", () => {
+    const result = canDelegateTo(state, "Orchestrator", "Stranger");
+    assert.equal(result.ok, false);
+    assert.match(result.reason ?? "", /Engineering Lead/);
+    assert.match(result.reason ?? "", /coder|tester|reviewer|planner/);
+  });
+});
+
+test("canDelegateTo widening applies symmetrically to non-orchestrator callers", () => {
+  const state = stateWith([
+    runtime("Orchestrator", { role: "orchestrator", allowedAgents: ["Engineering Lead"] }),
+    runtime("Engineering Lead", { role: "lead", agentType: "lead", allowedAgents: ["Frontend Coder"], groupName: "Engineering" }),
+    runtime("Frontend Coder", { role: "member", agentType: "coder", groupName: "Engineering" }),
+    runtime("Backend Coder", { role: "member", agentType: "coder", groupName: "Engineering" }),
+  ]);
+  runAsAgent("Engineering Lead", () => {
+    // Backend Coder is typed coder and not in Engineering Lead's direct
+    // reports — the widening lets the lead reach it.
+    assert.deepEqual(canDelegateTo(state, "Engineering Lead", "Backend Coder"), { ok: true });
+    // Frontend Coder is in Engineering Lead's allowedAgents — tree match wins.
+    assert.deepEqual(canDelegateTo(state, "Engineering Lead", "Frontend Coder"), { ok: true });
+  });
 });

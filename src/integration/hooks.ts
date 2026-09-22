@@ -262,7 +262,7 @@ You are running as the visible main session in PLAN mode. Your job is to produce
 # ${planMode ? "Hive plan mode" : "Hive orchestrator mode"}
 ${planBlock}${buildOrchestratorPrompt(state, _ctx)}
 
-Use route_agent when the best specialist is not obvious, delegate to specialists with delegate_agent, then synthesize their findings.
+Use route_agent when the best specialist is not obvious, delegate to specialists with delegate_agent (including typed specialists like coder/tester/reviewer/planner for read-only inspections — not only team leads), then synthesize their findings.
 When calling delegate_agent, ALWAYS provide both required arguments: {"agent":"<exact name from the roster below>","task":"<focused task, paths, and expected output>"}. Never call delegate_agent with {} or omit task/agent.
 Use team_status to inspect live team state and team_conversation(agent: "<name>") to read one specific agent's own transcript. When stable lessons should be preserved, ask the relevant specialist to update its own mental model.
 Keep delegations focused and include enough context for the worker to act independently.

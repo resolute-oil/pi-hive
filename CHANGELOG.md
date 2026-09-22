@@ -11,6 +11,14 @@ without a corresponding section.
 - Hardened release publishing with protected-environment approval, npm trusted
   publishing, reproducibility checks, and attached software bills of materials.
 
+### Fixed
+
+- `canDelegateTo` now widens to any configured agent whose `agent-type` is in
+  `{coder, tester, reviewer, planner}`, so the orchestrator can route
+  read-only inspections directly to a typed specialist without going through a
+  parent lead. `lead`-typed targets stay tree-bound. Orchestrator prompt,
+  `route_agent`, and SETUP.md are updated to match.
+
 ## [0.1.0] - 2026-07-05
 
 ### Added
