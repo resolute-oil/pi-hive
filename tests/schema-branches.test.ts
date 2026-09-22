@@ -24,7 +24,7 @@ test("schema accepts every optional governance, domain, and nested-agent field",
     routingTags: ["plan"], responsibilities: ["author"],
     context: [{ path: "docs/context.md" }], skills: [{ path: "skills/test/SKILL.md" }],
     domain: [{ path: "src", read: true, upsert: false, delete: false, include: ["**/*.ts"], exclude: ["**/*.key"] }],
-    governance: { timeoutMs: 1, maxDelegationDepth: 2, maxRuns: 3, tokenBudget: 4, costBudgetUsd: 5, distillerRuns: 6 },
+    governance: { timeoutMs: 1, maxDelegationDepth: 2, maxRuns: 3, tokenBudget: 4, tokenBudgetScope: "input_output", costBudgetUsd: 5, distillerRuns: 6 },
   });
   const child = agent("Child", { role: "member", agentType: "coder" });
   const lead = agent("Lead", { members: [member], children: [child] });
@@ -33,8 +33,8 @@ test("schema accepts every optional governance, domain, and nested-agent field",
     sharedContext: [{ path: "README.md" }],
     settings: {
       subagentOutputLimit: 100, maxParallel: 2, queueSize: 3,
-      worker: { timeoutMs: 1, maxDelegationDepth: 2, maxRuns: 3, tokenBudget: 4, costBudgetUsd: 5, distillerRuns: 6 },
-      teamBudgets: { maxRuns: 10, tokenBudget: 20, costBudgetUsd: 30 },
+      worker: { timeoutMs: 1, maxDelegationDepth: 2, maxRuns: 3, tokenBudget: 4, tokenBudgetScope: "input_output", costBudgetUsd: 5, distillerRuns: 6 },
+      teamBudgets: { maxRuns: 10, tokenBudget: 20, tokenBudgetScope: "all", costBudgetUsd: 30 },
       secretPaths: [".env", "keys/*.pem"],
       distiller: { enabled: false, conversationLines: 20 },
     },
@@ -67,6 +67,10 @@ test("shape validation rejects malformed optional collections and scalar fields"
     [config({ settings: { teamBudgets: [] } }), /teamBudgets must be an object/],
     [config({ settings: { secretPaths: [""] } }), /secretPaths\[0\]/],
     [config({ settings: { distiller: { enabled: "yes" } } }), /enabled must be true or false/],
+    [config({ settings: { worker: { tokenBudgetScope: "inpt_output" } } }), /tokenBudgetScope must be one of input_output, all/],
+    [config({ settings: { worker: { tokenBudgetScope: 7 } } }), /tokenBudgetScope must be one of input_output, all/],
+    [config({ settings: { teamBudgets: { tokenBudgetScope: "everything" } } }), /tokenBudgetScope must be one of input_output, all/],
+    [config({ orchestrator: agent("O", { governance: { tokenBudgetScope: "cache_only" } }) }), /tokenBudgetScope must be one of input_output, all/],
   ];
   for (const [value, expected] of invalid) assert.throws(() => validateHiveConfigShape(value), expected);
 });

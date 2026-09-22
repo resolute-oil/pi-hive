@@ -498,6 +498,58 @@ test("loadConfig rejects unknown settings and nested keys with path-aware errors
   assert.throws(() => loadConfig(cwd3), /hive\.agents\[0\]\.mysteryCapability is not a recognized configuration key/);
 });
 
+test("loadConfig accepts tokenBudgetScope on settings.worker, settings.teamBudgets, and per-agent governance", () => {
+  const cwd = fixtureProject();
+  const file = join(cwd, ".pi", "hive", "hive-config.yaml");
+  const base = readFileSync(file, "utf8");
+  // worker + teamBudgets both accept the kebab-case form documented in HANDOFF.md.
+  writeFileSync(file, base
+    .replace("  default-tools: read, grep", `  worker:\n    token-budget: 200000\n    token-budget-scope: input_output\n  team-budgets:\n    token-budget: 1000000\n    token-budget-scope: all\n  default-tools: read, grep`));
+  const cfg = loadConfig(cwd);
+  assert.equal(cfg.settings.worker?.tokenBudgetScope, "input_output");
+  assert.equal(cfg.settings.teamBudgets?.tokenBudgetScope, "all");
+
+  // Per-agent governance block shares the same allowlist via the governance() helper.
+  const cwd2 = fixtureProject();
+  const file2 = join(cwd2, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(file2, readFileSync(file2, "utf8").replace("      routing-tags: [frontend, react]", `      routing-tags: [frontend, react]\n      governance:\n        token-budget: 100000\n        token-budget-scope: input_output`));
+  const cfg2 = loadConfig(cwd2);
+  assert.equal(cfg2.agents[0].governance?.tokenBudgetScope, "input_output");
+});
+
+test("loadConfig rejects unknown tokenBudgetScope values with a clear error", () => {
+  // Worker block — typo silently defaulting to "all" would defeat the user's intent,
+  // so the raw-config layer fails loud instead of relying on governance.ts's ?? "all".
+  for (const [badValue, expectedLabel] of [
+    ["inpt_output", "settings.worker.tokenBudgetScope"],
+    ["cache_only", "settings.worker.tokenBudgetScope"],
+  ] as const) {
+    const cwd = fixtureProject();
+    const file = join(cwd, ".pi", "hive", "hive-config.yaml");
+    writeFileSync(file, readFileSync(file, "utf8").replace("  default-tools: read, grep", `  worker:\n    token-budget: 200000\n    token-budget-scope: ${badValue}\n  default-tools: read, grep`));
+    assert.throws(() => loadConfig(cwd), new RegExp(`${expectedLabel} must be one of input_output, all`), `value ${badValue}`);
+  }
+
+  // Non-string value (e.g. an unquoted number from a YAML typo) is also rejected.
+  const cwdNumber = fixtureProject();
+  const fileNumber = join(cwdNumber, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(fileNumber, readFileSync(fileNumber, "utf8").replace("  default-tools: read, grep", "  worker:\n    token-budget: 200000\n    token-budget-scope: 7\n  default-tools: read, grep"));
+  assert.throws(() => loadConfig(cwdNumber), /settings\.worker\.tokenBudgetScope must be one of input_output, all/);
+
+  // teamBudgets uses an inline allowlist, separate from GOVERNANCE_KEYS.
+  const cwdTeam = fixtureProject();
+  const fileTeam = join(cwdTeam, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(fileTeam, readFileSync(fileTeam, "utf8").replace("  default-tools: read, grep", "  team-budgets:\n    token-budget: 1000000\n    token-budget-scope: everything\n  default-tools: read, grep"));
+  assert.throws(() => loadConfig(cwdTeam), /settings\.teamBudgets\.tokenBudgetScope must be one of input_output, all/);
+
+  // Per-agent governance: a typo on a worker agent's own budget scope must surface
+  // at load time so the orchestrator catches it before the worker dispatches.
+  const cwdAgent = fixtureProject();
+  const fileAgent = join(cwdAgent, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(fileAgent, readFileSync(fileAgent, "utf8").replace("      routing-tags: [frontend, react]", "      routing-tags: [frontend, react]\n      governance:\n        token-budget: 100000\n        token-budget-scope: cache_only"));
+  assert.throws(() => loadConfig(cwdAgent), /governance\.tokenBudgetScope must be one of input_output, all/);
+});
+
 test("loadConfig validates raw bounded positive integers before defaults", () => {
   for (const value of ["0", "-1", "1.5", "\"2\"", "NaN", "65"]) {
     const cwd = fixtureProject();
