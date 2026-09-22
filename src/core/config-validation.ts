@@ -48,7 +48,17 @@ function positiveNumber(value: unknown, label: string, max: number): void {
   }
 }
 
-const GOVERNANCE_KEYS = ["timeoutMs", "maxDelegationDepth", "maxRuns", "tokenBudget", "costBudgetUsd", "distillerRuns"] as const;
+const TOKEN_BUDGET_SCOPES = ["input_output", "all"] as const;
+type TokenBudgetScope = typeof TOKEN_BUDGET_SCOPES[number];
+
+function stringEnum<T extends string>(value: unknown, label: string, allowed: readonly T[]): void {
+  if (value === undefined) return;
+  if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) {
+    throw new Error(`${label} must be one of ${allowed.join(", ")} when provided; got ${JSON.stringify(value)}.`);
+  }
+}
+
+const GOVERNANCE_KEYS = ["timeoutMs", "maxDelegationDepth", "maxRuns", "tokenBudget", "tokenBudgetScope", "costBudgetUsd", "distillerRuns"] as const;
 
 function governance(value: unknown, label: string): void {
   if (value === undefined) return;
@@ -58,6 +68,7 @@ function governance(value: unknown, label: string): void {
   positiveInteger(value.maxDelegationDepth, `${label}.maxDelegationDepth`, 128);
   positiveInteger(value.maxRuns, `${label}.maxRuns`, 1_000_000);
   positiveInteger(value.tokenBudget, `${label}.tokenBudget`, Number.MAX_SAFE_INTEGER);
+  stringEnum<TokenBudgetScope>(value.tokenBudgetScope, `${label}.tokenBudgetScope`, TOKEN_BUDGET_SCOPES);
   positiveNumber(value.costBudgetUsd, `${label}.costBudgetUsd`, 1_000_000_000);
   positiveInteger(value.distillerRuns, `${label}.distillerRuns`, 1_000_000);
 }
@@ -199,9 +210,10 @@ export function validateRawConfig(cwd: string, raw: string, parsed: unknown): vo
     governance(settings.worker, "settings.worker");
     if (settings.teamBudgets !== undefined) {
       object(settings.teamBudgets, "settings.teamBudgets");
-      keys(settings.teamBudgets, ["maxRuns", "tokenBudget", "costBudgetUsd"], "settings.teamBudgets");
+      keys(settings.teamBudgets, ["maxRuns", "tokenBudget", "tokenBudgetScope", "costBudgetUsd"], "settings.teamBudgets");
       positiveInteger(settings.teamBudgets.maxRuns, "settings.teamBudgets.maxRuns", 1_000_000);
       positiveInteger(settings.teamBudgets.tokenBudget, "settings.teamBudgets.tokenBudget", Number.MAX_SAFE_INTEGER);
+      stringEnum<TokenBudgetScope>(settings.teamBudgets.tokenBudgetScope, "settings.teamBudgets.tokenBudgetScope", TOKEN_BUDGET_SCOPES);
       positiveNumber(settings.teamBudgets.costBudgetUsd, "settings.teamBudgets.costBudgetUsd", 1_000_000_000);
     }
     if (settings.defaultTools !== undefined) string(settings.defaultTools, "settings.defaultTools");
