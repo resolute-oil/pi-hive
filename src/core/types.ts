@@ -157,6 +157,15 @@ export interface WorkerGovernance {
   maxDelegationDepth?: number;
   maxRuns?: number;
   tokenBudget?: number;
+  // What `tokenBudget` counts. "all" (default) keeps the original cumulative-
+  // of-everything-Pi-reports accounting (input + output + cacheRead + cacheWrite
+  // + reasoning). "input_output" restricts to just the input + output tokens,
+  // which is what fills the model's context window on each call. Pick the
+  // mode that matches how the agent's workload is metered — for an agent
+  // with heavy prompt caching, "input_output" lets a 1M-token budget roughly
+  // track the model's 1M-token context window instead of being dominated by
+  // cached-read reuse.
+  tokenBudgetScope?: "input_output" | "all";
   costBudgetUsd?: number;
   distillerRuns?: number;
 }
@@ -164,6 +173,10 @@ export interface WorkerGovernance {
 export interface TeamBudgets {
   maxRuns?: number;
   tokenBudget?: number;
+  // Same semantics as WorkerGovernance.tokenBudgetScope; configurable per
+  // tier so a project can mix a worker that budgets on input/output with a
+  // team that budgets on the full token total.
+  tokenBudgetScope?: "input_output" | "all";
   costBudgetUsd?: number;
 }
 
