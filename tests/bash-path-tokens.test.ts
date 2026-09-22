@@ -620,11 +620,22 @@ test("filterBashPathTokens — PRESERVE cases that already pass (sanity check)",
   }
 });
 
-test("filterBashPathTokens — path-or-parent existence is the discriminating heuristic", () => {
+test("filterBashPathTokens — stat and shape fallback discriminate real paths from git refs", () => {
+  // Two-tier heuristic:
+  // 1. Stat check: path-or-parent existence is the primary signal.
+  // 2. Shape fallback: when stat is inconclusive (path and parent both
+  //    don't exist), tokens with strong path markers (absolute, `./`/
+  //    `../` prefix, file extension, dotfile) are kept. Tokens without
+  //    markers (like `feature/foo`) are likely git refs and dropped.
+  // This makes the filter robust to sandbox-mediated stat calls (which
+  // can return inaccurate values) without re-introducing git-ref
+  // false positives.
   const fx = freshFixture();
   try {
     const cwd = fx.cwd;
     const ctx = { cwd } as any;
+
+    // — Stat check —
 
     // Path exists → kept.
     writeFileSync(join(cwd, "real-file.txt"), "x");
@@ -634,19 +645,68 @@ test("filterBashPathTokens — path-or-parent existence is the discriminating he
       "no-slash arg stays un-extracted",
     );
 
-    // Path does not exist, parent exists → kept.
+    // Path does not exist, parent exists → kept (stat: parent wins).
     assert.deepEqual(
       sortTokens(filterBashPathTokens(ctx, extractBashPathTokens("cat ./real-file.txt"), "read")),
       sortTokens(["./real-file.txt"]),
       "parent-exists path is kept",
     );
 
-    // Path does not exist, parent does not exist → dropped.
+    // — Shape fallback: kept despite stat failing —
+
+    // `./`-prefixed token with a file extension → kept via shape, even
+    // though neither path nor parent exists. Resilient to sandbox
+    // stat mediation.
     assert.deepEqual(
       sortTokens(filterBashPathTokens(ctx, extractBashPathTokens("cat ./missing-dir/missing.txt"), "read")),
-      sortTokens([]),
-      "neither-path-nor-parent is dropped",
+      sortTokens(["./missing-dir/missing.txt"]),
+      "./-prefixed path with extension kept via shape fallback",
     );
+
+    // File-extension-only path (relative, no `./` prefix) → kept via
+    // shape. Sandbox-resilient.
+    assert.deepEqual(
+      sortTokens(filterBashPathTokens(ctx, extractBashPathTokens("cat nonexistent-dir/file.txt"), "read")),
+      sortTokens(["nonexistent-dir/file.txt"]),
+      "file-extension marker keeps the token via shape fallback",
+    );
+
+    // Dotfile basename → kept via shape.
+    assert.deepEqual(
+      sortTokens(filterBashPathTokens(ctx, extractBashPathTokens("cat feature/.gitignore"), "read")),
+      sortTokens(["feature/.gitignore"]),
+      "dotfile basename keeps the token via shape fallback",
+    );
+
+    // Absolute path whose parent also doesn't exist → kept via shape.
+    assert.deepEqual(
+      sortTokens(filterBashPathTokens(ctx, extractBashPathTokens("cat /nonexistent-root/file.txt"), "read")),
+      sortTokens(["/nonexistent-root/file.txt"]),
+      "absolute path kept via shape fallback",
+    );
+
+    // — Shape fallback: dropped when no markers —
+
+    // Git-ref-like token (`feature/foo`) with no markers → dropped.
+    // This is the canonical false-positive the filter must keep dropping.
+    assert.deepEqual(
+      sortTokens(filterBashPathTokens(ctx, extractBashPathTokens("git log feature/foo"), "read")),
+      sortTokens([]),
+      "git-ref-like token without shape markers is dropped",
+    );
+
+    // Same for `origin/main`, `master`, `refs/heads/main`.
+    for (const cmd of [
+      "git log origin/main",
+      "git log master",
+      "git log refs/heads/main",
+    ]) {
+      assert.deepEqual(
+        sortTokens(filterBashPathTokens(ctx, extractBashPathTokens(cmd), "read")),
+        sortTokens([]),
+        `git-ref-like token in "${cmd}" is dropped`,
+      );
+    }
 
     // Same token in upsert context → kept (filter does not run).
     assert.deepEqual(

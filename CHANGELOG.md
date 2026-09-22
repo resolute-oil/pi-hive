@@ -18,6 +18,14 @@ without a corresponding section.
   read-only inspections directly to a typed specialist without going through a
   parent lead. `lead`-typed targets stay tree-bound. Orchestrator prompt,
   `route_agent`, and SETUP.md are updated to match.
+- `filterBashPathTokens` is now resilient to sandbox-mediated `stat` calls. The
+  filter retains its two-tier heuristic (path-or-parent existence is the
+  primary signal; tokens with strong path-shape markers — absolute, `./`/
+  `../` prefix, file extension, or dotfile basename — are kept via shape
+  fallback when stat is inconclusive). Git-ref-like tokens without markers
+  (`origin/main`, `feature/foo`, `master`) remain dropped. Fixes the deferred
+  "may drop paths the agent could otherwise reach" limitation noted in
+  HANDOFF.md and AGENTS.md.
 
 ## [0.1.0] - 2026-07-05
 
