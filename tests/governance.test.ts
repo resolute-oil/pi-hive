@@ -105,3 +105,63 @@ test("parallel cap without queue fails immediately and queued cancellation frees
   assert.equal(hive.workerQueue?.length, 0);
   releaseWorkerSlot(hive);
 });
+
+// tokenBudgetScope lets a project's hive-config.yaml restrict the budget to
+// just input + output tokens (what fills the model's context window on each
+// call). Default "all" preserves the legacy cumulative-of-everything
+// behavior; this is the only test surface that documents the contract.
+test("tokenBudgetScope: input_output excludes cache reads/writes/reasoning from the budget", () => {
+  const worker = runtime("worker", {
+    inputTokens: 100_000,
+    outputTokens: 50_000,
+    // Each of these would push the budget past 200k under the legacy "all"
+    // accounting; under "input_output" they must be ignored entirely.
+    cacheReadTokens: 800_000,
+    cacheWriteTokens: 50_000,
+    reasoningTokens: 200_000,
+  });
+  const hive = state([worker], { worker: { tokenBudget: 200_000, tokenBudgetScope: "input_output" } });
+  // input + output = 150k, under the 200k cap → no block.
+  assert.equal(checkDispatchBudgets(hive, worker, 1), undefined);
+  assert.equal(budgetRemaining(hive, worker).worker.tokens, 50_000);
+});
+
+test("tokenBudgetScope: all (default) keeps the cumulative-of-everything accounting", () => {
+  const worker = runtime("worker", {
+    inputTokens: 100_000,
+    outputTokens: 50_000,
+    cacheReadTokens: 900_000,
+  });
+  // No scope set → defaults to "all". Cache reads count toward the cap.
+  const hive = state([worker], { worker: { tokenBudget: 1_000_000 } });
+  assert.equal(checkDispatchBudgets(hive, worker, 1)?.resource, "tokens");
+  assert.equal(budgetRemaining(hive, worker).worker.tokens, 0);
+});
+
+test("tokenBudgetScope on teamBudgets is independent of the worker scope", () => {
+  const worker = runtime("worker", {
+    inputTokens: 100_000,
+    outputTokens: 50_000,
+    cacheReadTokens: 900_000,
+  });
+  // Worker uses "input_output" (cache ignored). Team uses "all" (cache counts).
+  const hive = state([worker], {
+    worker: { tokenBudget: 200_000, tokenBudgetScope: "input_output" },
+    teamBudgets: { tokenBudget: 1_000_000, tokenBudgetScope: "all" },
+  });
+  // checkDispatchBudgets returns the FIRST blocking condition; with the team
+  // cap exhausted it returns the team block, not undefined. Verify the two
+  // scopes are independently applied via budgetRemaining instead.
+  const remaining = budgetRemaining(hive, worker);
+  assert.equal(remaining.worker.tokens, 50_000, "worker scope ignores cache");
+  assert.equal(remaining.team.tokens, 0, "team scope counts cache");
+});
+
+test("tokenBudgetScope defaults to 'all' when omitted (backward compatibility)", () => {
+  // input+output = 400k (under 1M), but with cache reads the cumulative is
+  // 1.1M which should block under the legacy "all" accounting.
+  const worker = runtime("worker", { inputTokens: 200_000, outputTokens: 200_000, cacheReadTokens: 700_000 });
+  // No scope set → defaults to "all". Cache reads count toward the cap.
+  const hive = state([worker], { worker: { tokenBudget: 1_000_000 } });
+  assert.equal(checkDispatchBudgets(hive, worker, 1)?.resource, "tokens");
+});
