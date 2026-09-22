@@ -8,7 +8,7 @@ import { checkPlannerStages, checkTypePolicy } from "../src/engine/policy.ts";
 import { bashMutationKind, enforceDomainForTool, isCommitCommand, readOnlyCommandDecision } from "../src/engine/domain.ts";
 import { checkReservedPath } from "../src/engine/reserved-paths.ts";
 import { runAsAgent } from "../src/engine/session.ts";
-import { buildDistillerPrompt, buildOperatingContract, buildWorkerPrompt, extractTagged } from "../src/engine/prompts.ts";
+import { buildBudgetVisibility, buildDistillerPrompt, buildOperatingContract, buildWorkerPrompt, extractTagged } from "../src/engine/prompts.ts";
 import type { AgentRuntime, AgentType, HiveState, PlanStage } from "../src/core/types.ts";
 
 function runtime(name: string, extra: Partial<AgentRuntime["config"]> = {}): AgentRuntime {
@@ -407,6 +407,88 @@ test("buildOperatingContract states the type's boundary", () => {
   assert.match(buildOperatingContract(runtime("C", { agentType: "coder", network: true })), /coder.*interpreter.*Network capability/is);
   assert.match(buildOperatingContract(runtime("T", { agentType: "tester", network: false })), /tester.*interpreter.*Network commands are disabled/is);
   assert.equal(buildOperatingContract(runtime("U")), ""); // no type → no block
+});
+
+// ── Per-turn budget visibility (deferred item from HANDOFF.md) ──────────
+// Build a minimal state with budget settings so we can exercise
+// `buildBudgetVisibility` without spinning up a full pi session.
+
+function stateWithSettings(settings: { worker?: any; teamBudgets?: any }, runtimes: AgentRuntime[] = []): HiveState {
+  const state = stateWith(runtimes);
+  state.config = {
+    orchestrator: { name: "Orchestrator", path: "o.md" },
+    agents: [],
+    sharedContext: [],
+    settings,
+  } as any;
+  return state;
+}
+
+test("buildBudgetVisibility returns empty when no budget is configured", () => {
+  const r = runtime("Coder", { agentType: "coder", role: "member" });
+  const state = stateWithSettings({}, [r]);
+  assert.equal(buildBudgetVisibility(state, r), "");
+});
+
+test("buildBudgetVisibility surfaces worker-tier budget when configured", () => {
+  const r = runtime("Coder", { agentType: "coder", role: "member" });
+  const state = stateWithSettings({ worker: { tokenBudget: 1_000_000, maxRuns: 20, costBudgetUsd: 25 } }, [r]);
+  const out = buildBudgetVisibility(state, r);
+  assert.match(out, /## Remaining budget/);
+  assert.match(out, /Self-regulate to avoid being blocked/);
+  assert.match(out, /worker:.*runs=20.*tokens=1\.0M.*cost=\$25\.00/);
+});
+
+test("buildBudgetVisibility surfaces team-tier budget when configured", () => {
+  const r = runtime("Coder", { agentType: "coder", role: "member" });
+  const state = stateWithSettings({ teamBudgets: { tokenBudget: 5_000_000, maxRuns: 100 } }, [r]);
+  const out = buildBudgetVisibility(state, r);
+  assert.match(out, /## Remaining budget/);
+  assert.match(out, /team:.*runs=100.*tokens=5\.0M/);
+});
+
+test("buildBudgetVisibility formats large numbers with K/M suffix", () => {
+  const r = runtime("Coder", { agentType: "coder", role: "member" });
+  const state = stateWithSettings({ worker: { tokenBudget: 250_000 } }, [r]);
+  const out = buildBudgetVisibility(state, r);
+  assert.match(out, /tokens=250\.0K/);
+});
+
+test("buildBudgetVisibility reflects usage: used tokens reduce the remaining", () => {
+  const r = runtime("Coder", { agentType: "coder", role: "member" });
+  r.inputTokens = 100_000;
+  r.outputTokens = 50_000;
+  const state = stateWithSettings({ worker: { tokenBudget: 1_000_000 } }, [r]);
+  const out = buildBudgetVisibility(state, r);
+  // 1_000_000 - 150_000 = 850_000 = 850.0K
+  assert.match(out, /tokens=850\.0K/);
+});
+
+test("buildBudgetVisibility merges settings.worker with runtime.config.governance", () => {
+  // Per-agent governance overrides settings.worker defaults; the section
+  // shows the merged value (effectiveWorkerGovernance).
+  const r = runtime("Coder", { agentType: "coder", role: "member", governance: { tokenBudget: 500_000 } });
+  const state = stateWithSettings({ worker: { tokenBudget: 5_000_000, costBudgetUsd: 25 } }, [r]);
+  const out = buildBudgetVisibility(state, r);
+  // Effective budget = 500_000 (per-agent override wins).
+  assert.match(out, /tokens=500\.0K/);
+  // Cost still comes from settings.worker (not overridden per-agent).
+  assert.match(out, /cost=\$25\.00/);
+});
+
+test("buildBudgetVisibility omits the section entirely when nothing is configured", () => {
+  // Worker budget and team budget both undefined — return "".
+  const r = runtime("Coder", { agentType: "coder", role: "member" });
+  const state = stateWithSettings({}, [r]);
+  assert.equal(buildBudgetVisibility(state, r), "");
+});
+
+test("buildWorkerPrompt embeds the budget section when configured", () => {
+  const r = runtime("Coder", { agentType: "coder", role: "member", allowedAgents: [] });
+  const state = stateWithSettings({ worker: { tokenBudget: 200_000 } }, [r]);
+  const prompt = buildWorkerPrompt(state, { cwd: "/repo" } as any, r, "do the thing");
+  assert.match(prompt, /## Remaining budget/);
+  assert.match(prompt, /tokens=200\.0K/);
 });
 
 test("worker prompt covers lead delegation and leaf fallback context", () => {
