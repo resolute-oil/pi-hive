@@ -51,6 +51,17 @@ without a corresponding section.
   positional values requires per-flag-value knowledge that's documented as
   a deferred hardening. Addresses the AGENTS.md "Bare bash read paths may
   evade static domain extraction" accepted risk in a small, targeted way.
+- macOS realpath artifacts in test fixtures across `safe-path.test.ts`,
+  `domain-routing.test.ts`, and `openspec.test.ts`. The source code uses
+  `realpathSync.native()` to canonicalize paths (see `src/core/safe-path.ts`
+  and `src/engine/openspec.ts`), so test assertions against `canonicalRoot`
+  / `canonicalPath` must canonicalize the tmpdir the same way. On macOS
+  (and CI setups where `/tmp` is symlinked), the OS exposes the real
+  path as `/private/var/folders/...` rather than `/var/folders/...`,
+  which previously caused 5 test failures. Each affected test now wraps
+  `mkdtempSync(...)` in `realpathSync(...)` so the assertion matches
+  what the source code computed. Closes 5 of the 17 pre-existing baseline
+  test failures.
 
 ### Added
 
