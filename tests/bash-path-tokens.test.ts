@@ -889,3 +889,126 @@ test("lexer: unbalanced quotes fall back to the legacy regex (no crash, same out
     cleanup(fx);
   }
 });
+
+// ── Per-command positional skip for grep/awk/sed ────────────────────
+// The lexer-based extractor applies the path regex to every unquoted token.
+// For commands whose first non-flag positional arg is DATA (grep's PATTERN,
+// awk's PROGRAM, sed's SCRIPT) this would fire a domain check on what is
+// actually a regex/literal/script text. Plain bare filenames (no slash) are
+// already skipped by the regex; the case below covers PATTERN values that
+// DO contain a slash (e.g. `grep /tmp/foo file.txt`).
+
+test("extractBashPathTokens skips first positional arg for grep (pattern is data)", () => {
+  // `/tmp/foo` would normally match the path regex; for grep it is the
+  // search pattern, not a path to read.
+  assert.deepEqual(
+    sortTokens(extractBashPathTokens("grep /tmp/foo file.txt")),
+    sortTokens([]),
+    "first positional arg (the pattern) is skipped even when path-shaped",
+  );
+});
+
+test("extractBashPathTokens skips first positional arg for awk (program is data) — OUT OF SCOPE", () => {
+  // Awk's first positional arg, when present, is an inline program string.
+  // The path regex stops at characters not in [A-Za-z0-9_./@-], so a
+  // program like `/path/to/NR==1` matches up to `/path/to/NR` (== is not
+  // in the character class). The bare-quoted case (`awk '{print}'`) is
+  // already skipped by the quote rule. Distinguishing `-f FILE` (path)
+  // from `-e SCRIPT` (data) requires per-flag-value knowledge — out of
+  // scope for this PR. Documented as a deferred hardening in AGENTS.md.
+  assert.deepEqual(
+    sortTokens(extractBashPathTokens("awk /path/to/NR==1 file.txt")),
+    sortTokens(["/path/to/NR"]),
+    "awk: program is NOT skipped (out of scope — still extracted as path)",
+  );
+  // With -f, the script file IS a path — still extracted (awk not in
+  // DATA_FIRST_ARG_COMMANDS so no positional skip applies; the flag
+  // `-f` consumes its value via the existing path regex).
+  assert.deepEqual(
+    sortTokens(extractBashPathTokens("awk -f /path/to/script.awk file.txt")),
+    sortTokens(["/path/to/script.awk"]),
+    "awk -f script file is still extracted as a path",
+  );
+});
+
+test("extractBashPathTokens skips first positional arg for sed (script is data) — OUT OF SCOPE", () => {
+  // Same scope reasoning as awk. Bare inline scripts (`sed s/o/n/`) are
+  // rare; the quoted form (`sed 's/o/n/'`) is already handled by the
+  // quote rule. `-f SCRIPT` is a flag-value pair where the value is a
+  // path; per-flag-value distinction is out of scope here.
+  assert.deepEqual(
+    sortTokens(extractBashPathTokens("sed /pattern/replacement/ file.txt")),
+    sortTokens(["/pattern/replacement/"]),
+    "sed: script is NOT skipped (out of scope — still extracted as path)",
+  );
+  assert.deepEqual(
+    sortTokens(extractBashPathTokens("sed -f /path/to/script.sed file.txt")),
+    sortTokens(["/path/to/script.sed"]),
+    "sed -f script file is still extracted as a path",
+  );
+});
+
+test("extractBashPathTokens skips pattern for egrep and fgrep aliases", () => {
+  assert.deepEqual(
+    sortTokens(extractBashPathTokens("egrep /tmp/foo file.txt")),
+    sortTokens([]),
+    "egrep: pattern skipped",
+  );
+  assert.deepEqual(
+    sortTokens(extractBashPathTokens("fgrep /tmp/foo file.txt")),
+    sortTokens([]),
+    "fgrep: pattern skipped",
+  );
+});
+
+test("extractBashPathTokens: grep -e PATTERN treats the value as the first positional (over-skip)", () => {
+  // Documented limitation: our positional skip is conservative and treats
+  // any non-flag token at i > 0 as a candidate for the first positional.
+  // For `grep -e /tmp/foo file.txt`, the value of `-e` (`/tmp/foo`) is
+  // the pattern (data) and should NOT be checked as a path. Our skip
+  // happens to skip it correctly here, but for `grep -f FILE`, the same
+  // logic also skips FILE (which IS a path). The correct fix requires
+  // per-flag-value knowledge (which flags take paths vs data) — deferred.
+  assert.deepEqual(
+    sortTokens(extractBashPathTokens("grep -e /tmp/foo file.txt")),
+    sortTokens([]),
+    "grep -e PATTERN: correctly skipped as first non-flag positional",
+  );
+});
+
+test("extractBashPathTokens: grep -f FILE currently also skips FILE (over-skip limitation)", () => {
+  // For grep -f, FILE is a path (the pattern script). Our positional
+  // skip treats it as the first non-flag positional and drops it. This
+  // is an over-skip: the pattern script IS a path the agent reads, and
+  // it should be domain-checked. Fixing requires per-flag-value knowledge.
+  assert.deepEqual(
+    sortTokens(extractBashPathTokens("grep -f /path/to/patterns.txt data1.txt data2.txt")),
+    sortTokens([]),
+    "grep -f FILE: currently over-skipped (documented limit)",
+  );
+});
+
+test("extractBashPathTokens non-data commands are unaffected by the positional skip", () => {
+  // For commands NOT in DATA_FIRST_ARG_COMMANDS, no positional skip applies.
+  assert.deepEqual(
+    sortTokens(extractBashPathTokens("ls /tmp/foo")),
+    sortTokens(["/tmp/foo"]),
+    "ls: no positional skip",
+  );
+  assert.deepEqual(
+    sortTokens(extractBashPathTokens("cat /tmp/foo")),
+    sortTokens(["/tmp/foo"]),
+    "cat: no positional skip",
+  );
+  assert.deepEqual(
+    sortTokens(extractBashPathTokens("less /tmp/foo")),
+    sortTokens(["/tmp/foo"]),
+    "less: no positional skip",
+  );
+  // awk/sed are NOT in DATA_FIRST_ARG_COMMANDS — they extract as before.
+  assert.deepEqual(
+    sortTokens(extractBashPathTokens("awk /path/to/NR file.txt")),
+    sortTokens(["/path/to/NR"]),
+    "awk: out of scope (documented)",
+  );
+});

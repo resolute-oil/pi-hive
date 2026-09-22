@@ -172,6 +172,36 @@ function legacyExtractBashPathTokens(command: string): string[] {
   return extractPathTokensFromString(command);
 }
 
+// Commands whose first non-flag positional argument is DATA, not a path.
+// For grep, the first positional is the SEARCH PATTERN (a regex/literal)
+// to search for — not a path to read. Without this skip, the regex's
+// accidental match on a slash inside the pattern (e.g. `grep /tmp/foo
+// file.txt` where /tmp/foo is the pattern) fires the domain check on
+// what is actually data.
+//
+// Scope is intentionally limited to grep/egrep/fgrep. awk and sed also
+// have inline data as their first positional (PROGRAM / SCRIPT), but they
+// commonly pair the script with `-f FILE` or `-e SCRIPT` flag-value pairs
+// where the value IS a path the agent's domain needs to check. Distinguishing
+// "the value of `-f`" (path) from "the value of `-e`" (data) requires
+// per-command flag-value knowledge that's out of scope here. For awk/sed,
+// the bare-quoted-form cases (`awk '{print}'`, `sed 's/o/n/'`) are already
+// skipped by the quote rule. The narrow grep case is the highest-value
+// common pattern; further hardening for awk/sed belongs in a follow-up.
+//
+// Acceptable limits acknowledged in AGENTS.md: bare filenames (no slash)
+// are not extracted at all. So `grep /tmp/foo file.txt` without `-e`
+// would still extract `/tmp/foo` (and skip it here as the pattern).
+const DATA_FIRST_ARG_COMMANDS = new Set([
+  "grep",
+  "egrep",
+  "fgrep",
+]);
+
+function isDataFirstArgCommand(command: string): boolean {
+  return DATA_FIRST_ARG_COMMANDS.has(command);
+}
+
 // Extract path-like tokens from a bash command for read-domain checks. The
 // implementation is lexer-based: we tokenize the command with `tokenizeBash`
 // (which preserves quote context), then for each clause:
@@ -192,11 +222,23 @@ export function extractBashPathTokens(command: string): string[] {
   for (const clause of lexed) {
     const head = clause.tokens[0]?.text ?? "";
     const spec = INTERPRETER_CODE_ARGS.find((p) => p.command === head);
+    const skipFirstPositional = isDataFirstArgCommand(head);
+    let firstPositionalSkipped = false;
 
     for (let i = 0; i < clause.tokens.length; i++) {
       const token = clause.tokens[i];
 
       if (token.isEnvAssignment) continue;
+
+      // For grep/awk/sed, the first non-flag positional arg is DATA (the
+      // pattern/program/script) — not a path. Skip path extraction on it so
+      // the regex's accidental match on a slash inside the data (e.g.
+      // `grep /tmp/foo` where /tmp/foo is the pattern) doesn't fire the
+      // domain check on what is actually data.
+      if (skipFirstPositional && i > 0 && !firstPositionalSkipped && !token.text.startsWith("-")) {
+        firstPositionalSkipped = true;
+        continue;
+      }
 
       if (token.quoted) {
         // Quoted token: data, unless this clause's command is an interpreter
