@@ -137,19 +137,96 @@ export function extractToolPaths(toolName: string, input: any): string[] {
   return Array.from(new Set(paths));
 }
 
-// Extract path-like tokens from a bash command for read-domain checks. NOTE
-// (accepted limitation, Phase 5.3): the regex only matches tokens containing a
-// `/` (or an absolute path). A BARE filename with no slash — `cat secrets.env`,
-// `less .env` — yields no token, so no read-domain check runs and the read
-// fails OPEN. Mutations still fail CLOSED (bashMutationKind matches the command
-// verb, not the path). Tightening this would false-positive on ordinary bash
-// words (every argument looks like a filename), so it is left as documented risk
-// alongside the interpreter limit.
+// Path-shaped regex shared by the lexer-based extractor and the legacy
+// fallback. Matches relative or absolute paths containing a `/`. Same
+// accepted limitation as before: a BARE filename with no slash fails OPEN
+// for reads, since tightening would false-positive on every bash word.
+const PATH_TOKEN_RE = /(?:^|\s)(\.{0,2}\/?[A-Za-z0-9_.-]+\/[A-Za-z0-9_./@-]+|\/[A-Za-z0-9_./@-]+)/g;
+const URL_PREFIX_RE = /^https?:\/\//;
+
+function isUrlToken(token: string): boolean {
+  return URL_PREFIX_RE.test(token);
+}
+
+function extractPathTokensFromString(text: string): string[] {
+  const matches = text.match(PATH_TOKEN_RE) || [];
+  return Array.from(new Set(matches.map((m) => m.trim()).filter((t) => !isUrlToken(t))));
+}
+
+// Legacy fallback: regex on the raw command string. Used when the lexer
+// rejects the command (unbalanced quotes, background job, etc.). Behavior
+// matches the original implementation exactly.
+function legacyExtractBashPathTokens(command: string): string[] {
+  return extractPathTokensFromString(command);
+}
+
+// Extract path-like tokens from a bash command for read-domain checks. The
+// implementation is lexer-based: we tokenize the command with `tokenizeBash`
+// (which preserves quote context), then for each clause:
+//   - skip env-var assignments (`VAR=value`);
+//   - skip quoted tokens UNLESS the clause is a code-executing interpreter
+//     (eval, bash -c, perl -e, ...) whose quoted argument is recursed into;
+//   - apply the existing path regex to every other (unquoted, non-env) token.
+// This eliminates false positives where a path-shaped substring appears
+// inside a quoted string the agent doesn't operate on as a filesystem path
+// (e.g. `"no /tmp ignore line"` in an echo argument), while preserving
+// protection for code-execution forms like `eval "cat /etc/passwd"`.
 export function extractBashPathTokens(command: string): string[] {
-  const matches = command.match(/(?:^|\s)(\.{0,2}\/?[A-Za-z0-9_.-]+\/[A-Za-z0-9_./@-]+|\/[A-Za-z0-9_./@-]+)/g) || [];
-  return Array.from(new Set(matches
-    .map((match) => match.trim())
-    .filter((token) => !token.startsWith("http://") && !token.startsWith("https://"))));
+  const lexed = tokenizeBash(command);
+  if (lexed === null) return legacyExtractBashPathTokens(command);
+
+  const out = new Set<string>();
+
+  for (const clause of lexed) {
+    const head = clause.tokens[0]?.text ?? "";
+    const spec = INTERPRETER_CODE_ARGS.find((p) => p.command === head);
+
+    for (let i = 0; i < clause.tokens.length; i++) {
+      const token = clause.tokens[i];
+
+      if (token.isEnvAssignment) continue;
+
+      if (token.quoted) {
+        // Quoted token: data, unless this clause's command is an interpreter
+        // whose quoted argument is code.
+        if (spec) {
+          const recurse = spec.mode === "shell"
+            ? (inner: string) => extractBashPathTokens(inner)
+            : (inner: string) => extractPathTokensFromString(inner);
+          if (spec.flag === null) {
+            // eval: any quoted token after `eval` is code (the rest are
+            // concatenated and re-parsed by the shell).
+            if (i > 0) {
+              for (const path of recurse(token.text)) out.add(path);
+            }
+          } else {
+            // bash -c, sh -c, perl -e, python -c, ruby -e, node -e: the token
+            // immediately following the named flag is the code argument.
+            // Accept either the exact flag (`-c`) or a combined-flag token
+            // (`-lc`, `-cl`, `-pei`, etc.) that contains the flag char — bash
+            // parses these as `-l -c`, `-c -l`, etc.
+            const flagChar = spec.flag.slice(1);
+            const flagIdx = clause.tokens.findIndex((t, idx) => {
+              if (idx === 0) return false;
+              if (t.text === spec.flag) return true;
+              if (t.text === "--") return false;
+              if (!t.text.startsWith("-")) return false;
+              return t.text.includes(flagChar);
+            });
+            if (flagIdx !== -1 && i === flagIdx + 1) {
+              for (const path of recurse(token.text)) out.add(path);
+            }
+          }
+        }
+        continue;
+      }
+
+      // Unquoted, non-env-assignment token: apply the path regex.
+      for (const path of extractPathTokensFromString(token.text)) out.add(path);
+    }
+  }
+
+  return Array.from(out);
 }
 
 // Bash path tokens are a regex match, so they conflate real paths with
@@ -229,6 +306,111 @@ function parseShellCommands(command: string): ParsedCommand[] | null {
   else if (pendingOperator) return null;
   return commands.length ? commands : null;
 }
+
+// Path-extraction needs to know whether each token came from inside quotes
+// (data argument — skip) or unquoted (potentially a filesystem path the agent
+// operates on). `parseShellCommands` strips quotes on entry, so it can't
+// answer that. `tokenizeBash` is its sibling: same shell syntax, but each
+// returned token carries `quoted` and `isEnvAssignment` flags. Returns null
+// on unbalanced quotes — the caller falls back to the legacy regex.
+type LexToken = { text: string; quoted: boolean; isEnvAssignment: boolean };
+type LexClause = { tokens: LexToken[]; operatorBefore?: string };
+const ENV_ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+function tokenizeBash(command: string): LexClause[] | null {
+  const clauses: LexClause[] = [];
+  let tokens: LexToken[] = [];
+  let text = "";
+  let quoted = false;
+  let quote = "";
+  let escaped = false;
+  let pendingOperator: string | undefined;
+  const pushToken = () => {
+    if (text) {
+      tokens.push({ text, quoted, isEnvAssignment: ENV_ASSIGNMENT_RE.test(text) });
+      text = "";
+      quoted = false;
+    }
+  };
+  const pushClause = (operator?: string) => {
+    pushToken();
+    if (!tokens.length) return false;
+    clauses.push({ tokens, operatorBefore: pendingOperator });
+    tokens = [];
+    pendingOperator = operator;
+    return true;
+  };
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (escaped) { text += ch; escaped = false; continue; }
+    if (ch === "\\" && quote !== "'") { escaped = true; continue; }
+    if (quote) {
+      if (ch === quote) quote = "";
+      else text += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; quoted = true; continue; }
+    if (/\s/.test(ch)) { pushToken(); continue; }
+    if (ch === ";" || ch === "|" || ch === "&") {
+      const pair = command.slice(i, i + 2);
+      const op = pair === "||" || pair === "&&" ? pair : ch;
+      if (op === "&") {
+        // `&` is ambiguous by itself (background job), UNLESS it's part of a
+        // shell redirection: `>&` (preceded by `>` in the current token), or
+        // `&>` / `&>>` (combined redirect at the start of a token). Recognize
+        // those so common idioms like `2>&1` and `cmd &> file` don't force a
+        // fallback to the legacy regex.
+        if (text.endsWith(">")) { text += ch; continue; }
+        if (pair === "&>") { text += "&>"; i++; continue; }
+        return null; // bare background job
+      }
+      if (!pushClause(op)) return null;
+      if (op.length === 2) i++;
+      continue;
+    }
+    text += ch;
+  }
+  if (escaped || quote) return null;
+  pushToken();
+  if (tokens.length) clauses.push({ tokens, operatorBefore: pendingOperator });
+  else if (pendingOperator) return null;
+  return clauses.length ? clauses : null;
+}
+
+// Code-executing interpreters whose quoted argument is *code*, not data.
+// Recursing into these quoted arguments restores extraction for cases like
+// `eval "cat /etc/passwd"` and `bash -c "cat /etc/passwd"`.
+//
+// Two modes:
+//   - "shell": the quoted argument is itself bash — recurse with bash
+//     parsing (eval, bash -c, sh -c, ...).
+//   - "script": the quoted argument is a script in another language — apply
+//     the path regex directly to the raw text. Quoting inside the script
+//     (e.g. Python's `open('/etc/passwd')`) uses the language's own string
+//     syntax, not bash, so a bash-aware lexer would (incorrectly) skip the
+//     path. Code-mode bypasses quote-awareness entirely.
+//
+// AWK, sed, find -exec, and similar DSLs are deliberately absent — their
+// quoted arguments are accepted limits per AGENTS.md. Adding a row is a
+// one-line change with a clear test case.
+const INTERPRETER_CODE_ARGS: ReadonlyArray<{
+  command: string;
+  flag: string | null;
+  mode: "shell" | "script";
+}> = [
+  { command: "eval",    flag: null, mode: "shell"  },
+  { command: "bash",    flag: "-c", mode: "shell"  },
+  { command: "sh",      flag: "-c", mode: "shell"  },
+  { command: "dash",    flag: "-c", mode: "shell"  },
+  { command: "ksh",     flag: "-c", mode: "shell"  },
+  { command: "zsh",     flag: "-c", mode: "shell"  },
+  { command: "ash",     flag: "-c", mode: "shell"  },
+  { command: "perl",    flag: "-e", mode: "script" },
+  { command: "python",  flag: "-c", mode: "script" },
+  { command: "python3", flag: "-c", mode: "script" },
+  { command: "ruby",    flag: "-e", mode: "script" },
+  { command: "node",    flag: "-e", mode: "script" },
+];
 
 const GIT_GLOBAL_VALUE_OPTIONS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
 
@@ -340,7 +522,14 @@ export function bashMutationKind(command: string): "delete" | "upsert" | "read" 
   // Upserts include every Git repository/history mutation, patch/archive
   // extraction, package installation, and known file-writing command.
   if (gitCommands.some((subcommand) => GIT_MUTATION_COMMANDS.has(subcommand))) return "upsert";
-  if (/\b(mv|cp|touch|mkdir|chmod|chown|ln|truncate|rsync|install|patch|unzip|gunzip|bunzip2|unxz)\b|>>?|\bsed\s+-i\b|\bperl\s+-pi\b|\btee\b/.test(command)) return "upsert";
+  if (/\b(mv|cp|touch|mkdir|chmod|chown|ln|truncate|rsync|install|patch|unzip|gunzip|bunzip2|unxz)\b|\bsed\s+-i\b|\bperl\s+-pi\b|\btee\b/.test(command)) return "upsert";
+  // G6: stdout/appender redirect (`>`, `>>`) is a file mutation; stderr /
+  // combined / fd-target redirects (`2>`, `2>&1`, `&>`, `&>>`, `>&N`,
+  // `N>&M`) are stream plumbing and don't classify the command as an upsert.
+  // Strip the non-mutating forms before matching `>` / `>>` so `2>&1`
+  // doesn't trip this branch.
+  const noStreamPlumbing = command.replace(/[2-9]>>?|&>>?|>&\d|[2-9]>&\d/g, "");
+  if (/>>?/.test(noStreamPlumbing)) return "upsert";
   if (/\b(?:tar|bsdtar)\s+(?:-[^\s]*[xcru]|[xcru][^\s]*|--(?:extract|create|append|update))|\b7z\s+(?:x|e|a)\b|\bjar\s+[xcu]/.test(command)) return "upsert";
   if (/\b(?:npm|pnpm|yarn|bun)\s+(?:i|install|add|remove|uninstall)\b|\b(?:pip|pip3|apt|apt-get|dnf|yum|apk|cargo|gem|go)\s+(?:install|add)\b|\bcomposer\s+(?:install|require|remove)\b/.test(command)) return "upsert";
   if (/\bcurl\b[^\n]*(?:\s-o(?:\s|$)|\s--output(?:=|\s)|\s-O(?:\s|$)|\s--remote-name(?:\s|$))/.test(command)) return "upsert";
