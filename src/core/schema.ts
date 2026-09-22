@@ -22,12 +22,18 @@ function assertNumber(value: unknown, label: string) {
   if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value))) throw new Error(`${label} must be a finite number when provided.`);
 }
 
+function assertStringEnum(value: unknown, label: string, allowed: readonly string[]) {
+  if (value === undefined) return;
+  if (typeof value !== "string" || !allowed.includes(value)) throw new Error(`${label} must be one of ${allowed.join(", ")} when provided; got ${JSON.stringify(value)}.`);
+}
+
 function validateGovernance(value: unknown, label: string) {
   if (value === undefined) return;
   assertObject(value, label);
   for (const key of ["timeoutMs", "maxDelegationDepth", "maxRuns", "tokenBudget", "costBudgetUsd", "distillerRuns"] as const) {
     assertNumber(value[key], `${label}.${key}`);
   }
+  assertStringEnum(value.tokenBudgetScope, `${label}.tokenBudgetScope`, ["input_output", "all"]);
 }
 
 function validateKnowledgeRefs(value: unknown, label: string) {
@@ -138,6 +144,7 @@ export function validateHiveConfigShape(config: HiveConfig): void {
       assertObject(config.settings.teamBudgets, "settings.teamBudgets");
       assertNumber(config.settings.teamBudgets.maxRuns, "settings.teamBudgets.maxRuns");
       assertNumber(config.settings.teamBudgets.tokenBudget, "settings.teamBudgets.tokenBudget");
+      assertStringEnum(config.settings.teamBudgets.tokenBudgetScope, "settings.teamBudgets.tokenBudgetScope", ["input_output", "all"]);
       assertNumber(config.settings.teamBudgets.costBudgetUsd, "settings.teamBudgets.costBudgetUsd");
     }
     validateStringList(config.settings.secretPaths, "settings.secretPaths");
