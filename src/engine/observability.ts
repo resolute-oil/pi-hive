@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import type { AgentConfig, AgentRuntime, HiveState, HiveTeam } from "../core/types";
-import type { HiveStateSnapshot, HiveTelemetryEvent, HiveTelemetryEventType, JsonRecord, TopologyNode } from "../shared/telemetry";
+import type { HiveStateSnapshot, HiveTelemetryEvent, HiveTelemetryEventType, JsonRecord, TelemetryAgentStatus, TopologyNode } from "../shared/telemetry";
 import { tryResolveProjectIdentity } from "../shared/project-identity";
 import { agentSlug, truncateMiddle } from "../core/utils";
 import { currentAgentName } from "./session";
@@ -129,7 +129,7 @@ export function runtimeSummary(state: HiveState, runtime: AgentRuntime): NonNull
     group: runtime.config.groupName || "Orchestration",
     role: runtime.config.role,
     agentType: runtime.config.agentType,
-    status: runtime.status,
+    status: runtime.status as TelemetryAgentStatus, // runtime AgentStatus includes "queued"; the telemetry wire vocabulary collapses it to "idle" (dormant, no work in flight). The dashboard's statusKey() already defaults unknown values to "idle", so the rendered behavior is identical.
     task: runtime.task,
     lastWork: truncateMiddle(runtime.lastWork || "", 400),
     runCount: runtime.runCount,
@@ -175,7 +175,7 @@ function withOrchestratorUsage(
   if (!orch || summary.role !== "orchestrator") return summary;
   return {
     ...summary,
-    status: orch.status || summary.status,
+    status: (orch.status || summary.status) as TelemetryAgentStatus, // same "queued" → "idle" collapse as runtimeSummary above; the orchestrator never queues so the cast is always identity here.
     elapsedMs: orch.elapsedMs ?? summary.elapsedMs,
     runStartInputTokens: orch.runStartInputTokens ?? summary.runStartInputTokens,
     runStartOutputTokens: orch.runStartOutputTokens ?? summary.runStartOutputTokens,

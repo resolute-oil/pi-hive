@@ -26,6 +26,17 @@ without a corresponding section.
   (`origin/main`, `feature/foo`, `master`) remain dropped. Fixes the deferred
   "may drop paths the agent could otherwise reach" limitation noted in
   HANDOFF.md and AGENTS.md.
+- `AgentStatus` now includes `"queued"`. The activity panel widget already
+  rendered the state correctly (`statusIcon` defaults to `"•"`, `metaOf`
+  returns `"queued"` for non-running non-done non-error with no elapsed/tools,
+  and the row draws exactly one separator dash); the union just wasn't
+  accepting the literal, which produced 3 typecheck errors in
+  `tests/activity-panel.test.ts` on the previous baseline. Two casts in
+  `src/engine/observability.ts` (`runtimeSummary`, `withOrchestratorUsage`)
+  bridge the runtime vocabulary to the telemetry wire format where `"queued"`
+  collapses to `"idle"` (both mean dormant, no work in flight; the dashboard's
+  `statusKey()` already defaults unknown values to `"idle"`). Closes 3 of the
+  12 remaining test typecheck failures.
 
 ### Added
 
