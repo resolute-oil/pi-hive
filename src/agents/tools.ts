@@ -122,9 +122,9 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       task: Type.String({ description: "The user's task or subtask to route." }),
       limit: Type.Optional(Type.Number({ description: "Maximum number of recommended agents to return." })),
     }),
-    async execute(_toolCallId: string, params: unknown) {
+    async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: AgentToolUpdateCallback | undefined, ctx?: ExtensionContext) {
       const { task, limit } = params as { task: string; limit?: number };
-      const recommendations = routeAgents(state, task, boundedPositiveInteger(limit, 5, 10));
+      const recommendations = routeAgents(state, task, boundedPositiveInteger(limit, 5, 10), ctx?.cwd);
       const text = recommendations.length
         ? recommendations.map((entry, index) => `${index + 1}. ${entry.slug} — ${entry.name}${entry.group ? ` (${entry.group})` : ""} — score ${entry.score}${entry.reasons.length ? ` — ${entry.reasons.join(", ")}` : ""}`).join("\n")
         : "No strong route found. Delegate to the team lead whose consultWhen best matches, or ask the user to clarify scope.";

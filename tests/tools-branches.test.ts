@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { buildHiveTools, registerTools } from "../src/agents/tools.ts";
+import { canDelegateTo } from "../src/engine/domain.ts";
+import { routeAgents } from "../src/engine/routing.ts";
+import { runAsAgent } from "../src/engine/session.ts";
+import type { AgentType, HiveState } from "../src/core/types.ts";
 
 function runtime(dir: string, name: string, overrides: Record<string, any> = {}): any {
   return {
@@ -146,4 +150,93 @@ test("routing handles empty matches and registerTools exposes every base tool", 
   registerTools({ registerTool(tool: any) { registered.push(tool.name); } } as any, state);
   assert.ok(registered.includes("delegate_agent"));
   assert.ok(registered.includes("plan_new"));
+});
+
+// --- T6/T7: orchestrator delegation widening surfaces typed specialists ---
+// With the orchestrator's allowedAgents restricted to a single slug, the
+// other coder-typed workers should still be reachable via the new
+// agent-type widening in canDelegateTo (and therefore in routeAgents).
+
+test("canDelegateTo widens to a non-direct-report coder when orchestrator allowedAgents is restricted", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-tools-can-"));
+  // Build a fixture that mirrors the domain-routing.test.ts style: the
+  // orchestrator IS in state.runtimes so canDelegateTo's caller resolution
+  // finds it. toolState() leaves the orchestrator in state.config only,
+  // which is why this test does not use that helper.
+  const worker = (name: string, agentType: AgentType, role: "lead" | "member" = "member", configOverrides: any = {}): any => ({
+    config: {
+      name, slug: name.toLowerCase(), path: `${name}.md`, role, agentType,
+      groupName: "Engineering", routingTags: [], domain: [], allowedAgents: [], ...configOverrides,
+    },
+    systemPrompt: "", status: "idle", task: "", lastWork: "", toolCount: 0, elapsedMs: 0,
+    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0,
+    costUsd: 0, contextPct: 0, runCount: 0, sessionFile: join(dir, `${name}.jsonl`),
+  });
+  const orchestrator = worker("Orchestrator", "lead", "orchestrator" as any, { allowedAgents: ["tiny"] });
+  const tiny = worker("Tiny", "coder");
+  const warm = worker("Warm", "coder");
+  const full = worker("Full", "coder");
+  const state: HiveState = {
+    pi: {} as any,
+    config: null,
+    session: null,
+    runtimes: new Map([["orchestrator", orchestrator], ["tiny", tiny], ["warm", warm], ["full", full]]),
+    widgetCtx: null,
+    activeRuns: 0,
+    mode: "hive",
+    normalToolNames: [],
+    sddStatus: null,
+    obsSeq: 0,
+  };
+  runAsAgent("Orchestrator", () => {
+    assert.deepEqual(canDelegateTo(state, "Orchestrator", "Warm"), { ok: true });
+    assert.deepEqual(canDelegateTo(state, "Orchestrator", "Full"), { ok: true });
+    // Re-typing warm as a lead should NOT widen — lead stays tree-bound.
+    warm.config.agentType = "lead";
+    assert.equal(canDelegateTo(state, "Orchestrator", "warm").ok, false);
+  });
+});
+
+test("routeAgents surfaces typed specialists not in the orchestrator's allowedAgents", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-tools-route-widen-"));
+  const worker = (name: string, agentType: AgentType, role: "lead" | "member" = "member", configOverrides: any = {}): any => ({
+    config: {
+      name, slug: name.toLowerCase(), path: `${name}.md`, role, agentType,
+      groupName: "Engineering", routingTags: [], domain: [], allowedAgents: [], ...configOverrides,
+    },
+    systemPrompt: "", status: "idle", task: "", lastWork: "", toolCount: 0, elapsedMs: 0,
+    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0,
+    costUsd: 0, contextPct: 0, runCount: 0, sessionFile: join(dir, `${name}.jsonl`),
+  });
+  const orchestrator = worker("Orchestrator", "lead", "orchestrator" as any, { allowedAgents: ["tiny"] });
+  const tiny = worker("Tiny", "coder", "member", { routingTags: ["tiny-tag"] });
+  const warm = worker("Warm", "coder", "member", { routingTags: ["react"] });
+  const full = worker("Full", "coder", "member", { routingTags: ["react"] });
+  const state: HiveState = {
+    pi: {} as any,
+    config: null,
+    session: null,
+    runtimes: new Map([["orchestrator", orchestrator], ["tiny", tiny], ["warm", warm], ["full", full]]),
+    widgetCtx: null,
+    activeRuns: 0,
+    mode: "hive",
+    normalToolNames: [],
+    sddStatus: null,
+    obsSeq: 0,
+  };
+  runAsAgent("Orchestrator", () => {
+    const matches = routeAgents(state, "react component", 5);
+    const slugs = matches.map((m) => m.slug);
+    // warm and full carry the "react" routing tag; tiny does not. All three
+    // are reachable via the widening (they're typed coder), so the route
+    // surfaces all of them. warm and full should rank above tiny because
+    // the tag bonus (+8) outweighs the coder-type bonus alone (+3).
+    assert.ok(slugs.includes("warm"), `expected warm in widened route: got ${slugs.join(",")}`);
+    assert.ok(slugs.includes("full"), `expected full in widened route: got ${slugs.join(",")}`);
+    const warmIdx = slugs.indexOf("warm");
+    const fullIdx = slugs.indexOf("full");
+    const tinyIdx = slugs.indexOf("tiny");
+    assert.ok(warmIdx < tinyIdx, `expected warm (${warmIdx}) ranked above tiny (${tinyIdx}): ${slugs.join(",")}`);
+    assert.ok(fullIdx < tinyIdx, `expected full (${fullIdx}) ranked above tiny (${tinyIdx}): ${slugs.join(",")}`);
+  });
 });
