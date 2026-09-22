@@ -71,7 +71,14 @@ export function checkReservedPath(
   if (!requestedPath?.trim()) return { ok: false, reason: "empty path cannot be authorized" };
 
   const lexical = isAbsolute(requestedPath) ? resolve(requestedPath) : resolve(projectRoot, requestedPath);
-  const canonical = resolveCanonicalPath(lexical, { allowMissing: options.allowMissing === true });
+  // Always project a canonical path (existing realpath for real files,
+  // nearest-canonical-ancestor + suffix for missing CREATE targets) so the
+  // canonical reservation check below runs regardless of access type. The
+  // previous `allowMissing: options.allowMissing === true` skipped the
+  // canonical check for read/delete of non-existent paths, which silently
+  // bypassed configured-secret enforcement on any platform where the
+  // project root is symlinked (e.g. macOS /tmp -> /private/tmp).
+  const canonical = resolveCanonicalPath(lexical, { allowMissing: true });
   // Check both names: lexical matching catches a symlink named like a reserved
   // target, while canonical matching catches an innocent-looking symlink that
   // resolves into reserved state.

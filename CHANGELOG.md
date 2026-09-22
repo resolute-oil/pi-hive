@@ -62,6 +62,16 @@ without a corresponding section.
   positional values requires per-flag-value knowledge that's documented as
   a deferred hardening. Addresses the AGENTS.md "Bare bash read paths may
   evade static domain extraction" accepted risk in a small, targeted way.
+- `checkReservedPath` now projects a canonical path for non-existent
+  candidates on every access type (was previously skipped for read/delete).
+  The configured-secret check (`matchesConfiguredSecret`) was relying on
+  canonical containment, but the canonical resolution was gated on the
+  caller's `allowMissing` flag — a read of a missing configured secret
+  path on a symlinked project root (e.g. macOS `/tmp` -> `/private/tmp`)
+  silently bypassed enforcement. SECURITY.md §"Path and symlink semantics"
+  requires "all authorization is based on canonical containment, never
+  string-prefix matching"; this restores that guarantee for the
+  configured-secret case.
 - macOS realpath artifacts in test fixtures across `safe-path.test.ts`,
   `domain-routing.test.ts`, and `openspec.test.ts`. The source code uses
   `realpathSync.native()` to canonicalize paths (see `src/core/safe-path.ts`
