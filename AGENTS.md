@@ -41,6 +41,7 @@ The extension must stay safe to install globally: it should do nothing unless th
 - For audit remediation backlog tasks (`Txx`), completion includes committing, pushing, and opening a PR after required checks pass. Do not begin the next task until that PR exists.
 - Do not add AI attribution trailers or generated-by notices to commits, docs, package text, or release notes.
 - Prefer complete, production-ready changes: no TODO placeholders, no debug logs, and no unexplained temporary behavior.
+- Local git worktrees live under `APP_ROOT/.worktrees/`, never as siblings of `APP_ROOT`. The `.worktrees/` directory is gitignored so `git add .` from a parent path can't drag a sibling checkout into a commit. Create with `git worktree add .worktrees/<branch> <base>` from `APP_ROOT`, then symlink `node_modules` if the worktree needs to run tests (`ln -s ../node_modules .worktrees/<branch>/node_modules`). Clean up with `git worktree remove .worktrees/<branch>` after the branch merges.
 
 ## Useful commands
 
@@ -49,4 +50,9 @@ just dashboard-build
 just verify
 just pack-dry-run
 just pi-dev
+
+# Worktree (from APP_ROOT)
+git worktree add .worktrees/<branch> <base>
+ln -s ../node_modules .worktrees/<branch>/node_modules
+git worktree remove .worktrees/<branch>   # after the branch merges
 ```
