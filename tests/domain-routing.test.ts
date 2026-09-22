@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bashMutationKind, canDelegateTo, domainAllows, enforceDomainForTool, pathWithin } from "../src/engine/domain.ts";
@@ -68,7 +68,7 @@ test("domainAllows uses most-specific-wins with deny tie-breaks", () => {
 });
 
 test("domainAllows applies include globs more specifically than catch-all denies", () => {
-  const cwd = mkdtempSync(join(tmpdir(), "pi-hive-domain-"));
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), "pi-hive-domain-")));
   mkdirSync(join(cwd, "backend/patient"), { recursive: true });
   writeFileSync(join(cwd, "backend/patient/search_test.go"), "package patient");
   writeFileSync(join(cwd, "backend/patient/search.go"), "package patient");
@@ -87,8 +87,8 @@ test("domainAllows applies include globs more specifically than catch-all denies
 });
 
 test("domainAllows rejects existing and new targets through an escaping symlink", () => {
-  const cwd = mkdtempSync(join(tmpdir(), "pi-hive-domain-symlink-"));
-  const outside = mkdtempSync(join(tmpdir(), "pi-hive-domain-outside-"));
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), "pi-hive-domain-symlink-")));
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), "pi-hive-domain-outside-")));
   mkdirSync(join(cwd, "allowed"));
   writeFileSync(join(cwd, "allowed/inside.txt"), "inside");
   writeFileSync(join(outside, "secret.txt"), "secret");

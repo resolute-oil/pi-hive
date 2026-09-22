@@ -1,9 +1,20 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 import { test } from "node:test";
 import { hasForeignAbsoluteSyntax, isPathInside, resolveContainedPath, resolveProjectPath } from "../src/core/safe-path.ts";
+
+// Canonicalize the tmpdir before asserting against canonical paths. On macOS
+// (and any platform where /tmp or /var/folders is symlinked), the OS exposes
+// the real path as /private/var/folders/...; on Linux it's a no-op. The source
+// code's resolveProjectPath uses realpathSync.native() to compute canonicalPath
+// (see src/core/safe-path.ts), so the test must canonicalize its expectations
+// the same way or the assertion fails with `expected /var/folders/... got
+// /private/var/folders/...`.
+function scratchRoot(prefix: string): string {
+  return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+}
 
 test("segment-aware containment rejects sibling prefixes and traversal", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-hive-safe-path-"));
@@ -17,8 +28,8 @@ test("segment-aware containment rejects sibling prefixes and traversal", () => {
 });
 
 test("existing paths use realpath and reject symlink escapes", () => {
-  const root = mkdtempSync(join(tmpdir(), "pi-hive-safe-path-"));
-  const outside = mkdtempSync(join(tmpdir(), "pi-hive-safe-outside-"));
+  const root = scratchRoot("pi-hive-safe-path-");
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), "pi-hive-safe-outside-")));
   mkdirSync(join(root, "inside"));
   writeFileSync(join(root, "inside/file.txt"), "inside");
   writeFileSync(join(outside, "secret.txt"), "secret");
@@ -32,8 +43,8 @@ test("existing paths use realpath and reject symlink escapes", () => {
 });
 
 test("new targets resolve through their nearest existing parent", () => {
-  const root = mkdtempSync(join(tmpdir(), "pi-hive-safe-path-"));
-  const outside = mkdtempSync(join(tmpdir(), "pi-hive-safe-outside-"));
+  const root = scratchRoot("pi-hive-safe-path-");
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), "pi-hive-safe-outside-")));
   mkdirSync(join(root, "inside"));
   symlinkSync(join(root, "inside"), join(root, "inside-dir-link"));
   symlinkSync(outside, join(root, "escape-dir-link"));
