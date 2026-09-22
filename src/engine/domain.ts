@@ -23,10 +23,22 @@ export function canDelegateTo(state: HiveState, callerName: string, targetName: 
   const allowed = caller.config.allowedAgents;
   const target = resolveRuntime(state, targetName);
   if (allowed && target && allowed.some((id) => agentMatches(target.config, id))) return { ok: true };
+  // Inspection widening: a caller may also delegate to any configured agent
+  // whose agent-type is in {coder, tester, reviewer, planner}. This lets the
+  // orchestrator route read-only inspections directly to a typed specialist
+  // (e.g. an idle frontend-coder) without going through a parent lead.
+  // lead-typed agents stay tree-bound — they coordinate work, they don't
+  // answer inspections directly. The downstream bash/file policy
+  // (WRITABLE_CLASSES, readOnlyCommandDecision, commit-field gate) still
+  // applies to the delegated worker session regardless of who delegated to
+  // it; the widening is a permission, not a sandbox.
+  if (target && ["coder", "tester", "reviewer", "planner"].includes(target.config.agentType || "")) {
+    return { ok: true };
+  }
   if (allowed?.length === 0 || caller.config.role === "member") {
     return { ok: false, reason: `${caller.config.name} is not configured to delegate to other agents.` };
   }
-  return { ok: false, reason: `${caller.config.name} can only delegate to: ${allowed?.join(", ") || "none"}.` };
+  return { ok: false, reason: `${caller.config.name} can only delegate to: ${allowed?.join(", ") || "none"}, or to typed specialists in {coder, tester, reviewer, planner}.` };
 }
 
 export function pathWithin(parent: string, child: string): boolean {
