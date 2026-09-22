@@ -330,21 +330,24 @@ test("shell expansions — quoted, variable, and escaped args bypass the regex t
         [".worktrees/foo"],
         "command substitution (no inner whitespace)",
       ],
-      // Branch name inside `$(echo foo)` — inner whitespace before the
-      // ref breaks the substitution workaround (the regex still
-      // extracts). Today this is a false positive; the env-var form
-      // is the only fully-reliable workaround.
+      // Branch name inside `$(echo foo)` — the lexer-based extractor now
+      // treats the quoted argument as data, so this no longer false-positives
+      // on the inner ref. The $(...) form is now a reliable workaround
+      // alongside the env-var form.
       [
         "git -C . worktree add .worktrees/foo -b \"$(echo feature/foo)\" \"$(echo origin/main)\"",
-        [".worktrees/foo", "feature/foo", "origin/main"],
-        "command substitution (inner whitespace breaks the workaround)",
+        [".worktrees/foo"],
+        "command substitution (inner whitespace — now correctly treated as data)",
       ],
       // Quoted path. Today the quote char breaks the match; same behavior
       // should hold for any fix.
       ["cat \"./some/file.txt\"", [], "double-quoted path"],
       ["cat './some/file.txt'", [], "single-quoted path"],
-      // Backslash-escaped path.
-      ["cat \\/etc/passwd", [], "backslash-escaped path"],
+      // Backslash-escaped path. The lexer strips the escape so the token
+      // becomes `/etc/passwd` (which bash actually uses), and the path
+      // regex correctly extracts it. Old behavior missed it because the
+      // raw `\` broke the anchor.
+      ["cat \\/etc/passwd", ["/etc/passwd"], "backslash-escaped path (lexer strips the escape)"],
       // Tilde-prefixed.
       ["cat ~/foo/bar.txt", [], "tilde-prefixed"],
       // $HOME-prefixed.
@@ -651,6 +654,177 @@ test("filterBashPathTokens — path-or-parent existence is the discriminating he
       sortTokens(["./missing-dir/missing.txt"]),
       "upsert keeps tokens even when path and parent do not exist",
     );
+  } finally {
+    cleanup(fx);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────
+// Lexer-based extraction: quoted strings are data, interpreter
+// arguments recurse, env-var assignments are skipped.
+// ─────────────────────────────────────────────────────────────────
+test("lexer: quoted path-shaped substrings inside echo/printf/grep are not extracted", () => {
+  const fx = freshFixture();
+  try {
+    const cases: Array<[string, string[], string]> = [
+      // The user's actual smoke-test regression.
+      [
+        "grep -nE '^\\s*/?tmp' .worktrees/feature/.gitignore 2>&1 || echo \"no /tmp ignore line\"",
+        [".worktrees/feature/.gitignore"],
+        "smoke-test command — /tmp inside double-quoted echo message is data",
+      ],
+      [
+        "echo \"see /etc/passwd for details\"",
+        [],
+        "echo argument is data; embedded path-shaped substring is not",
+      ],
+      [
+        "printf 'see /etc/passwd now'",
+        [],
+        "printf format string is data; embedded path-shaped substring is not",
+      ],
+      [
+        "grep \"x /etc/passwd y\" file",
+        [],
+        "grep pattern is data; embedded path-shaped substring is not",
+      ],
+      [
+        "awk '/pat/' file",
+        [],
+        "awk script is data; not recursed (accepted limit)",
+      ],
+      [
+        "find . -name '*.rb'",
+        [],
+        "find -name pattern is data; not extracted",
+      ],
+      [
+        "sed -nE '/^\\s*tmp/p' .gitignore",
+        [],
+        "sed script is data; not extracted",
+      ],
+      // Bare path regression guard.
+      ["cat /etc/passwd", ["/etc/passwd"], "bare path still extracts"],
+      // Mixed bare + quoted.
+      [
+        "cat /etc/hosts && echo \"see /tmp log\"",
+        ["/etc/hosts"],
+        "bare /etc/hosts extracts; quoted /tmp in echo does not",
+      ],
+    ];
+    for (const [cmd, expected] of cases) assertExtracts(cmd, expected);
+  } finally {
+    cleanup(fx);
+  }
+});
+
+test("lexer: code-executing interpreters recurse into quoted code arguments", () => {
+  const fx = freshFixture();
+  try {
+    const cases: Array<[string, string[], string]> = [
+      // eval: every quoted arg is code.
+      [
+        "eval \"cat /etc/passwd\"",
+        ["/etc/passwd"],
+        "eval quoted arg — recurses",
+      ],
+      [
+        "eval cat \"/etc/passwd\"",
+        ["/etc/passwd"],
+        "eval mixed args — recurses on quoted portion",
+      ],
+      // bash / sh / dash / ksh / zsh / ash -c.
+      [
+        "bash -c \"cat /etc/passwd\"",
+        ["/etc/passwd"],
+        "bash -c — recurses into quoted script",
+      ],
+      [
+        "sh -c \"cat /etc/passwd\"",
+        ["/etc/passwd"],
+        "sh -c — recurses into quoted script",
+      ],
+      [
+        "dash -c \"cat /etc/passwd\"",
+        ["/etc/passwd"],
+        "dash -c — recurses into quoted script",
+      ],
+      [
+        "zsh -c \"cat /etc/passwd\"",
+        ["/etc/passwd"],
+        "zsh -c — recurses into quoted script",
+      ],
+      [
+        "bash -lc \"cat /etc/passwd\"",
+        ["/etc/passwd"],
+        "bash -lc — -l flag is ignored, -c still recurses",
+      ],
+      // perl -e, python -c, python3 -c, ruby -e, node -e.
+      [
+        "perl -e 'open(F, q{> /etc/passwd}); print F qq{x}'",
+        ["/etc/passwd"],
+        "perl -e — recurses into quoted script (regex sees /etc/passwd inside the script text)",
+      ],
+      [
+        "python -c \"open('/etc/passwd').read()\"",
+        [],
+        "python -c — Python's string quoting hides the path from the bash regex (pre-existing accepted limit per AGENTS.md)",
+      ],
+      [
+        "python3 -c \"open('/etc/passwd').read()\"",
+        [],
+        "python3 -c — same accepted limit",
+      ],
+      [
+        "ruby -e 'puts File.read(\"/etc/passwd\")'",
+        [],
+        "ruby -e — quoted string with no whitespace before / (pre-existing accepted limit per AGENTS.md)",
+      ],
+      [
+        "node -e \"require('fs').readFileSync('/etc/passwd')\"",
+        [],
+        "node -e — same accepted limit",
+      ],
+    ];
+    for (const [cmd, expected] of cases) assertExtracts(cmd, expected);
+  } finally {
+    cleanup(fx);
+  }
+});
+
+test("lexer: env-var assignments are not extracted (preserves the documented workaround)", () => {
+  const fx = freshFixture();
+  try {
+    const cases: Array<[string, string[], string]> = [
+      [
+        "WP='.worktrees/foo' B='feature/foo' REF='origin/main' git -C . worktree add \"$WP\" -b \"$B\" \"$REF\"",
+        [],
+        "env-var form — all assignments skipped, quoted $WP/$B/$REF skipped (git is not an interpreter)",
+      ],
+      [
+        "export WP=.worktrees/foo",
+        [],
+        "export assignment — skipped",
+      ],
+    ];
+    for (const [cmd, expected] of cases) assertExtracts(cmd, expected);
+  } finally {
+    cleanup(fx);
+  }
+});
+
+test("lexer: unbalanced quotes fall back to the legacy regex (no crash, same output)", () => {
+  const fx = freshFixture();
+  try {
+    // Unbalanced double quote: the lexer returns null; the legacy regex
+    // takes over and still extracts whatever it can.
+    const cmd = "cat \"unclosed file";
+    const out = extractBashPathTokens(cmd);
+    assert.ok(Array.isArray(out), "returns array (no crash)");
+    // Legacy regex sees the unclosed command; the `/`-containing path-shaped
+    // tokens (none in this fixture) would still be extracted. We just lock in
+    // that the call returns without throwing.
+    assert.ok(out.length === 0, "no path-shaped tokens in this particular unclosed-quote case");
   } finally {
     cleanup(fx);
   }

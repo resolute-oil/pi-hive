@@ -179,6 +179,32 @@ test("bashMutationKind classifies the previously-missed mutators (G1)", () => {
   assert.equal(bashMutationKind("cat file.txt"), "read");
 });
 
+// G6: bashMutationKind must not classify stderr / combined / fd-target
+// redirections as upserts. Stdout/appender redirects (`>`, `>>`, `1>`) still do.
+test("bashMutationKind recognizes stdout/appender redirects but ignores stream-plumbing forms (G6)", () => {
+  // Stream-plumbing forms — must be "read".
+  for (const command of [
+    "grep pattern file 2>&1",
+    "grep pattern file 2>",
+    "grep pattern file &>",
+    "grep pattern file &>>",
+    "echo hi >&1",
+    "echo hi >&2",
+    "cat < /etc/passwd",                 // input redirect (read), no > on stdout
+  ]) {
+    assert.equal(bashMutationKind(command), "read", command);
+  }
+  // Mutation forms — must remain "upsert".
+  for (const command of [
+    "echo hi > file",
+    "echo hi >> file",
+    "grep -E /tmp file 1>log",
+    "sed -n 'p' file > out",
+  ]) {
+    assert.equal(bashMutationKind(command), "upsert", command);
+  }
+});
+
 test("file-class: OpenSpec tasks are spec and legacy plan paths have no special class", () => {
   assert.equal(classify("openspec/changes/add-auth/tasks.md"), "spec");
   assert.equal(classify("openspec/changes/add-auth/design.md"), "spec");
