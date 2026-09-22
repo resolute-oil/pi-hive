@@ -3,6 +3,7 @@ import { BODY_CATEGORIES } from "../core/mental-model";
 import type { AgentRuntime, HiveState, KnowledgeRef } from "../core/types";
 import { buildSharedContext, renderDomainScopes, renderKnowledgeRefs } from "../core/prompting";
 import { plannerOperatingTemplate, REVIEWER_OPERATING_TEMPLATE } from "../agents/role-templates";
+import { budgetRemaining } from "./governance";
 
 // The type-specific operating contract injected into a worker's prompt. States
 // the capability boundary the enforcer also mechanically applies, so the model
@@ -68,6 +69,7 @@ export function buildWorkerPrompt(state: HiveState, ctx: ExtensionContext, runti
   const knowledgeContext = renderKnowledgeRefs(ctx, "Context and mental model", runtime.config.context);
   const domain = renderDomainScopes(runtime.config.domain);
   const operatingContract = buildOperatingContract(runtime);
+  const budgetVisibility = buildBudgetVisibility(state, runtime);
 
   return `${runtime.systemPrompt}
 
@@ -93,7 +95,7 @@ This does not override safety: never remove validation at trust boundaries, secu
 
 For bug fixes, inspect sibling callers/paths before editing. The smallest correct fix is usually in the shared path, not just the reported symptom.
 
-${operatingContract ? `${operatingContract}\n\n` : ""}${domain}
+${operatingContract ? `${operatingContract}\n\n` : ""}${budgetVisibility}${domain ? `\n\n${domain}` : ""}
 
 ${knowledgeContext}
 
@@ -112,6 +114,44 @@ Return concise markdown with:
 - Durable lessons worth remembering (stable facts, conventions, risk patterns) — state them plainly; your mental model is curated automatically from this conversation.
 
 Wrap your final deliverable in a single <final_answer>...</final_answer> block so the orchestrator can extract the authoritative result.`;
+}
+
+// Per-turn budget visibility: surfaces the worker's remaining budget at session
+// start so it can self-regulate ("I have 200K tokens left, I'll keep this task
+// small"). Without this, an agent has no signal until it hits the wall and is
+// blocked — too late to choose a smaller scope. Callers should call
+// `team_status` for an up-to-the-turn view; this is the at-start snapshot.
+//
+// Returns "" when no budget is configured (either no worker limits and no team
+// limits). Section is omitted from `buildWorkerPrompt` in that case so it does
+// not add noise for unconstrained workers.
+export function buildBudgetVisibility(state: HiveState, runtime: AgentRuntime): string {
+  const remaining = budgetRemaining(state, runtime);
+  const lines: string[] = [];
+  const tiers: Array<["worker" | "team", { runs?: number; tokens?: number; costUsd?: number; distillerRuns?: number }]> = [
+    ["worker", remaining.worker],
+    ["team", remaining.team],
+  ];
+  for (const [tier, budget] of tiers) {
+    const parts: string[] = [];
+    if (budget.runs !== undefined) parts.push(`runs=${budget.runs}`);
+    if (budget.tokens !== undefined) parts.push(`tokens=${formatBudgetNumber(budget.tokens)}`);
+    if (budget.costUsd !== undefined) parts.push(`cost=$${budget.costUsd.toFixed(2)}`);
+    if ("distillerRuns" in budget && budget.distillerRuns !== undefined) parts.push(`distiller=${budget.distillerRuns}`);
+    if (parts.length) lines.push(`- ${tier}: ${parts.join(", ")}`);
+  }
+  if (!lines.length) return "";
+  return [
+    "## Remaining budget",
+    "Self-regulate to avoid being blocked mid-task. Call `team_status` for an up-to-the-turn view.",
+    ...lines,
+  ].join("\n");
+}
+
+function formatBudgetNumber(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return `${n}`;
 }
 
 // ── Mental-model distiller prompt helpers ──────────────────────────────────────
