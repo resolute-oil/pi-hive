@@ -246,11 +246,16 @@ export function extractBashPathTokens(command: string): string[] {
 // looks the same to the regex). `filterBashPathTokens` is a post-extraction
 // pass that drops tokens which the regex picked up but which are almost
 // certainly NOT filesystem paths: the resolved path does not exist AND
-// its immediate parent directory does not exist. Git ref arguments never
-// materialize as on-disk paths and rarely have an existing parent in
-// the cwd; real paths either exist (the common case for reads and
-// deletes) or have an existing parent (the common case for CREATE
-// targets like `.worktrees/<dir>/`).
+// its immediate parent directory does not exist AND the token has no
+// path-shape markers (absolute path, `./`/`../` prefix, file extension,
+// or dotfile basename). Git ref arguments never materialize as on-disk
+// paths and rarely have an existing parent in the cwd; they also lack
+// path-shape markers. Real paths either exist (the common case for
+// reads and deletes), have an existing parent (the common case for
+// CREATE targets like `.worktrees/<dir>/`), or carry a path-shape
+// marker (the common case for sandbox-mediated stat calls that return
+// inaccurate values, and for absolute paths whose parent doesn't exist
+// on the test runner).
 //
 // The filter is applied only to read-classified bash. For upsert/delete
 // bash (which covers legitimate `touch`, `mkdir`, `mv`, `cp`, `rm`, `git
@@ -264,9 +269,48 @@ export function filterBashPathTokens(ctx: ExtensionContext, tokens: string[], ki
 
 function isLikelyFilesystemPath(ctx: ExtensionContext, token: string): boolean {
   const resolved = resolveDomainPath(ctx, token);
-  if (existsSync(resolved)) return true;
+  // Stat-based heuristic, wrapped to tolerate sandbox environments where
+  // existsSync can throw (permission-denied intermediates, restricted
+  // syscall surface). On throw, treat as "stat inconclusive" and let the
+  // shape check decide.
+  if (safeStat(resolved)) return true;
   const parent = dirname(resolved);
-  if (existsSync(parent)) return true;
+  if (safeStat(parent)) return true;
+  // Stat said no for both path and parent. Fall back to SHAPE: tokens with
+  // strong path markers are very likely real paths. Tokens without
+  // markers — e.g. `origin/main`, `feature/foo`, `master` — are likely
+  // git refs and remain dropped. This makes the filter robust to:
+  //   - sandbox-mediated stat calls that return inaccurate values
+  //     (HANDOFF.md deferred item #3);
+  //   - CREATE targets whose parent directory doesn't exist yet
+  //     (e.g. `.worktrees/fix-foo/file.txt` before the shell creates it);
+  //   - absolute paths like `/etc/missing-file.txt` whose parent (`/etc`)
+  //     may not exist on the test runner (e.g. macOS sandboxed CI).
+  //
+  // Shape is checked on the ORIGINAL token, not the resolved path —
+  // resolveDomainPath always returns an absolute path (cwd-prefixed), so
+  // checking the resolved path would mark every token as absolute.
+  return looksLikePathByShape(token);
+}
+
+function safeStat(filePath: string): boolean {
+  try {
+    return existsSync(filePath);
+  } catch {
+    return false;
+  }
+}
+
+function looksLikePathByShape(resolved: string): boolean {
+  // Absolute paths are real paths.
+  if (resolved.startsWith("/")) return true;
+  // Paths starting with `./` or `../` are relative real paths.
+  if (resolved.startsWith("./") || resolved.startsWith("../")) return true;
+  const base = resolved.split("/").pop() ?? "";
+  // Files with a recognizable extension are real paths.
+  if (base.length > 1 && /\.[a-zA-Z0-9]+$/.test(base)) return true;
+  // Dotfiles are real paths (.gitignore, .env, .npmrc, etc.).
+  if (base.length > 1 && base.startsWith(".")) return true;
   return false;
 }
 
