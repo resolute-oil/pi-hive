@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { buildHiveTools, registerTools } from "../src/agents/tools.ts";
 
 function runtime(dir: string, name: string, overrides: Record<string, any> = {}): any {
@@ -96,10 +97,13 @@ test("tool renderers remain bounded for partial, expanded, success, and error st
   const state = toolState(dir);
   const delegate = (buildHiveTools(state, "Orchestrator") as any[]).find((tool) => tool.name === "delegate_agent");
 
-  // delegate_agent renders the full prompt verbatim — header on its own line,
-  // every line of the task below it. No character or width cap so the
-  // orchestrator's actual prompt is visible to the human.
-  const headerOnly = delegate.renderCall({}, theme).render(1);
+  // delegate_agent renders the prompt across multiple rows (header + one
+  // per newline-separated line) and truncates each row to the terminal
+  // width via truncateToWidth(). The width-aware truncation is mandatory:
+  // pi's TUI throws uncaughtException when a rendered line exceeds the
+  // visible width, so unbounded lines (e.g. a 2809-char smoke-test prompt
+  // on a 136-col terminal) would crash the session.
+  const headerOnly = delegate.renderCall({}, theme).render(80);
   assert.equal(headerOnly.length, 1);
   assert.match(headerOnly[0], /delegate_agent/);
   const withTask = delegate.renderCall({ agent: "Tiny", task: "inspect" }, theme).render(80);
@@ -112,6 +116,17 @@ test("tool renderers remain bounded for partial, expanded, success, and error st
     theme,
   ).render(80);
   assert.deepEqual(multiLine, [withTask[0], "line one", "line two", "line three"]);
+  // Regression guard for the original crash: a very long single-line task
+  // (the smoke-test failure had ~2809 chars) must be truncated to fit the
+  // terminal width, not rendered at full length. visibleWidth() accounts for
+  // ANSI escape codes (theme.fg wraps the line in color codes that don't
+  // count toward terminal columns), so use it for the contract check.
+  const longTask = "x".repeat(2809);
+  const longRender = delegate.renderCall({ agent: "Tiny", task: longTask }, theme).render(136);
+  assert.equal(longRender.length, 2);
+  for (const line of longRender) {
+    assert.ok(visibleWidth(line) <= 136, `line exceeds width 136: vis=${visibleWidth(line)}`);
+  }
   assert.deepEqual(delegate.renderResult({ details: { status: "running" } }, { isPartial: true }, theme).render(80), []);
   assert.equal(delegate.renderResult({ details: { agent: "Tiny", status: "done", elapsed: 1_500, outputPreview: "ok" } }, { expanded: true }, theme).render(80).length, 2);
   assert.equal(delegate.renderResult({ details: { agent: "missing", status: "error" } }, {}, theme).render(80).length, 1);

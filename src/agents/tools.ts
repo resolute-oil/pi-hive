@@ -1,6 +1,6 @@
 import type { AgentToolUpdateCallback, ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { defineTool as definePiTool, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type, type TSchema } from "typebox";
 import { resolve } from "node:path";
 import type { AgentType, HiveState, ReviewVerdictLevel } from "../core/types";
@@ -220,21 +220,18 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       const task = String((args as any).task || "");
       const header = theme.fg("toolTitle", theme.bold("delegate_agent ")) +
         agentColored(agent, theme);
-      // Show the full prompt verbatim. The LLM already received the complete
-      // task as the tool argument — this is only the TUI display of the call,
-      // and middle/width truncation hides what the orchestrator actually said
-      // to the agent. Render every line of the task as its own row beneath
-      // the header, with no character cap and no terminal-width cap.
+      // Show the full prompt across multiple rows (one per newline-separated
+      // line) so multi-line prompts are readable. Per-line truncation to
+      // terminal width is mandatory — pi's TUI throws uncaughtException when
+      // a rendered line exceeds the visible width, so unbounded lines from a
+      // long smoke-test prompt (e.g. 2809 chars on a single line) crash the
+      // session. `boundedToolRender` calls truncateToWidth() per line and
+      // appends an ellipsis when clipping.
       const dim = (line: string) => theme.fg("dim", line);
       const lines = task
         ? [header, ...task.split(/\r?\n/).map(dim)]
         : [header];
-      return {
-        invalidate() {},
-        render(_width: number): string[] {
-          return lines;
-        },
-      };
+      return boundedToolRender(lines, theme.fg("dim", "…"));
     },
     renderResult(result: any, options: ToolRenderOptions, theme: any) {
       const details = result.details as any;
