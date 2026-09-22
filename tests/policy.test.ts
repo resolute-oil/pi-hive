@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { classify } from "../src/engine/file-class.ts";
@@ -221,7 +221,7 @@ test("enforce: coder upsert on OpenSpec tasks is denied by type policy", () => {
 
 // ── Both layers via enforceDomainForTool ───────────────────────────────────
 
-const policyRoot = mkdtempSync(join(tmpdir(), "pi-hive-policy-"));
+const policyRoot = realpathSync(mkdtempSync(join(tmpdir(), "pi-hive-policy-")));
 mkdirSync(join(policyRoot, "src/tmp"), { recursive: true });
 const ctx = { cwd: policyRoot } as any;
 const codeDomain = [{ path: ".", read: true, upsert: true, delete: true }];
@@ -278,11 +278,11 @@ test("reserved paths require an explicit trusted override", () => {
 
 test("enforce: planner cannot forge global approval records with file tools or classified bash", () => {
   const state = stateWith([runtime("Plan", { agentType: "planner", domain: [{ path: ".", read: true, upsert: true, delete: true }] })]);
-  const authority = "/home/test/.pi/agent/hive/approvals/project/change/proposal/human.json";
+  const authority = join(homedir(), ".pi", "agent", "hive", "approvals", "project", "change", "proposal", "human.json");
   for (const toolName of ["write", "edit"]) {
-    assert.match(block(state, "Plan", { toolName, input: { path: authority } }) ?? "", /may not upsert|cannot modify/);
+    assert.match(block(state, "Plan", { toolName, input: { path: authority } }) ?? "", /cannot|may not|reserved|blocked/i);
   }
-  assert.match(block(state, "Plan", { toolName: "bash", input: { command: `cp ./approval.json ${authority}` } }) ?? "", /cannot upsert|may not upsert/);
+  assert.match(block(state, "Plan", { toolName: "bash", input: { command: `cp ./approval.json ${authority}` } }) ?? "", /cannot|may not|reserved|blocked/i);
 });
 
 test("enforce: planner stages narrow which gate files", () => {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -47,14 +47,14 @@ test("review change inference uses explicit OpenSpec change references", () => {
 });
 
 test("resolveWorkerSkillPaths flattens skill refs and rejects unsafe resources", () => {
-  const cwd = mkdtempSync(join(tmpdir(), "pi-hive-skills-"));
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), "pi-hive-skills-")));
   const first = join(cwd, ".pi/hive/skills/imed-repo-map/SKILL.md");
   const second = join(cwd, ".pi/hive/skills/imed-frontend-map/SKILL.md");
   mkdirSync(join(cwd, ".pi/hive/skills/imed-repo-map"), { recursive: true });
   mkdirSync(join(cwd, ".pi/hive/skills/imed-frontend-map"), { recursive: true });
   writeFileSync(first, "# skill");
   writeFileSync(second, "# skill");
-  const outside = mkdtempSync(join(tmpdir(), "pi-hive-skills-outside-"));
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), "pi-hive-skills-outside-")));
   writeFileSync(join(outside, "SKILL.md"), "# secret skill");
   symlinkSync(join(outside, "SKILL.md"), join(cwd, ".pi/hive/skills/escape.md"));
   assert.deepEqual(
