@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -13,7 +13,10 @@ import { resolveProjectIdentity } from "../src/shared/project-identity.ts";
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-hive-approval-agent-"));
 
 function scratch(): string {
-  return mkdtempSync(join(tmpdir(), "pi-hive-osx-"));
+  // realpathSync canonicalizes the tmpdir so test assertions against the
+  // approval records' canonicalRoot match on platforms where /tmp is a
+  // symlink (macOS: /tmp → /private/tmp; some CI setups: /var/folders).
+  return realpathSync(mkdtempSync(join(tmpdir(), "pi-hive-osx-")));
 }
 
 function changeDir(cwd: string, name = "add-auth"): string {
