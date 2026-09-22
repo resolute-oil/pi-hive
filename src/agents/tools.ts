@@ -184,12 +184,14 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       agent: Type.String({ description: "Configured agent name (one of your delegation targets)." }),
       task: Type.String({ description: "Focused task for that agent. Include the exact question and expected output." }),
       fresh: Type.Optional(Type.Boolean({ description: "Start the agent from a clean session, discarding its prior memory. Default false (resume). Use when the previous session is irrelevant or should not influence this task." })),
+      isReadOnly: Type.Optional(Type.Boolean({ description: "Restrict delegation to direct reports only. Set false when the delegation is for a write-capable target you want to keep tree-bound (e.g. forcing operations-routed tasks to the operations lead rather than a coder). Default (omitted or true) preserves the type-based widening for read-only inspection delegations." })),
     }),
     async execute(_toolCallId: string, params: unknown, signal: AbortSignal | undefined, onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
-      const p = (params || {}) as { agent?: string; task?: string; fresh?: boolean };
+      const p = (params || {}) as { agent?: string; task?: string; fresh?: boolean; isReadOnly?: boolean };
       const agent = String(p.agent || "").trim();
       const task = String(p.task || "").trim();
       const fresh = p.fresh;
+      const isReadOnly = p.isReadOnly;
       if (!agent || !task) {
         const available = agentRoster(state);
         const missing = [!agent ? "agent" : "", !task ? "task" : ""].filter(Boolean).join(" and ");
@@ -198,8 +200,8 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
           details: { ok: false, status: "error", reason: "missing parameters", missing, available },
         };
       }
-      onUpdate?.({ content: [{ type: "text", text: `Delegating to ${agent}${fresh ? " (fresh session)" : ""}...` }], details: { agent, task, status: "running" } });
-      const result = await dispatchAgent(state, agent, task, ctx, Boolean(fresh), undefined, signal);
+      onUpdate?.({ content: [{ type: "text", text: `Delegating to ${agent}${fresh ? " (fresh session)" : ""}${isReadOnly === false ? " (read-only restricted)" : ""}...` }], details: { agent, task, status: "running" } });
+      const result = await dispatchAgent(state, agent, task, ctx, Boolean(fresh), undefined, signal, isReadOnly);
       // Fire-and-forget memory distillation on success. Non-blocking: the
       // worker's answer returns immediately; the distiller reads a snapshot, so
       // re-delegating the same agent never races it.
