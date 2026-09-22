@@ -30,6 +30,11 @@ coverage/
 # Session-local handoff note between agent sessions
 /HANDOFF.md
 
+# Local git worktrees — `git worktree add ../.worktrees/<branch>` keeps the
+# checkout out of the working tree so concurrent branches don't trample
+# node_modules, but the worktree itself must never leak into a commit.
+/.worktrees/
+
 # NOTE: ui/web/dist/ is intentionally NOT ignored — it ships prebuilt so the
 # extension needs no build step at install time. Rebuild it after editing
 # ui/web/src/ with: just dashboard-build
