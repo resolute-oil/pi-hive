@@ -376,6 +376,8 @@ The default delegation gate (`canDelegateTo` in `src/engine/domain.ts`) is the t
 
 **What still gates the delegated worker.** The downstream bash/file policy (`WRITABLE_CLASSES`, `readOnlyCommandDecision`, the `commit:` field gate) still applies to the worker session regardless of who delegated to it. The widening is a permission, not a sandbox. In hive mode, `coder`/`tester` delegations additionally require the execution gate to be open for the active change (per `dispatch.ts:236-241`); in plan mode, only `planner`/`lead`/`reviewer` may be targets at all.
 
+**Opting out of the widening (Option B).** `delegate_agent` accepts an optional `isReadOnly` boolean. When the caller passes `isReadOnly: false`, the type-based widening is BLOCKED and only tree-match delegation succeeds. Default behavior (omitted or `true`) preserves the widening so existing flows don't change. Use this when the caller KNOWS the delegation is for a write-capable target and wants to keep the delegation in the lead tree — e.g. the orchestrator explicitly routing a worktree-class task to `operations` rather than a `coder`. Tree-match delegations are unaffected by `isReadOnly`. `lead`-typed agents stay tree-bound regardless of the flag (they're never in the widening set).
+
 ---
 
 ## 8. Domains — the enforced filesystem boundary (security-critical)

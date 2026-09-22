@@ -52,6 +52,20 @@ without a corresponding section.
   a deferred hardening. Addresses the AGENTS.md "Bare bash read paths may
   evade static domain extraction" accepted risk in a small, targeted way.
 
+### Added
+
+- Option B: `delegate_agent` now accepts an optional `isReadOnly` boolean.
+  When set to `false`, the type-based widening in `canDelegateTo` is BLOCKED
+  and only tree-match delegation succeeds. Default (omitted or `true`)
+  preserves the PR #10 widening behavior so existing flows don't change.
+  Use `isReadOnly: false` when the caller KNOWS the delegation is for a
+  write-capable target and wants to keep it in the lead tree — e.g. the
+  orchestrator explicitly routing a worktree-class task to `operations`
+  rather than a `coder`. Threaded through `dispatchAgent` → `canDelegateTo`.
+  Tree-match delegations are unaffected by the flag. `lead`-typed targets
+  stay tree-bound regardless of the flag. Implements the deferred hardening
+  flagged in the PR #10 plan.
+
 ## [0.1.0] - 2026-07-05
 
 ### Added
