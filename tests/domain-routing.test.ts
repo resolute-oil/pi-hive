@@ -287,3 +287,62 @@ test("canDelegateTo widening applies symmetrically to non-orchestrator callers",
     assert.deepEqual(canDelegateTo(state, "Engineering Lead", "Frontend Coder"), { ok: true });
   });
 });
+
+// --- T-Routing (PR #10 plan item) ---
+// Acceptance criterion #4 in the plan: the orchestrator still routes
+// HANDOFF cycle rotation, worktree create, preflight, push, and PR-open
+// through the operations lead. This is enforced by the orchestrator
+// prompt + routeAgents scoring (NOT by canDelegateTo — the widening in
+// PR #10 lets any typed specialist be reached, and a coder is technically
+// capable of running worktree/push). The test asserts the routing layer
+// reflects the prompt-level preference.
+
+test("routeAgents prefers Operations for HANDOFF/worktree/push/PR-open task strings (T-Routing)", () => {
+  const state = stateWith([
+    runtime("Orchestrator", { role: "orchestrator", allowedAgents: ["Operations"] }),
+    runtime("Operations", {
+      role: "lead",
+      agentType: "lead",
+      groupName: "Operations",
+      routingTags: ["handoff", "worktree", "push", "pull request"],
+      consultWhen: "HANDOFF cycle rotation, worktree create, preflight, push, PR-open",
+    }),
+    runtime("Frontend Coder", {
+      role: "member",
+      agentType: "coder",
+      groupName: "Engineering",
+      routingTags: ["react", "ui"],
+    }),
+  ]);
+
+  runAsAgent("Orchestrator", () => {
+    // Operations top-matches each lead-routed operation by tag overlap.
+    for (const task of [
+      "rotate the HANDOFF cycle for next session",
+      "git worktree create for fix/foo",
+      "git push the changes to remote",
+      "open a pull request for fix/foo",
+    ]) {
+      const matches = routeAgents(state, task, 3);
+      assert.equal(
+        matches[0]?.name,
+        "Operations",
+        `expected Operations to top-match "${task}"; got: ${matches.map((m) => m.name).join(", ")}`,
+      );
+    }
+
+    // A read-only inspection task should NOT route to Operations. The
+    // Frontend Coder (typed coder, type-widening-reachable) wins on tag
+    // overlap with "react"; Operations scores 0 and is filtered.
+    const inspection = routeAgents(state, "look at this React view file", 3);
+    assert.notEqual(
+      inspection[0]?.name,
+      "Operations",
+      `Operations should not top-match read-only inspection; got: ${inspection.map((m) => m.name).join(", ")}`,
+    );
+    assert.ok(
+      inspection.some((m) => m.name === "Frontend Coder"),
+      `Frontend Coder should surface for react-related inspection; got: ${inspection.map((m) => m.name).join(", ")}`,
+    );
+  });
+});
