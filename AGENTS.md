@@ -41,7 +41,11 @@ The extension must stay safe to install globally: it should do nothing unless th
 - For audit remediation backlog tasks (`Txx`), completion includes committing, pushing, and opening a PR after required checks pass. Do not begin the next task until that PR exists.
 - Do not add AI attribution trailers or generated-by notices to commits, docs, package text, or release notes.
 - Prefer complete, production-ready changes: no TODO placeholders, no debug logs, and no unexplained temporary behavior.
-- **All file edits go in a git worktree, never in the main working tree.** Even single-line docs changes, chore updates, and small fixes must be done in a worktree under `APP_ROOT/.worktrees/`, not as siblings of `APP_ROOT` and not directly on `main`. The `.worktrees/` directory is gitignored so `git add .` from a parent path can't drag a sibling checkout into a commit. Create with `git worktree add .worktrees/<branch> <base>` from `APP_ROOT`, then symlink `node_modules` if the worktree needs to run tests (`ln -s ../node_modules .worktrees/<branch>/node_modules`). Clean up with `git worktree remove .worktrees/<branch>` after the branch merges. This rule applies to every agent session that touches this repo, including the one writing this rule.
+- **All file edits go in a git worktree, never in the main working tree.** Even single-line docs changes, chore updates, and small fixes must be done in a worktree under `APP_ROOT/.worktrees/`, not as siblings of `APP_ROOT` and not directly on `main`. The `.worktrees/` directory is gitignored so `git add .` from a parent path can't drag a sibling checkout into a commit. Create with `git worktree add .worktrees/<branch> <base>` from `APP_ROOT`, then symlink `node_modules` if the worktree needs to run tests.
+
+  **Symlink target is `../../node_modules`**, not `../node_modules`. The worktree lives at `APP_ROOT/.worktrees/<branch>/` — two levels deep from `APP_ROOT` — so the relative symlink target must be `../../node_modules` to resolve to `APP_ROOT/node_modules`. The shorter `../node_modules` resolves to the non-existent `APP_ROOT/.worktrees/node_modules` and creates a dangling symlink that breaks every test and lint command in the worktree. As an alternative, use an absolute path: `ln -s "$APP_ROOT/node_modules" "$APP_ROOT/.worktrees/<branch>/node_modules"`.
+
+  Clean up with `git worktree remove .worktrees/<branch>` after the branch merges. This rule applies to every agent session that touches this repo, including the one writing this rule.
 
 ## Useful commands
 
@@ -53,6 +57,11 @@ just pi-dev
 
 # Worktree (from APP_ROOT) — required for ALL file edits
 git worktree add .worktrees/<branch> <base>
-ln -s ../node_modules .worktrees/<branch>/node_modules
+# Worktree is at APP_ROOT/.worktrees/<branch>/ — two levels deep — so the
+# node_modules symlink target is ../../node_modules (NOT ../node_modules,
+# which resolves to a non-existent directory and breaks every test command).
+ln -s ../../node_modules .worktrees/<branch>/node_modules
+# Or use an absolute path to avoid the relative-path trap:
+# ln -s "$APP_ROOT/node_modules" "$APP_ROOT/.worktrees/<branch>/node_modules"
 git worktree remove .worktrees/<branch>   # after the branch merges
 ```
