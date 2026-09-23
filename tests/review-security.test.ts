@@ -75,6 +75,17 @@ async function mint(h: Harness): Promise<{ response: Response; reviewUrl?: strin
   return { response, reviewUrl: body.reviewUrl };
 }
 
+async function mintFrom(h: Harness, referer: string): Promise<{ response: Response; reviewUrl?: string; status: number; body: unknown }> {
+  const req = new Request(`${ORIGIN}/review-sessions`, {
+    method: "POST",
+    headers: { ...STRICT_HEADERS, referer, "content-type": "application/json" },
+    body: JSON.stringify({ rid: "add-auth#proposal.md", cwd: h.cwd }),
+  });
+  const response = (await handleReviewSurface(h.surface, req, new URL(req.url)))!;
+  const body = await response.clone().json() as { reviewUrl?: string };
+  return { response, reviewUrl: body.reviewUrl, status: response.status, body };
+}
+
 function decision(reviewUrl: string, path: "/api/approve" | "/api/deny" | "/api/feedback", body: string, headers: Record<string, string> = {}): Request {
   return new Request(`${ORIGIN}${path}`, {
     method: "POST",
@@ -124,6 +135,58 @@ test("review sessions require exact mutation metadata and are not cacheable", as
   copiedWithoutNonce.searchParams.delete("nonce");
   const copied = new Request(copiedWithoutNonce, { headers: { host: "127.0.0.1:43191" } });
   assert.equal((await handle(h, copied))?.status, 401);
+});
+
+// ── /review-sessions origin binding ───────────────────────────────────────
+//
+// The dashboard mints review sessions from any page (Plans tab, agent log,
+// change detail, …). The earlier pathname-strict check (`referer.pathname === "/"`)
+// rejected legitimate fetches from `/project/<name>/plans` with 403 "invalid
+// request origin", surfacing in the UI as "Secure review session unavailable."
+// The fix relaxes /review-sessions to origin-only matching; the daemon-bearer
+// auth and the strict pathname check on /api/approve|deny|feedback (which
+// always run inside the /pl-review/ iframe) still defend the substantive
+// surfaces.
+
+test("/review-sessions accepts same-origin fetches from non-root pages (Plans tab flow)", async () => {
+  const h = harness();
+  // The dashboard's Plans tab lives at /project/<name>/plans, NOT "/". The
+  // earlier check expected referer.pathname === "/" and rejected this case.
+  const from = await mintFrom(h, `${ORIGIN}/project/smoke-test/plans`);
+  assert.equal(from.status, 201, `expected 201, got ${from.status} body=${JSON.stringify(from.body)}`);
+  assert.match(from.reviewUrl || "", /^\/pl-review\/\?rid=/);
+});
+
+test("/review-sessions still rejects cross-origin requests", async () => {
+  const h = harness();
+  const req = new Request(`${ORIGIN}/review-sessions`, {
+    method: "POST",
+    headers: {
+      host: "127.0.0.1:43191",
+      origin: "https://evil.example.com",
+      referer: "https://evil.example.com/",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ rid: "add-auth#proposal.md", cwd: h.cwd }),
+  });
+  const response = (await handle(h, req))!;
+  assert.equal(response.status, 403);
+});
+
+test("/review-sessions still rejects host-mismatched requests", async () => {
+  const h = harness();
+  const req = new Request(`${ORIGIN}/review-sessions`, {
+    method: "POST",
+    headers: {
+      host: "evil.example.com:443",
+      origin: ORIGIN,
+      referer: `${ORIGIN}/`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ rid: "add-auth#proposal.md", cwd: h.cwd }),
+  });
+  const response = (await handle(h, req))!;
+  assert.equal(response.status, 403);
 });
 
 test("review-only bundle is gzip streamed with strong ETags", async () => {

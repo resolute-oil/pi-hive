@@ -42,6 +42,18 @@ without a corresponding section.
 
 ### Fixed
 
+- `/review-sessions` mint endpoint now accepts same-origin requests from any
+  dashboard page (Plans tab, agent log, change detail, …) instead of only
+  from `/`. Previously the referer-pathname check required `referer.pathname
+  === "/"`, which rejected legitimate fetches from `/project/<name>/plans` with
+  403 "invalid request origin". The UI surfaced this as "Secure review session
+  unavailable." with a Retry button that could not succeed. Origin + the
+  daemon-bearer auth remain as substantive defenses; the stricter pathname
+  match is preserved for `/api/approve|deny|feedback`, which always run inside
+  the `/pl-review/` iframe where the referer is always that mount path.
+  Regression tests in `tests/review-security.test.ts` cover the Plans-tab flow,
+  cross-origin rejection, and host-mismatch rejection.
+
 - Worker activity panel (`hive-activity` widget) now disambiguates duplicate
   display names by appending the agent slug in dim parens to colliding rows
   (e.g. `● Design Planner (design-planner-alt) — ...` instead of three identical
