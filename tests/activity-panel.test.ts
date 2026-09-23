@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { formatElapsed, metaOf, renderAgentRow, statusIcon, workOf } from "../src/ui/tui/activity.ts";
+import { formatElapsed, headerLine, metaOf, nameHistogram, renderAgentRow, statusIcon, workOf } from "../src/ui/tui/activity.ts";
 import type { AgentRuntime } from "../src/core/types.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
@@ -98,4 +98,104 @@ test("renderAgentRow emits one separator dash when work is empty", () => {
   // One em-dash after name+meta, no trailing separator.
   const dashes = (line.match(/ — /g) || []).length;
   assert.equal(dashes, 1);
+});
+
+// ── Disambiguation suffix for duplicate display names ─────────────────────
+
+test("renderAgentRow omits the suffix when displaySuffix is undefined", () => {
+  const rt = runtime({ config: { name: "Design Planner", slug: "design-planner", agentType: "coder" } as any, status: "running", elapsedMs: 5_000 });
+  const line = renderAgentRow(rt, 200, theme());
+  // No parenthesised slug after the name.
+  assert.doesNotMatch(line, /Design Planner \(/);
+  assert.match(line, /Design Planner/);
+});
+
+test("renderAgentRow appends the suffix in dim text when displaySuffix is provided", () => {
+  const rt = runtime({ config: { name: "Design Planner", slug: "design-planner-alt", agentType: "coder" } as any, status: "running", elapsedMs: 5_000 });
+  const line = renderAgentRow(rt, 200, theme(), "design-planner-alt");
+  // The slug appears, parenthesised, between the name and the meta dash.
+  // Match the visible content (ANSI escapes around the dim suffix are fine).
+  assert.match(line, /Design Planner/);
+  assert.match(line, /\(design-planner-alt\)/);
+});
+
+test("renderAgentRow suffix stays inside the requested visible width when truncated", () => {
+  const rt = runtime({ config: { name: "Design Planner", slug: "design-planner-alt", agentType: "coder" } as any, status: "running", elapsedMs: 5_000, lastWork: "x".repeat(500) });
+  const line = renderAgentRow(rt, 30, theme(), "design-planner-alt");
+  assert.ok(visibleWidth(line) <= 30, `expected ≤ 30 cols, got ${visibleWidth(line)}`);
+});
+
+// ── nameHistogram drives the duplicate-name detection ─────────────────────
+
+test("nameHistogram returns 1 for each unique name", () => {
+  const a = runtime({ config: { name: "Specs Planner" } as any });
+  const b = runtime({ config: { name: "Design Planner" } as any });
+  const c = runtime({ config: { name: "Tester" } as any });
+  const counts = nameHistogram([a, b, c]);
+  assert.equal(counts.size, 3);
+  assert.equal(counts.get("Specs Planner"), 1);
+  assert.equal(counts.get("Design Planner"), 1);
+  assert.equal(counts.get("Tester"), 1);
+});
+
+test("nameHistogram counts duplicates so the widget can flag them", () => {
+  const a = runtime({ config: { name: "Design Planner" } as any });
+  const b = runtime({ config: { name: "Design Planner" } as any });
+  const c = runtime({ config: { name: "Specs Planner" } as any });
+  const counts = nameHistogram([a, b, c]);
+  assert.equal(counts.get("Design Planner"), 2, "duplicate name counted twice");
+  assert.equal(counts.get("Specs Planner"), 1);
+});
+
+test("nameHistogram falls back to 'agent' for runtimes without a name", () => {
+  const a = runtime({ config: {} as any });
+  const b = runtime({ config: {} as any });
+  const counts = nameHistogram([a, b]);
+  assert.equal(counts.get("agent"), 2);
+});
+
+// ── headerLine builds the bordered panel header ───────────────────────────
+
+test("headerLine produces `──── Hive Activity · N agents ────` for a 60-col panel", () => {
+  const line = headerLine(60, 4, theme());
+  assert.equal(visibleWidth(line), 60, `expected 60 cols, got ${visibleWidth(line)}`);
+  // Label is centered, framed by ─ characters.
+  assert.match(line, /Hive Activity/);
+  assert.match(line, /4 agents/);
+  // The dashes add up to width − label-length. Visible label length with
+  // surrounding spaces is 26 chars (" Hive Activity · 4 agents "), so
+  // 60 − 26 = 34 dashes, split 17/17.
+  // eslint-disable-next-line no-control-regex
+  const stripped = line.replace(/\x1b\[\d+m/g, "");
+  const leading = stripped.match(/^─*/)?.[0].length || 0;
+  const trailing = stripped.match(/─*$/)?.[0].length || 0;
+  assert.equal(leading + trailing, 34, "dash counts add up to width − label");
+  assert.ok(Math.abs(leading - trailing) <= 1, "label approximately centered");
+});
+
+test("headerLine pluralizes 'agent' vs 'agents' correctly", () => {
+  const one = headerLine(40, 1, theme());
+  assert.match(one, /1 agent\b/);
+  assert.doesNotMatch(one, /1 agents/);
+  const many = headerLine(40, 7, theme());
+  assert.match(many, /7 agents/);
+  const zero = headerLine(40, 0, theme());
+  assert.match(zero, /0 agents/);
+});
+
+test("headerLine falls back to the label alone when width can't fit dashes + label", () => {
+  const line = headerLine(15, 4, theme());
+  assert.ok(visibleWidth(line) <= 15, `expected ≤ 15 cols, got ${visibleWidth(line)}`);
+  // Label still visible so operators know what the panel is.
+  assert.match(line, /Hive Activity/);
+});
+
+test("headerLine uses the map count, not the visible row count", () => {
+  // The label is the same whether or not the panel is truncated — the count
+  // reflects the actual map size. This is a contract: caller passes
+  // allRuntimes.length, never runtimes.length.
+  const truncated = headerLine(60, 8, theme());
+  const visible = headerLine(60, 5, theme());
+  assert.match(truncated, /8 agents/);
+  assert.match(visible, /5 agents/);
 });

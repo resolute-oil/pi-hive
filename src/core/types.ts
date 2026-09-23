@@ -368,6 +368,12 @@ export interface HiveState {
   activityLog?: HiveActivityEntry[];
   activityRender?: () => void;
   activityWidgetInstalled?: boolean;
+  // Once-per-session flag: log a warning the first time the activity widget
+  // renders a panel where the runtimes map has more entries than
+  // MAX_AGENTS_IN_PANEL allows. Helps diagnose the "I see N agents in the
+  // panel but the map only has M" class of bugs (or, conversely, the "panel
+  // is missing agents that team_status shows" class).
+  activityOverflowWarned?: boolean;
   // Session lifecycle guards for fire-and-forget work. Dashboard startup results
   // and mental-model distillers must not mutate a state that has shut down.
   shuttingDown?: boolean;
