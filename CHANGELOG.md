@@ -42,6 +42,19 @@ without a corresponding section.
 
 ### Fixed
 
+- Worker activity panel (`hive-activity` widget) now disambiguates duplicate
+  display names by appending the agent slug in dim parens to colliding rows
+  (e.g. `● Design Planner (design-planner-alt) — ...` instead of three identical
+  `● Design Planner` rows). The widget also lowers its hard row cap from 12
+  to 5 to bound the worst-case overflow into the command prompt area when
+  pi allocates a small vertical slot to the widget, and emits a one-time
+  `console.warn` when the runtime map holds more agents than the panel cap
+  allows so the next session can tell truncation apart from "no overflow."
+  These changes address the "active agent listed a few times" and "status
+  bleeds below the panel" symptoms reported during planner smoke tests.
+  Regression tests in `tests/activity-panel.test.ts` pin the suffix-on-
+  collision contract and the histogram that drives it.
+
 - `delegate_agent` with `fresh: true` now reloads the worker's config from YAML
   via the new `reloadAgentConfig` helper in `src/engine/session.ts`. Previously
   `fresh: true` only reset conversation continuity (archived the prior
