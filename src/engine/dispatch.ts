@@ -22,7 +22,7 @@ import {
   extractUsage,
 } from "../core/utils";
 import { logRecord } from "./state";
-import { currentAgentName, currentChangeId, currentDelegationDepth, runAsAgent, runAtDelegationDepth, runWithChange } from "./session";
+import { currentAgentName, currentChangeId, currentDelegationDepth, reloadAgentConfig, runAsAgent, runAtDelegationDepth, runWithChange } from "./session";
 import { canDelegateTo } from "./domain";
 import { agentMentalModelTarget, buildDistillerPrompt, buildWorkerPrompt, extractTagged } from "./prompts";
 import { emitHiveEvent, runtimeSummary, writeHiveStateSnapshot } from "./observability";
@@ -214,6 +214,20 @@ export async function dispatchAgent(
   if (!runtime) {
     const available = agentRoster(state);
     return { output: `Unknown agent "${agentName}". Available: ${available}`, exitCode: 1, elapsed: 0 };
+  }
+  // fresh=true reloads the worker's config from YAML so edits to the agent's
+  // .md or hive-config.yaml since session_start take effect. Without this,
+  // runtime.config (domain, tools, model, governance, agentType, …) stays
+  // frozen at session_start and the "I edited the .md and re-delegated"
+  // workflow silently uses the old grant — see the dispatch.ts fresh archive
+  // block below for the conversation-continuity side of the same flag.
+  //
+  // Reload happens here, before the plan-mode / hive-mode / budget / prompt
+  // captures, so every guard and the worker's actual run see the fresh
+  // values. Best-effort: a YAML re-parse failure leaves the runtime as-is
+  // (and the frozen config is still valid; the user can restart the session).
+  if (fresh) {
+    reloadAgentConfig(state, ctx, runtime);
   }
   // Plan mode delegates to planners, leads, AND reviewers (Phase 5.1 decision):
   // reviewers give plan-phase feedback but stay read-only on files via the type

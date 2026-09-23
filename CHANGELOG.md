@@ -42,6 +42,26 @@ without a corresponding section.
 
 ### Fixed
 
+- `delegate_agent` with `fresh: true` now reloads the worker's config from YAML
+  via the new `reloadAgentConfig` helper in `src/engine/session.ts`. Previously
+  `fresh: true` only reset conversation continuity (archived the prior
+  transcript, zeroed lifetime token/cost counters); it did NOT re-read YAML,
+  so an agent's `domain:` grant, `tools:` list, `governance:` block, or any
+  other frontmatter edit made between session_start and the fresh delegation
+  was silently ignored — the runtime kept enforcing the snapshot from
+  session_start, with the user-visible symptom being a stale "Upsert domains:"
+  denial listing only the old grants. `reloadAgentConfig` re-runs `loadConfig`
+  + `loadAgentRuntime` for the matching agent, replaces `runtime.config` and
+  `runtime.systemPrompt`, and preserves runtime state (`runCount`, lifetime
+  counters, session attachment, timers, `task`, `lastWork`, `sessionFile`).
+  Best-effort: a YAML re-parse failure leaves the runtime untouched and the
+  dispatch proceeds with the existing frozen config. The agent lookup walks
+  both the hive team and the planning team (and either team's `main` node)
+  because `delegate_agent` doesn't know which team the agent belongs to.
+  Regression tests in `tests/reload-agent-config.test.ts` cover domain edits,
+  tools edits, systemPrompt updates, runtime-state preservation, YAML parse
+  failures, removed-agent handling, and the `state.session = null` edge case.
+
 - `applyMode` for plan/hive modes now merges pi-hive's internal tool list with
   the previously-active tools instead of replacing them. Previously the
   orchestrator's main session had its active tools REPLACED with
