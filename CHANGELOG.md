@@ -6,6 +6,26 @@ without a corresponding section.
 
 ## [Unreleased]
 
+### Added
+
+- Snapshot/restore for hive→normal mode switches. When the user exits hive or
+  plan mode, the agent now resumes from a summary branch anchored at the
+  cycle entry point rather than continuing with hive-mode history in context.
+  Orphaned branches remain visible in `/tree` if the user wants to revisit
+  them. Resolves the "agent still acts like an orchestrator after
+  `/hive:normal`" symptom reported in the smoke test.
+- New `hive_cycle_summary` tool, available in normal mode so the LLM can
+  record a handoff summary in response to the follow-up turn fired on
+  hive→normal. Calling it outside an active hive handoff returns
+  `isError: true` without mutating state.
+- New `pi.on("agent_settled", ...)` registration in
+  `src/integration/hooks.ts`. The handler
+  (`handleAgentSettledForHiveRestore`) performs the
+  `branchWithSummary` → `branch(reset)` → `navigateTree` sequence,
+  retries once with an empty summary on failure, and falls back to a
+  best-effort log + UI notify on second failure. Mode switch itself
+  is never rolled back; only the history restore is best-effort.
+
 ### Changed
 
 - Hardened release publishing with protected-environment approval, npm trusted

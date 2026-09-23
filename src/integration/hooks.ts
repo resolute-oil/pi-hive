@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, SessionManager } from "@earendil-works/pi-coding-agent";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import type { AgentConfig, HiveState } from "../core/types";
@@ -15,8 +15,81 @@ import { resolveRuntime } from "../engine/agent-lookup";
 import { emitHiveEvent, emitModelCatalog, writeHiveStateSnapshot } from "../engine/observability";
 import { resolveConfiguredPath } from "../core/safe-path";
 import { cancelWorkerQueue } from "../engine/governance";
+import { clearCommandCtx, getCommandCtx } from "./commands";
 
 const EXTENSION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+// Snapshot/restore handoff for the hive→normal mode switch. Mirrors the shape
+// of pi-context's `context_compact` flow (branchWithSummary + branch reset +
+// navigateTree in an event handler) — pi-context is the pattern reference but
+// is NOT a runtime dependency here; only public Pi SDK APIs are used and no
+// code is copied from pi-context.
+//
+// Failure policy (per design Q8): retry once with an empty summary, then fall
+// back to best-effort (log + UI notify, no rethrow). The mode switch itself
+// has already succeeded by the time this fires.
+export async function handleAgentSettledForHiveRestore(state: HiveState): Promise<void> {
+  const pending = state.pendingHiveCycleRestore;
+  if (!pending) return;
+
+  // Capture-and-clear immediately so a re-entry (next agent_settled) sees an
+  // empty field and bails out — without this, a retried restore could fire
+  // twice on the same cycle.
+  state.pendingHiveCycleRestore = undefined;
+
+  const commandCtx = getCommandCtx();
+  if (!commandCtx) {
+    console.warn("[pi-hive] agent_settled: no ExtensionCommandContext captured; hive→normal history restore skipped.");
+    return;
+  }
+
+  const sm = commandCtx.sessionManager as SessionManager;
+  const snapshotLeafId = pending.snapshotLeafId;
+  const summary = pending.summary ?? "";
+
+  // First attempt.
+  try {
+    await commandCtx.waitForIdle();
+    const nid = sm.branchWithSummary(snapshotLeafId, summary);
+    sm.branch(snapshotLeafId);
+    const result = await commandCtx.navigateTree(nid, { summarize: false });
+    if (result.cancelled) throw new Error("navigateTree cancelled");
+    state.pi.sendMessage(
+      {
+        customType: "pi-hive-mode-switch",
+        content: "Hive cycle summary complete. Your previous hive-mode work has been collapsed to the summary you provided. Continue from this state in normal mode.",
+        display: false,
+      },
+      { triggerTurn: true, deliverAs: "followUp" },
+    );
+    return;
+  } catch (_err1) {
+    // First failure — fall through to retry.
+  }
+
+  // Retry with empty summary.
+  try {
+    await commandCtx.waitForIdle();
+    const nid = sm.branchWithSummary(snapshotLeafId, "");
+    sm.branch(snapshotLeafId);
+    const result = await commandCtx.navigateTree(nid, { summarize: false });
+    if (result.cancelled) throw new Error("navigateTree cancelled");
+    state.pi.sendMessage(
+      {
+        customType: "pi-hive-mode-switch",
+        content: "Hive cycle summary complete (with empty summary fallback). Continue from this state in normal mode.",
+        display: false,
+      },
+      { triggerTurn: true, deliverAs: "followUp" },
+    );
+    return;
+  } catch (err2) {
+    const message = "Hive→normal history restore failed; continuing in normal mode without restoring prior context.";
+    console.warn(`[pi-hive] ${message}`, err2);
+    if (commandCtx.hasUI) commandCtx.ui.notify(message, "warning");
+    // Don't rethrow — mode switch already succeeded.
+  }
+}
 
 export function registerHooks(pi: ExtensionAPI, state: HiveState) {
   // toolCallId → startedAt for the orchestrator's own tool calls, so
@@ -410,9 +483,18 @@ ${catalog}`,
     }
   });
 
+  // Snapshot/restore branching fires after the LLM's follow-up turn fully
+  // settles. The named handler is exported for todo 007's integration tests.
+  pi.on("agent_settled", async () => {
+    await handleAgentSettledForHiveRestore(state);
+  });
+
   pi.on("session_shutdown", async (_event, ctx: ExtensionContext) => {
     state.shuttingDown = true;
     state.lifecycleGeneration = (state.lifecycleGeneration || 0) + 1;
+    // Drop any captured ExtensionCommandContext — without this, a stale ctx
+    // from the previous session could leak into the new one.
+    clearCommandCtx();
     if (orchestratorSnapshotTimer) clearTimeout(orchestratorSnapshotTimer);
     orchestratorSnapshotTimer = undefined;
     orchestratorToolStartedAt.clear();

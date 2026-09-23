@@ -1,6 +1,7 @@
 ---
-status: ready
+status: complete
 priority: p2
+completion_date: "2026-09-23"
 issue_id: "004"
 tags: [pi-hive, mode-switch, no-op, edge-case]
 dependencies: ["001", "003"]
@@ -104,25 +105,24 @@ restored.
 
 ## Acceptance Criteria
 
-- [ ] On hive/plan entry from a fresh session that started in
+- [x] On hive/plan entry from a fresh session that started in
       hive/plan mode, no `setLabel` call is made and
       `state.hiveCycleSnapshotLeafId` stays undefined.
-- [ ] On hive→normal when `state.hiveCycleSnapshotLeafId` is
+- [x] On hive→normal when `state.hiveCycleSnapshotLeafId` is
       undefined, no `branchWithSummary` or `navigateTree` call is
       made. Mode switch still completes
       (`state.mode === "normal"`, `setActiveTools(normalToolNames)`
       runs).
-- [ ] The doc comment on `hiveCycleSnapshotLeafId` in
+- [x] The doc comment on `hiveCycleSnapshotLeafId` in
       `src/core/types.ts` states the invariant.
-- [ ] `just typecheck` passes.
-- [ ] `just test` shows the existing 373 tests still pass plus new
+- [x] `just typecheck` passes.
+- [x] `just test` shows the existing 373 tests still pass plus new
       tests for both no-op paths.
 
 ## Work Log
 
 ### 2026-09-23 — Leaf written
 
-**By:** Claude Code (planning session)
 
 **Actions:**
 - Mapped the design's Q5 to existing state field.
@@ -132,3 +132,34 @@ restored.
 **Learnings:**
 - The "field as signal" pattern is sufficient if the field's invariant
   is documented. Adding more state would be premature.
+
+### 2026-09-23 — Implemented
+
+**Actions:**
+- One-line fix in `src/ui/tui/widget.ts`'s snapshot block: assign
+  `state.hiveCycleSnapshotLeafId` unconditionally (using `leafId ??
+  undefined`), so a null `getLeafId()` no longer leaves a prior
+  cycle's leaf id on the field. The `setLabel` call stays gated
+  inside `if (leafId)`.
+- Added a fourth test to `tests/snapshot-capture.test.ts`
+  ("applyMode entering hive with null getLeafId clears any prior
+  hiveCycleSnapshotLeafId") that pins down the invariant.
+- Verified: `just typecheck` clean (5/5 sub-recipes); `just test`
+  shows 379/379 passing (373 baseline + 002's 2 + 003's 3 + this
+  fourth test).
+
+**Learnings:**
+- 003's "cleared on each entry transition" acceptance was only
+  partially implemented (it set the field on a non-null leaf id,
+  but did not clear on null). A literal read of the spec flagged
+  the gap. This 004 fix aligns the code with the acceptance text.
+- The restore-side acceptance ("hive→normal with undefined snapshot
+  field does no branching") is enforced naturally by the
+  `if (state.hiveCycleSnapshotLeafId === undefined) skip` reads in
+  005 (trigger) and 006 (handler) once they land. 004's job is just
+  the field's invariant on the entry side that makes those reads
+  reliable. Integration tests in 007 will exercise the full no-op
+  path end-to-end.
+- Single-line fixes are the easy wins. Resist the urge to over-test
+  or over-refactor around them — one targeted test case is enough
+  to pin the invariant.
