@@ -1,6 +1,7 @@
 ---
-status: ready
+status: complete
 priority: p2
+completion_date: "2026-09-23"
 issue_id: "001"
 tags: [pi-hive, mode-switch, applymode, refactor]
 dependencies: []
@@ -173,28 +174,27 @@ either. The trigger calls `state.pi.sendUserMessage(...)`.
 
 ## Acceptance Criteria
 
-- [ ] All four mode-switch command handlers
+- [x] All four mode-switch command handlers
       (`/hive:normal`, `/hive:plan-mode`, `/hive`, `/hive:toggle`) and
       `/hive:execute` type their `ctx` parameter as
       `ExtensionCommandContext`.
-- [ ] Keyboard-shortcut path (`pi.registerShortcut`) left untouched.
-- [ ] A module-level `commandCtx` variable is set on the first
+- [x] Keyboard-shortcut path (`pi.registerShortcut`) left untouched.
+- [x] A module-level `commandCtx` variable is set on the first
       command call.
-- [ ] A `getCommandCtx()` getter is exported.
-- [ ] A `session_shutdown` event handler clears `commandCtx` to
+- [x] A `getCommandCtx()` getter is exported.
+- [x] A `session_shutdown` event handler clears `commandCtx` to
       `null`.
-- [ ] `just typecheck` passes.
-- [ ] `just test` shows the existing 373 tests still pass (no new
+- [x] `just typecheck` passes.
+- [x] `just test` shows the existing 373 tests still pass (no new
       tests required for this leaf — it's a type widening + one-line
       stash).
-- [ ] No new imports beyond `ExtensionCommandContext` from the existing
+- [x] No new imports beyond `ExtensionCommandContext` from the existing
       `@earendil-works/pi-coding-agent` import.
 
 ## Work Log
 
 ### 2026-09-23 — Leaf written
 
-**By:** Claude Code (planning session)
 
 **Actions:**
 - Identified that the original todo 001 (applyMode signature
@@ -212,3 +212,30 @@ either. The trigger calls `state.pi.sendUserMessage(...)`.
   ExtensionCommandContext / ExtensionContext asymmetry.
 - The `session_shutdown` clear is critical: without it, a stale
   CommandCtx from a previous session could leak into the new one.
+
+### 2026-09-23 — Leaf implemented
+
+
+**Actions:**
+- Widened all 5 command handlers' `ctx` parameter to
+  `ExtensionCommandContext`. Added module-level `commandCtx` stash,
+  `getCommandCtx()` getter, `clearCommandCtx()` setter.
+- Wired `commandCtx = ctx;` into each widened handler body.
+- Added `clearCommandCtx();` to the `session_shutdown` handler in
+  `src/integration/hooks.ts`, with a comment explaining why.
+- Verified: `just typecheck` (5 sub-recipes incl. dashboard) passes;
+  `just test` confirms 373/373 still pass (no new tests added).
+
+**Learnings:**
+- pi-context's pattern of capturing ExtensionCommandContext on
+  every command call (not just first) is simpler and equivalent in
+  behavior — session_shutdown clears the stash, so staleness is
+  impossible.
+- `just typecheck`'s dashboard sub-recipe requires `ui/web/node_modules`
+  to be populated. The worktree's `ui/web/node_modules` was empty on
+  first use; ran `npm install` to populate. This is an env setup step,
+  not a code change.
+- `just lint` shows 3 pre-existing errors and 62 warnings on the
+  entry baseline (none in the files touched by 001). Out of scope
+  for this feature; flagged in the plan-doc work log as a separate
+  audit task.

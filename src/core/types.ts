@@ -375,4 +375,13 @@ export interface HiveState {
   backgroundTasks?: Set<Promise<void>>;
   distillQueues?: Map<string, Promise<void>>;
   backgroundDistillerSessions?: Set<any>;
+  // Snapshot/restore handoff for the mode-switch flow (set in applyMode when
+  // transitioning hive→normal with a baseline; `summary` is filled in by the
+  // LLM's hive_cycle_summary tool call; cleared in the agent_settled handler
+  // after the branching + restore completes).
+  pendingHiveCycleRestore?: { snapshotLeafId: string; summary?: string };
+  // Leaf id captured on the most recent hive/plan entry transition. Used as the
+  // branch point for the hive→normal restore. Reset on each entry transition so
+  // its presence reliably means "a snapshot was taken for the current cycle."
+  hiveCycleSnapshotLeafId?: string;
 }

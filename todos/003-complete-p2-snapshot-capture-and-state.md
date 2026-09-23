@@ -1,6 +1,7 @@
 ---
-status: ready
+status: complete
 priority: p2
+completion_date: "2026-09-23"
 issue_id: "003"
 tags: [pi-hive, mode-switch, snapshot, session-manager]
 dependencies: ["001"]
@@ -118,29 +119,28 @@ test must lock it in.
 
 ## Acceptance Criteria
 
-- [ ] On `applyMode(state, ctx, mode)` where `mode !== "normal"` and
+- [x] On `applyMode(state, ctx, mode)` where `mode !== "normal"` and
       mode is actually changing, the current leaf id is captured via
       `ctx.sessionManager.getLeafId()`.
-- [ ] The captured leaf is labeled via
+- [x] The captured leaf is labeled via
       `pi.setLabel(leafId, "hive-cycle-<stamp>")` where `<stamp>` is
       an ISO timestamp with `:` and `.` replaced.
-- [ ] `state.hiveCycleSnapshotLeafId` is set to the captured leaf id.
-- [ ] If `getLeafId()` returns null, the snapshot is skipped (no
+- [x] `state.hiveCycleSnapshotLeafId` is set to the captured leaf id.
+- [x] If `getLeafId()` returns null, the snapshot is skipped (no
       label written, no state field set).
-- [ ] Mid-cycle re-entry (mode is already hive/plan) does NOT
+- [x] Mid-cycle re-entry (mode is already hive/plan) does NOT
       re-snapshot or overwrite the label.
-- [ ] `state.hiveCycleSnapshotLeafId` is cleared on each entry
+- [x] `state.hiveCycleSnapshotLeafId` is cleared on each entry
       transition (so the field's "exists" reliably means "a snapshot
       was taken for this cycle").
-- [ ] `just typecheck` passes.
-- [ ] `just test` shows the existing 373 tests still pass plus new
+- [x] `just typecheck` passes.
+- [x] `just test` shows the existing 373 tests still pass plus new
       snapshot-capture tests pass.
 
 ## Work Log
 
 ### 2026-09-23 — Leaf written (revised from original sketch)
 
-**By:** Claude Code (planning session)
 
 **Actions:**
 - Corrected the original sketch's `ctx.sessionManager.setLabel(...)`
@@ -154,3 +154,41 @@ test must lock it in.
 - The public `pi.setLabel` is the cleanest label-writing path.
   Reserve the cast `ctx.sessionManager as SessionManager` for
   `branchWithSummary` / `branch` where no public alternative exists.
+
+### 2026-09-23 — Implemented
+
+**Actions:**
+- Added `hiveCycleSnapshotLeafId?: string` to `HiveState` in
+  `src/core/types.ts`, next to `pendingHiveCycleRestore` from todo 002.
+- In `src/ui/tui/widget.ts`'s `applyMode`: between the drain guard and
+  `state.mode = mode`, added a snapshot block gated on
+  `mode !== "normal" && changesMode`. Captures
+  `ctx.sessionManager.getLeafId()`; if non-null, calls
+  `state.pi.setLabel(leafId, "hive-cycle-<ISO-stamp>")` with `:` and
+  `.` replaced for filesystem-safety, and stores the leaf id on
+  `state.hiveCycleSnapshotLeafId`.
+- Mid-cycle re-entry is naturally gated by `changesMode` being false
+  when mode is unchanged; no extra check needed.
+- Used `ctx.sessionManager?.getLeafId?.()` (defensive optional chain)
+  so test fixtures with stripped `sessionManager` objects don't crash.
+- Added `getLeafId: () => null` to `tests/session-lifecycle.integration.test.ts`'s
+  ctx mock so its existing `applyMode(state, ctx, "hive", { notify: false })`
+  call exercises the new path explicitly.
+- Added `tests/snapshot-capture.test.ts` with three cases: entering
+  hive-from-normal captures leaf+label; mid-cycle re-entry leaves
+  snapshot untouched; null `getLeafId` skips silently.
+- Verified: `just typecheck` clean (5/5 sub-recipes); `just test`
+  shows 378/378 passing (373 baseline + 2 (todo 002) + 3 (todo 003)).
+
+**Learnings:**
+- The defensive optional chain on `ctx.sessionManager?.getLeafId?.()`
+  is necessary because `applyMode`'s existing tests exercise both
+  stripped and full ctx shapes. Production ctx always has a full
+  `ExtensionContext`; only test mocks vary.
+- The mid-cycle re-entry guard `mode !== "normal" && changesMode` is
+  enough — no extra "is hive already?" check needed. `changesMode`
+  is the only signal that matters.
+- Capturing the leaf BEFORE `state.mode = mode` is more honest
+  semantically (the snapshot is what the user was at), though
+  timing-wise identical: `getLeafId` only changes when an entry is
+  appended, which doesn't happen during `applyMode`.

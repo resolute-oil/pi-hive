@@ -1,6 +1,7 @@
 ---
-status: ready
+status: complete
 priority: p2
+completion_date: "2026-09-23"
 issue_id: "005"
 tags: [pi-hive, mode-switch, llm-instruction, follow-up]
 dependencies: ["001", "002", "003"]
@@ -146,35 +147,35 @@ is used. Acceptable.
 
 ## Acceptance Criteria
 
-- [ ] On hive→normal with `state.hiveCycleSnapshotLeafId` set,
+- [x] On hive→normal with `state.hiveCycleSnapshotLeafId` set,
       `applyMode` sets
       `state.pendingHiveCycleRestore = { snapshotLeafId }` before
       sending the trigger.
-- [ ] `applyMode` calls
+- [x] `applyMode` calls
       `state.pi.sendUserMessage(<trigger text>, { deliverAs: "followUp" })`
       with the documented message text.
-- [ ] `applyMode` returns `true` immediately after the trigger fires
+- [x] `applyMode` returns `true` immediately after the trigger fires
       (no await).
-- [ ] On hive→normal with `state.hiveCycleSnapshotLeafId` undefined,
+- [x] On hive→normal with `state.hiveCycleSnapshotLeafId` undefined,
       the trigger is NOT sent and `state.pendingHiveCycleRestore` is
       NOT set.
-- [ ] On hive→hive or normal→normal, no trigger fires and no pending
+- [x] On hive→hive or normal→normal, no trigger fires and no pending
       state is touched.
-- [ ] `just typecheck` passes.
-- [ ] A unit test asserts:
+- [x] `just typecheck` passes.
+- [x] A unit test asserts:
   - On hive→normal with a baseline, `sendUserMessage` is called once
     with the documented text.
   - `state.pendingHiveCycleRestore.snapshotLeafId` equals
     `state.hiveCycleSnapshotLeafId`.
   - `state.pendingHiveCycleRestore.summary` is undefined at this
     point (the tool hasn't fired yet).
-- [ ] `just test` shows the existing 373 tests still pass.
+- [x] `just test` shows the existing tests still pass plus the new
+      trigger tests.
 
 ## Work Log
 
 ### 2026-09-23 — Leaf written (rewritten from previous "sendMessage + Promise" sketch)
 
-**By:** Claude Code (planning session)
 
 **Actions:**
 - Replaced the original sketch (`pi.sendMessage` + Promise to await
@@ -193,3 +194,43 @@ is used. Acceptable.
   work after the LLM responds is an event handler.
 - The trigger message wording matters: it must be specific enough
   that the LLM reliably calls the tool with the right content.
+
+### 2026-09-23 — Implemented
+
+**Actions:**
+- Inserted the trigger block in `src/ui/tui/widget.ts` inside
+  `applyMode`'s hive→normal branch, after `setActiveTools` and
+  before the TUI widget cleanup. Sets
+  `state.pendingHiveCycleRestore = { snapshotLeafId }` and fires
+  `state.pi.sendUserMessage(<verbatim trigger>, { deliverAs:
+  "followUp" })`. Diff: +24/−1 in widget.ts.
+- Added `tests/trigger-summary-prompt.test.ts` with 4 cases:
+  hive→normal with baseline (positive), hive→normal without
+  baseline (todo 004's no-op), hive→hive mid-cycle, and
+  normal→normal. The trigger text is pinned by exact equality
+  against a constant in the test file so wording drift fails
+  loudly.
+- Verified: `just typecheck` clean (5/5 sub-recipes);
+  `just test` shows 383/383 passing (379 baseline + 4 new).
+
+**Refinement on the proposal (within acceptance):**
+
+The proposal shipped to the user used `if (state.hiveCycleSnapshotLeafId)`
+as the trigger gate. I added `&& changesMode` to it. Rationale:
+the leaf's own acceptance criterion says "on hive→hive or
+normal→normal, no trigger fires," but without `changesMode` the
+no-op normal→normal re-call (user types `/hive:normal` while
+already in normal) would re-fire the trigger and clobber
+`pendingHiveCycleRestore`. This isn't a deviation from the plan
+or the design — it makes the implementation satisfy the
+acceptance criterion the proposal cited. Documented inline as a
+block comment in `applyMode`.
+
+**Learnings:**
+- Acceptance text vs literal code can disagree even in a
+  well-reviewed proposal. The right move is to align the code with
+  the acceptance, not the other way around, and log the
+  one-token refinement so the next reviewer can audit it.
+- `agent_settled` is still TODO 006's job. This leaf only sets up
+  the trigger and the state stash; the actual `branchWithSummary` +
+  `branch(reset)` + `navigateTree` sequence lands next.

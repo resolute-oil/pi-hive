@@ -71,7 +71,7 @@ function lifecycleContext(cwd: string, entries: any[]) {
     mode: "rpc",
     hasUI: true,
     modelRegistry: { find: () => ({ provider: "test", id: "model", modelId: "model" }), getAll: (): any[] => [] },
-    sessionManager: { getEntries: () => entries },
+    sessionManager: { getEntries: () => entries, getLeafId: () => null },
     ui: {
       notify(...args: any[]) { notifications.push(args); },
       setStatus(...args: any[]) { statuses.push(args); },
