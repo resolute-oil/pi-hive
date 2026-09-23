@@ -29,7 +29,10 @@ const expectedCommands = [
 ];
 
 const expectedTools = [
-  "ask_user",
+  // ask_user is provided by the optional pi-ask-user peer dep, not by
+  // pi-hive. See the regression test in tests/questions.test.ts and the
+  // "documentation names every public hive tool" test below for the
+  // doc-side verification.
   "delegate_agent",
   "hive_sdd_status",
   "plan_new",
@@ -62,6 +65,16 @@ test("documentation names every public hive tool", () => {
   for (const tool of implemented) {
     assert.match(publicDocs, new RegExp(`\\b${escaped(tool)}\\b`), `documentation should name ${tool}`);
   }
+});
+
+// ask_user is provided by the optional pi-ask-user peer dep. Verifies that
+// the dependency is wired up correctly (package.json) and that the docs
+// surface the tool to users who install the peer dep.
+test("ask_user is wired as a peer-dep surface", () => {
+  assert.match(packageJson, /"pi-ask-user"/, "pi-ask-user must be listed in package.json");
+  assert.match(publicDocs, /\bask_user\b/, "ask_user should be documented (peer dep feature)");
+  // pi-hive must not register ask_user itself — that's the peer dep's job.
+  assert.equal(toolsSource.match(/name:\s*"ask_user"/g), null, "pi-hive must not register ask_user; it's the peer dep's tool");
 });
 
 test("documentation rejects retired architecture and command terminology", () => {

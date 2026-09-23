@@ -35,10 +35,12 @@ async function handlePromotedQuestion(state: HiveState, ctx: ExtensionContext, a
 
 // Common hive tools are active in both plan and execution mode. Plan lifecycle
 // tools are active only in plan mode. Approval is no longer a tool — it happens
-// in the dashboard's plan-review UI. ask_user lets a planner interrogate the
-// human before writing artifacts.
+// in the dashboard's plan-review UI. ask_user is registered globally by the
+// optional pi-ask-user peer dep (multi-select / options / freeform / comments /
+// configurable timeout) — planners use it directly without it appearing in
+// pi-hive's tool list.
 const COMMON_HIVE_TOOLS = ["route_agent", "delegate_agent", "team_status", "team_conversation", "hive_sdd_status"];
-const PLAN_MODE_TOOLS = [...COMMON_HIVE_TOOLS, "plan_new", "plan_select", "ask_user"];
+const PLAN_MODE_TOOLS = [...COMMON_HIVE_TOOLS, "plan_new", "plan_select"];
 const HIVE_MODE_TOOLS = [...COMMON_HIVE_TOOLS, "plan_task_complete"];
 
 // The bridge cursor is persisted BESIDE the action queue so it survives an
