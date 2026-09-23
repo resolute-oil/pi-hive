@@ -40,6 +40,29 @@ without a corresponding section.
 - Regression tests in `tests/questions.test.ts` that verify pi-hive does not
   register `ask_user` locally.
 
+### Fixed
+
+- `applyMode` for plan/hive modes now merges pi-hive's internal tool list with
+  the previously-active tools instead of replacing them. Previously the
+  orchestrator's main session had its active tools REPLACED with
+  `PLAN_MODE_TOOLS` / `HIVE_MODE_TOOLS` on every mode entry, which silently
+  dropped any globally-registered peer-dep tool — most importantly `ask_user`
+  from `pi-ask-user` — the moment the user entered plan or hive mode. The
+  tool's schema still appeared in the agent's prompt context (the schema is
+  global), but the per-session handler wiring was gone, so calls resolved to
+  "Tool not found". The merge preserves shared `COMMON_HIVE_TOOLS`
+  (`route_agent`, `delegate_agent`, `team_status`, `team_conversation`,
+  `hive_sdd_status`) across both modes, drops tools exclusive to the *other*
+  hive mode (e.g. `plan_new` / `plan_select` are dropped on hive entry;
+  `plan_task_complete` is dropped on plan entry), and keeps everything else
+  — standard Pi tools, peer-dep registrations, and any other globally
+  registered tool — intact. This is the symmetric counterpart of the
+  `normalToolNames` invariant that already drops hive tools from the
+  normal-mode active set. Regression tests in
+  `tests/active-tools-mode-switch.test.ts` pin the contract for plan entry,
+  hive entry, full normal→plan→hive→normal cycles, and the no-op
+  normal→normal case.
+
 - Snapshot/restore for hive→normal mode switches. When the user exits hive or
   plan mode, the agent now resumes from a summary branch anchored at the
   cycle entry point rather than continuing with hive-mode history in context.
