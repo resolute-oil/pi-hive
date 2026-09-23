@@ -20,6 +20,7 @@ import {
 import { allConfiguredAgents, loadConfig, teamForMode } from "../core/config";
 import { canonicalMode } from "../core/types";
 import { runtimeKey } from "./agent-lookup";
+import { agentMatches, agentSlug } from "../core/agent-tree";
 import { resolveConfiguredPath } from "../core/safe-path";
 
 export function restoreOrCreateSession(state: HiveState, ctx: ExtensionContext, _cfg: HiveConfig): SessionState {
@@ -123,6 +124,60 @@ export function loadAgentRuntime(state: HiveState, ctx: ExtensionContext, cfg: H
     runCount: 0,
     sessionFile,
   };
+}
+
+// Reload this worker's config from YAML so any edits to the agent's .md or
+// hive-config.yaml since session_start take effect. Called by dispatchAgent
+// when fresh=true is requested — without it, runtime.config (domain, tools,
+// model, governance, agentType, …) stays frozen at session_start and the
+// "I edited the .md and re-delegated" workflow silently uses the old grant.
+//
+// Behavior:
+//   - Returns true if the YAML was re-parsed and the runtime was updated.
+//   - Returns false on any failure (YAML parse error, agent removed from
+//     config, missing session dir). The runtime is left untouched in that
+//     case — callers should treat false as "best-effort reload did not
+//     happen" and continue with whatever was there before.
+//   - Updates `runtime.config` and `runtime.systemPrompt` from the freshly
+//     merged AgentConfig.
+//   - Preserves runtime state that a full loadAgentRuntime would clobber:
+//     `runCount`, `inputTokens`/`outputTokens`/… counters, the active
+//     session attachment, the timer, `lastWork`, and `task`.
+//   - Preserves `runtime.sessionFile`. If the slug changed (rare), the
+//     rebuilt sessionFile would differ; keeping the old one means the
+//     existing fresh-archive dance in dispatch.ts targets the same path
+//     the worker has been using. Renaming an agent is a significant
+//     identity change that warrants a session restart to recover cleanly.
+export function reloadAgentConfig(state: HiveState, ctx: ExtensionContext, runtime: AgentRuntime): boolean {
+  if (!state.session) return false;
+  let freshConfig: HiveConfig;
+  try {
+    freshConfig = loadConfig(ctx.cwd);
+  } catch {
+    return false;
+  }
+  // The agent may live in either the hive team or the planning team (or be
+  // the orchestrator of either). loadConfig exposes both teams separately
+  // and a top-level `agents` that mirrors the hive team only — search both.
+  const freshAgent = [
+    freshConfig.hive?.main,
+    ...(freshConfig.hive?.agents ?? []),
+    freshConfig.planning?.main,
+    ...(freshConfig.planning?.agents ?? []),
+  ]
+    .filter((a): a is AgentConfig => Boolean(a))
+    .find(
+      (a) => agentMatches(a, runtime.config.name) || agentSlug(a) === agentSlug(runtime.config),
+    );
+  if (!freshAgent) return false;
+  try {
+    const rebuilt = loadAgentRuntime(state, ctx, freshConfig, freshAgent);
+    runtime.config = rebuilt.config;
+    runtime.systemPrompt = rebuilt.systemPrompt;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Point the active config (orchestrator/agents) at the team for `mode` and
