@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { formatElapsed, metaOf, nameHistogram, renderAgentRow, statusIcon, workOf } from "../src/ui/tui/activity.ts";
+import { formatElapsed, headerLine, metaOf, nameHistogram, renderAgentRow, statusIcon, workOf } from "../src/ui/tui/activity.ts";
 import type { AgentRuntime } from "../src/core/types.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
@@ -152,4 +152,50 @@ test("nameHistogram falls back to 'agent' for runtimes without a name", () => {
   const b = runtime({ config: {} as any });
   const counts = nameHistogram([a, b]);
   assert.equal(counts.get("agent"), 2);
+});
+
+// ── headerLine builds the bordered panel header ───────────────────────────
+
+test("headerLine produces `──── Hive Activity · N agents ────` for a 60-col panel", () => {
+  const line = headerLine(60, 4, theme());
+  assert.equal(visibleWidth(line), 60, `expected 60 cols, got ${visibleWidth(line)}`);
+  // Label is centered, framed by ─ characters.
+  assert.match(line, /Hive Activity/);
+  assert.match(line, /4 agents/);
+  // The dashes add up to width − label-length. Visible label length with
+  // surrounding spaces is 26 chars (" Hive Activity · 4 agents "), so
+  // 60 − 26 = 34 dashes, split 17/17.
+  // eslint-disable-next-line no-control-regex
+  const stripped = line.replace(/\x1b\[\d+m/g, "");
+  const leading = stripped.match(/^─*/)?.[0].length || 0;
+  const trailing = stripped.match(/─*$/)?.[0].length || 0;
+  assert.equal(leading + trailing, 34, "dash counts add up to width − label");
+  assert.ok(Math.abs(leading - trailing) <= 1, "label approximately centered");
+});
+
+test("headerLine pluralizes 'agent' vs 'agents' correctly", () => {
+  const one = headerLine(40, 1, theme());
+  assert.match(one, /1 agent\b/);
+  assert.doesNotMatch(one, /1 agents/);
+  const many = headerLine(40, 7, theme());
+  assert.match(many, /7 agents/);
+  const zero = headerLine(40, 0, theme());
+  assert.match(zero, /0 agents/);
+});
+
+test("headerLine falls back to the label alone when width can't fit dashes + label", () => {
+  const line = headerLine(15, 4, theme());
+  assert.ok(visibleWidth(line) <= 15, `expected ≤ 15 cols, got ${visibleWidth(line)}`);
+  // Label still visible so operators know what the panel is.
+  assert.match(line, /Hive Activity/);
+});
+
+test("headerLine uses the map count, not the visible row count", () => {
+  // The label is the same whether or not the panel is truncated — the count
+  // reflects the actual map size. This is a contract: caller passes
+  // allRuntimes.length, never runtimes.length.
+  const truncated = headerLine(60, 8, theme());
+  const visible = headerLine(60, 5, theme());
+  assert.match(truncated, /8 agents/);
+  assert.match(visible, /5 agents/);
 });

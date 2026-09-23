@@ -91,8 +91,28 @@ function nameHistogram(runtimes: AgentRuntime[]): Map<string, number> {
   return counts;
 }
 
+// Build the single-line header rendered above the panel. Layout is
+// `─…─ <label> ─…─` with the label centered (modulo one extra dash on the
+// right when the available space is odd) and the label themed dim. The
+// count uses the *map* size (caller decides), not the visible-row count,
+// so a truncated panel surfaces the real number to the operator.
+function headerLine(width: number, count: number, theme: any): string {
+  const DASH = "─";
+  const noun = count === 1 ? "agent" : "agents";
+  const label = ` Hive Activity · ${count} ${noun} `;
+  if (width <= label.length) {
+    // Too narrow for the dashes-and-label layout; return just the label
+    // (possibly truncated) so the operator still sees what the block is.
+    return truncateToWidth(label.trim(), width, theme.fg("dim", "…"));
+  }
+  const remaining = width - label.length;
+  const leftLen = Math.floor(remaining / 2);
+  const rightLen = remaining - leftLen;
+  return DASH.repeat(leftLen) + theme.fg("dim", label) + DASH.repeat(rightLen);
+}
+
 // Internal helpers, exported for unit tests. Pure functions of (runtime, width).
-export { renderAgentRow, statusIcon, formatElapsed, metaOf, workOf, nameHistogram };
+export { renderAgentRow, statusIcon, formatElapsed, metaOf, workOf, nameHistogram, headerLine };
 
 export function addHiveActivity(state: HiveState, entry: { ts?: string } & Record<string, unknown>) {
   if (state.mode === "normal") return;
@@ -144,7 +164,14 @@ export function updateHiveActivityWidget(state: HiveState) {
         // map — see MAX_AGENTS_IN_PANEL comment for why this is a defensive
         // bound and not a config knob.
         const runtimes = sorted.slice(0, MAX_AGENTS_IN_PANEL);
-        if (!runtimes.length) return [];
+        // Single-line border above the panel. Combines a labeled header
+        // (`Hive Activity · N agents`) with the box-drawing horizontal rule
+        // the user requested, so the panel is visually demarcated from chat
+        // scrollback above it and the label tells operators what the block is
+        // (without having to remember). The count is the *map* size, not the
+        // visible row count, so a truncated panel surfaces the real number.
+        const header = headerLine(width, allRuntimes.length, theme);
+        if (!runtimes.length) return [header];
         // Detect duplicate display names so each colliding row can render with
         // its slug in parens. Operators see distinct rows instead of N rows that
         // all say "Design Planner" and look like a bug.
@@ -162,11 +189,12 @@ export function updateHiveActivityWidget(state: HiveState) {
           );
           state.activityOverflowWarned = true;
         }
-        return runtimes.map((rt) => {
+        const rows = runtimes.map((rt) => {
           const name = String(rt.config.name || "agent");
           const suffix = nameCounts.get(name) && nameCounts.get(name)! > 1 ? agentSlug(rt.config) : undefined;
           return renderAgentRow(rt, width, theme, suffix);
         });
+        return [header, ...rows];
       },
     };
   });
