@@ -427,10 +427,19 @@ export async function handleReviewSurface(surface: ReviewSurface, req: Request, 
 
   // Authenticated dashboard endpoint: mint a bounded capability for exactly the
   // current project/change/artifact bytes. The generic server gate verifies the
-  // daemon bearer before this route; strict browser metadata prevents headerless
-  // local callers from using a stolen bearer alone.
+  // daemon bearer before this route. Browser-origin binding here only requires
+  // a same-origin Origin header; the referer pathname is NOT enforced because
+  // the dashboard mints sessions from any page (Plans tab, agent log, change
+  // detail, …) and constraining the pathname would over-restrict those flows
+  // without adding real safety. The daemon-bearer auth is the substantive check;
+  // a headerless local script without the bearer is rejected at the generic
+  // gate before this route runs. The stricter pathname match is reserved for
+  // /api/approve|deny|feedback below, which run inside the /pl-review/ iframe
+  // where the referer is always that mount path.
   if (url.pathname === "/review-sessions" && req.method === "POST") {
-    if (!exactOriginMetadata(req, url, "/")) return json({ error: "invalid request origin" }, 403, true);
+    if (req.headers.get("host") !== url.host) return json({ error: "invalid request origin" }, 403, true);
+    const origin = req.headers.get("origin");
+    if (origin !== url.origin) return json({ error: "invalid request origin" }, 403, true);
     const body = await readBoundedJson(req);
     if (body.ok === false) return json({ error: body.error }, 400, true);
     const rid = body.value.rid;
