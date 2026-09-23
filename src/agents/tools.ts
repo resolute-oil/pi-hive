@@ -14,10 +14,9 @@ import {
 import { routeAgents } from "../engine/routing";
 import { dispatchAgent, scheduleMentalModelDistillation } from "../engine/dispatch";
 import { renderHiveSddStatus, resolveHiveSddStatus } from "../engine/sdd";
-import { currentAgentName, currentChangeId } from "../engine/session";
+import { currentChangeId } from "../engine/session";
 import { emitHiveEvent } from "../engine/observability";
 import * as openspec from "../engine/openspec";
-import { enqueueQuestion, recordQuestion } from "../engine/questions";
 import { agentRef, agentRoster, resolveRuntime } from "../engine/agent-lookup";
 import { agentSlug } from "../core/utils";
 import { budgetRemaining, effectiveWorkerGovernance } from "../engine/governance";
@@ -296,60 +295,6 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
     },
   }),
 
-  defineTool({
-    name: "ask_user",
-    label: "Ask User",
-    description: "Ask the human a clarifying question BEFORE writing plan artifacts when scope, requirements, or acceptance criteria are ambiguous. In a TUI session this pops a native input dialog and blocks for the answer (works from a delegated planner too, since it uses the main session's UI). Do not guess ambiguous requirements — ask.",
-    parameters: Type.Object({
-      question: Type.String({ description: "The specific clarifying question to put to the human." }),
-      changeId: Type.Optional(Type.String({ description: "The change this question relates to. Defaults to the active change." })),
-    }),
-    async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
-      const p = params as { question: string; changeId?: string };
-      const question = String(p.question || "").trim();
-      if (!question) return { content: [{ type: "text", text: "ask_user requires a non-empty question." }], details: { ok: false } };
-      const change = (p.changeId?.trim() || currentChangeId() || state.activeChangeId || "").trim();
-      const askedBy = currentAgentName();
-
-      // Prefer pi's NATIVE input dialog and block this turn for the answer —
-      // returning it directly to the caller, no dashboard-actions round-trip.
-      // A delegated planner's own ctx is headless (hasUI:false), but workers run
-      // in-process, so it reaches the MAIN session's ui via state.widgetCtx. Use
-      // the worker's own ui when it has one, else the main session's TUI ui.
-      const ownUi = ctx.hasUI ? (ctx as any).ui : undefined;
-      const mainUi = state.widgetCtx?.mode === "tui" ? (state.widgetCtx as any).ui : undefined;
-      const ui = (ownUi?.input ? ownUi : mainUi?.input ? mainUi : undefined) as
-        | { input(title: string, placeholder?: string, opts?: { timeout?: number }): Promise<string | undefined>; notify?: (message: string, level?: "info" | "warning" | "error") => void }
-        | undefined;
-      if (ui) {
-        let answer: string | undefined;
-        try {
-          // Pi's ExtensionInputComponent currently ignores its placeholder, so
-          // the question must be visible outside the placeholder field.
-          ui.notify?.(`Planning question from ${askedBy}: ${question}`, "info");
-          answer = await ui.input(`Planning question from ${askedBy}: ${question}`, question);
-        } catch {
-          answer = undefined;
-        }
-        if (change) await recordQuestion(ctx.cwd, change, question, answer || undefined);
-        if (answer && answer.trim()) {
-          return { content: [{ type: "text", text: `User answered: ${answer.trim()}` }], details: { ok: true, question, answer: answer.trim() } };
-        }
-        return { content: [{ type: "text", text: "The user dismissed the question without answering. Proceed with a clearly-stated assumption and flag it for later confirmation." }], details: { ok: true, question, answer: null } };
-      }
-
-      // Truly headless (no TUI anywhere — cron / RPC / print mode): fall back to
-      // the dashboard-actions bridge so the question is at least surfaced and
-      // file-recorded, and the planner records an assumption to proceed.
-      if (change) await recordQuestion(ctx.cwd, change, question);
-      const mainDir = state.session?.sessionDir;
-      const promoted = mainDir ? await enqueueQuestion(mainDir, { question, change: change || undefined, askedBy }) : false;
-      const text = promoted
-        ? `No interactive prompt is available; your question was recorded and surfaced to the dashboard:\n"${question}"\nRecord a clearly-stated assumption and proceed; flag it for the human to confirm.`
-        : `No interactive session is available to answer right now. Record a clearly-stated assumption for "${question}", proceed, and flag it for the human to confirm.`;
-      return { content: [{ type: "text", text }], details: { ok: true, question, promoted } };
-    },
-  }),
   // hive_cycle_summary — captures the LLM's handoff summary during a
   // hive→normal (or plan→normal) transition. Set on
   // state.pendingHiveCycleRestore by applyMode when there is a baseline;

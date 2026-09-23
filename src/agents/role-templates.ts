@@ -8,9 +8,11 @@ export function plannerOperatingTemplate(stages?: readonly PlanStage[]): string 
     + "`openspec/changes/<change-id>/`: `proposal.md`, `design.md`, "
     + "`specs/<capability>/spec.md`, and `tasks.md`. Never use `.pi/hive/plans/` or "
     + "create `requirements.md`; requirements belong in capability spec deltas. Ask the human "
-    + "with `ask_user` before writing when scope or acceptance criteria are ambiguous. "
-    + "Give `tasks.md` concrete Markdown checkboxes (`- [ ] <id> ...`). Do not modify "
-    + "production or test code."
+    + "with `ask_user` before writing when scope or acceptance criteria are ambiguous — the "
+    + "tool (provided by the optional pi-ask-user peer dep) supports multi-choice options "
+    + "with descriptions, freeform input, optional comments, and a configurable timeout, so "
+    + "prefer structured options when the choice space is bounded. Give `tasks.md` concrete "
+    + "Markdown checkboxes (`- [ ] <id> ...`). Do not modify production or test code."
     + ownership;
 }
 

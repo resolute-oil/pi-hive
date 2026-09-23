@@ -1,4 +1,4 @@
-export const HIVE_TOOL_NAMES = new Set(["route_agent", "delegate_agent", "team_status", "team_conversation", "hive_sdd_status", "submit_review_verdict", "plan_new", "plan_select", "plan_task_complete", "ask_user"]);
+export const HIVE_TOOL_NAMES = new Set(["route_agent", "delegate_agent", "team_status", "team_conversation", "hive_sdd_status", "submit_review_verdict", "plan_new", "plan_select", "plan_task_complete"]);
 
 // Hive tools that are granted by AGENT TYPE, not by the per-agent tools list, so
 // they survive dispatch's tools-list filter (a reviewer need not list its own
