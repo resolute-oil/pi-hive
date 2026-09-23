@@ -4,32 +4,37 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildHiveTools } from "../src/agents/tools.ts";
+import { HIVE_TOOL_NAMES } from "../src/core/constants.ts";
 import { enqueueQuestion, recordQuestion } from "../src/engine/questions.ts";
-import { runWithChange } from "../src/engine/session.ts";
-import type { AgentRuntime, HiveState } from "../src/core/types.ts";
 
-function runtime(name: string, extra: Partial<AgentRuntime["config"]> = {}): AgentRuntime {
-  return {
-    config: { name, path: `${name}.md`, role: "member", routingTags: [], domain: [], ...extra },
-    systemPrompt: "", status: "idle", task: "", lastWork: "", toolCount: 0, elapsedMs: 0,
-    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, contextPct: 0, runCount: 0, sessionFile: "",
-  };
-}
+// The ask_user tool itself moved to the optional pi-ask-user peer dep (see
+// CHANGELOG [Unreleased]). These tests cover the file-backed trail and the
+// dashboard-actions bridge, which remain pi-hive-owned — they're the legacy
+// surface for surfacing questions from headless workers via the dashboard.
 
-function stateWith(dir: string, runtimes: AgentRuntime[]): HiveState {
-  return {
-    pi: {} as any, config: { orchestrator: { name: "Orchestrator", path: "o.md" }, agents: [], sharedContext: [], settings: { subagentOutputLimit: 100, defaultTools: "read", maxParallel: 1, distiller: { enabled: false, model: "", conversationLines: 10 } } },
-    session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: join(dir, "e.jsonl") },
-    runtimes: new Map(runtimes.map((r) => [r.config.name.toLowerCase(), r])),
-    widgetCtx: null, activeRuns: 0, mode: "plan", normalToolNames: [],
-    sddStatus: null, obsSeq: 0, latestVerdicts: new Map(),
-  };
-}
+// Regression: pi-hive must not register ask_user locally — the peer dep owns it.
+test("buildHiveTools does not register ask_user (lives in the pi-ask-user peer dep)", () => {
+  const tools = buildHiveTools(
+    {
+      pi: {} as any,
+      config: null,
+      session: null,
+      runtimes: new Map(),
+      widgetCtx: null,
+      activeRuns: 0,
+      mode: "normal",
+      normalToolNames: [],
+      sddStatus: null,
+      obsSeq: 0,
+      latestVerdicts: new Map(),
+    } as any,
+    "Orchestrator",
+  );
+  assert.equal(tools.find((t) => t.name === "ask_user"), undefined, "ask_user must be registered by the peer dep, not by pi-hive");
+});
 
-test("ask_user is a base tool available to planners/leads", () => {
-  const dir = mkdtempSync(join(tmpdir(), "pi-hive-q-"));
-  const state = stateWith(dir, [runtime("Planner", { agentType: "planner" })]);
-  assert.ok(buildHiveTools(state, "Planner").some((t) => t.name === "ask_user"));
+test("HIVE_TOOL_NAMES does not include ask_user (peer-dep surface)", () => {
+  assert.equal(HIVE_TOOL_NAMES.has("ask_user"), false, "HIVE_TOOL_NAMES is pi-hive's own tool set; ask_user moved to the peer dep");
 });
 
 test("recordQuestion writes a file-backed trail under the change", async () => {
@@ -60,40 +65,4 @@ test("enqueueQuestion appends a question action to dashboard-actions.jsonl", asy
   assert.equal(action.type, "question");
   assert.equal(action.question, "Scope?");
   assert.equal(action.change, "add-auth");
-});
-
-test("ask_user (headless) promotes the question and records the trail", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "pi-hive-q-headless-"));
-  const state = stateWith(dir, [runtime("Planner", { agentType: "planner" })]);
-  const tool = buildHiveTools(state, "Planner").find((t) => t.name === "ask_user")!;
-  // ctx without hasUI => headless path: enqueue to the main session dir + record.
-  const ctx = { cwd: dir, hasUI: false } as any;
-  const res = await runWithChange("add-auth", () => (tool.execute as any)("id", { question: "Which DB?" }, undefined, undefined, ctx));
-  assert.equal(res.details.ok, true);
-  assert.equal(res.details.promoted, true);
-  // Question landed in the session action queue and the file trail.
-  assert.match(readFileSync(join(dir, "dashboard-actions.jsonl"), "utf8"), /"type":"question"/);
-  assert.match(readFileSync(join(dir, "openspec", "changes", "add-auth", "questions.md"), "utf8"), /Which DB\?/);
-});
-
-test("ask_user (delegated planner) uses the main session's native ui.input directly", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "pi-hive-q-direct-"));
-  const state = stateWith(dir, [runtime("Planner", { agentType: "planner" })]);
-  // Simulate the visible main session's TUI context: a delegated planner's own
-  // ctx is headless, but it reaches this via state.widgetCtx (in-process).
-  let asked = "";
-  state.widgetCtx = {
-    mode: "tui",
-    ui: { input: async (_title: string, placeholder?: string) => { asked = placeholder || ""; return "PostgreSQL"; } },
-  } as any;
-  const tool = buildHiveTools(state, "Planner").find((t) => t.name === "ask_user")!;
-  const ctx = { cwd: dir, hasUI: false } as any; // worker ctx: no ui of its own
-  const res = await runWithChange("add-auth", () => (tool.execute as any)("id", { question: "Which DB?" }, undefined, undefined, ctx));
-  // Answered directly via the main session's dialog — no relay, no promotion.
-  assert.equal(res.details.ok, true);
-  assert.equal(res.details.answer, "PostgreSQL");
-  assert.equal(asked, "Which DB?");
-  assert.equal(existsSync(join(dir, "dashboard-actions.jsonl")), false); // no bridge used
-  // The answer is still recorded in the file-backed trail.
-  assert.match(readFileSync(join(dir, "openspec", "changes", "add-auth", "questions.md"), "utf8"), /PostgreSQL/);
 });

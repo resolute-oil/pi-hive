@@ -6,7 +6,34 @@ without a corresponding section.
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced pi-hive's custom `ask_user` tool with the feature-rich
+  `pi-ask-user` peer dep. The tool is no longer registered by pi-hive — install
+  `pi-ask-user` to get `ask_user` with multi-choice options
+  (`options[]` with `title`/`description`), freeform input (`allowFreeform`),
+  optional user comments (`allowComment`), a configurable `timeout`, and
+  `displayMode: "overlay" | "inline"`. Planners now see structured options
+  rather than only freeform text. pi-hive's planner operating template and
+  the plan-mode prompt were updated to document the new capabilities. The
+  file-backed `questions.md` trail is no longer auto-populated by
+  `ask_user`; `recordQuestion` and `enqueueQuestion` remain available for
+  code paths that want to write to the trail explicitly.
+
+### Removed
+
+- `ask_user` from `HIVE_TOOL_NAMES`, from `buildHiveTools` (src/agents/tools.ts),
+  and from `PLAN_MODE_TOOLS` (src/ui/tui/widget.ts). Lifted to the `pi-ask-user`
+  peer dep.
+- `currentAgentName`, `enqueueQuestion`, `recordQuestion` imports from
+  `src/agents/tools.ts` (only the `ask_user` tool referenced them). The
+  `engine/questions.ts` module itself is unchanged.
+
 ### Added
+
+- `pi-ask-user` listed under `peerDependencies` (optional, version `*`).
+- Regression tests in `tests/questions.test.ts` that verify pi-hive does not
+  register `ask_user` locally.
 
 - Snapshot/restore for hive→normal mode switches. When the user exits hive or
   plan mode, the agent now resumes from a summary branch anchored at the
