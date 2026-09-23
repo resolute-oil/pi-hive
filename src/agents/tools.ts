@@ -350,6 +350,45 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       return { content: [{ type: "text", text }], details: { ok: true, question, promoted } };
     },
   }),
+  // hive_cycle_summary — captures the LLM's handoff summary during a
+  // hive→normal (or plan→normal) transition. Set on
+  // state.pendingHiveCycleRestore by applyMode when there is a baseline;
+  // cleared by the agent_settled handler after branching. Calling outside a
+  // hive handoff returns isError without mutating state — pi-context's
+  // canonical pattern. Not gated by mode (always available), since the LLM
+  // must be able to call it during the follow-up turn.
+  defineTool({
+    name: "hive_cycle_summary",
+    label: "Hive Cycle Summary",
+    description: "Call this with a concise summary of the hive or plan-mode work you just completed. pi-hive will branch the conversation at this point so the user can continue in normal mode without re-reading the hive-mode tail. Call only when explicitly asked (e.g., immediately after exiting hive or plan mode).",
+    parameters: Type.Object({
+      summary: Type.String({
+        description: "Concise handoff summary of the work done in hive/plan mode. Restore current task/state, decisions/constraints, important side effects (changed files, processes, remote state), validation status, and explicit next step. If no work was done, pass an empty string.",
+      }),
+    }),
+    async execute(_toolCallId, params) {
+      const summary = String((params as { summary: string }).summary ?? "");
+      if (!state.pendingHiveCycleRestore) {
+        return {
+          content: [{
+            type: "text",
+            text: "No pending hive cycle restore is active. This tool should only be called immediately after exiting hive or plan mode.",
+          }],
+          details: {},
+          isError: true,
+        };
+      }
+      state.pendingHiveCycleRestore.summary = summary;
+      return {
+        content: [{
+          type: "text",
+          text: `Handoff summary recorded (${summary.length} chars). pi-hive will branch the conversation on the next agent_settled event.`,
+        }],
+        details: {},
+      };
+    },
+  }),
+
   ];
 
   // Type-scoped tools. These are granted by AGENT TYPE (not the tools list), so

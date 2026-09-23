@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -14,6 +14,30 @@ function listChangeIds(cwd: string, api: typeof openspec): string[] {
 }
 
 const EXTENSION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+// Module-level capture of the most recent ExtensionCommandContext. Event handlers
+// receive ExtensionContext only (no `navigateTree` / `waitForIdle`), so the wider
+// type is not directly available to them; this stash exposes those methods via
+// `getCommandCtx()`. Mirrors pi-context's `pendingCommandContext` pattern. Cleared
+// on `session_shutdown` (handled in hooks.ts) so a stale ctx from a previous
+// session cannot leak into a new one.
+let commandCtx: ExtensionCommandContext | null = null;
+export function getCommandCtx(): ExtensionCommandContext | null {
+  return commandCtx;
+}
+export function clearCommandCtx(): void {
+  commandCtx = null;
+}
+/**
+ * Set the captured ExtensionCommandContext. Symmetric counterpart to
+ * {@link getCommandCtx} and {@link clearCommandCtx}; called by every
+ * command handler to stash its context, and by tests that need to inject
+ * a fake context for handler invocations without going through a real
+ * command handler.
+ */
+export function setCommandCtx(ctx: ExtensionCommandContext | null): void {
+  commandCtx = ctx;
+}
 
 export interface CommandDeps {
   openspec: typeof openspec;
@@ -38,20 +62,20 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: 
   // Three explicit mode commands + a cycle key (normal → plan → hive → normal).
   pi.registerCommand("hive:normal", {
     description: "Switch to normal Pi chat (no hive, no enforcement)",
-    handler: async (_args: string, ctx: ExtensionContext) => { await applyMode(state, ctx, "normal"); },
+    handler: async (_args: string, ctx: ExtensionCommandContext) => { setCommandCtx(ctx); await applyMode(state, ctx, "normal"); },
   });
   pi.registerCommand("hive:plan-mode", {
     description: "Switch to plan mode — planning team produces full specs",
-    handler: async (_args: string, ctx: ExtensionContext) => { await applyMode(state, ctx, "plan"); },
+    handler: async (_args: string, ctx: ExtensionCommandContext) => { setCommandCtx(ctx); await applyMode(state, ctx, "plan"); },
   });
   pi.registerCommand("hive", {
     description: "Switch to hive mode — execution team builds the specs",
-    handler: async (_args: string, ctx: ExtensionContext) => { await applyMode(state, ctx, "hive"); },
+    handler: async (_args: string, ctx: ExtensionCommandContext) => { setCommandCtx(ctx); await applyMode(state, ctx, "hive"); },
   });
   // Namespaced cycle command for the three modes.
   pi.registerCommand("hive:toggle", {
     description: "Cycle session mode: normal → plan → hive → normal",
-    handler: async (_args: string, ctx: ExtensionContext) => cycleMode(state, ctx),
+    handler: async (_args: string, ctx: ExtensionCommandContext) => { setCommandCtx(ctx); cycleMode(state, ctx); },
   });
 
   pi.registerShortcut(Key.ctrlAlt("t"), {
@@ -75,7 +99,8 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: 
         .filter((id) => id.startsWith(prefix))
         .map((id) => ({ value: id, label: id }));
     },
-    handler: async (args: string, ctx: ExtensionContext) => {
+    handler: async (args: string, ctx: ExtensionCommandContext) => {
+      setCommandCtx(ctx);
       const changeId = args.trim().split(/\s+/)[0] || "";
       if (!changeId) {
         const available = listChangeIds(ctx.cwd, deps.openspec);

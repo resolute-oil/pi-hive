@@ -1,6 +1,7 @@
 ---
-status: ready
+status: complete
 priority: p2
+completion_date: "2026-09-23"
 issue_id: "002"
 tags: [pi-hive, mode-switch, tools, llm-instruction]
 dependencies: []
@@ -147,30 +148,29 @@ immediately after capture-and-branch.
 
 ## Acceptance Criteria
 
-- [ ] `hive_cycle_summary` tool registered in the extension factory.
-- [ ] Tool's `parameters` accepts `{ summary: string }`.
-- [ ] Tool's `execute` writes the summary into
+- [x] `hive_cycle_summary` tool registered in the extension factory.
+- [x] Tool's `parameters` accepts `{ summary: string }`.
+- [x] Tool's `execute` writes the summary into
       `state.pendingHiveCycleRestore.summary`.
-- [ ] If `state.pendingHiveCycleRestore` is undefined when the tool
+- [x] If `state.pendingHiveCycleRestore` is undefined when the tool
       is called, the tool returns an error result
       (`isError: true`) and does NOT mutate state.
-- [ ] Tool's `description` is explicit about when to call it (only
+- [x] Tool's `description` is explicit about when to call it (only
       after a hive/plan→normal handoff).
-- [ ] `state.pendingHiveCycleRestore` is added to the `HiveState`
+- [x] `state.pendingHiveCycleRestore` is added to the `HiveState`
       type with the documented shape.
-- [ ] `just typecheck` passes.
-- [ ] A unit test asserts:
+- [x] `just typecheck` passes.
+- [x] A unit test asserts:
   - Calling the tool with a summary sets
     `state.pendingHiveCycleRestore.summary`.
   - Calling the tool without a pending restore returns an error
     result.
-- [ ] `just test` shows the existing 373 tests still pass.
+- [x] `just test` shows the existing 373 tests still pass.
 
 ## Work Log
 
 ### 2026-09-23 — Leaf written (revised from original sketch)
 
-**By:** Claude Code (planning session)
 
 **Actions:**
 - Replaced the original "tool returns summary, applyMode captures it"
@@ -186,3 +186,35 @@ immediately after capture-and-branch.
   access to the tool's return value. The tool stashes directly.
 - Tool description wording is load-bearing: the LLM must understand
   when (and only when) to invoke this tool.
+
+### 2026-09-23 — Implemented
+
+**Actions:**
+- Added `pendingHiveCycleRestore?: { snapshotLeafId: string;
+  summary?: string }` to `HiveState` in `src/core/types.ts`.
+- Registered `hive_cycle_summary` tool at the end of the `baseTools`
+  array in `src/agents/tools.ts`. Body: `Type.Object` parameters with
+  one `summary: string` field; `execute` stashes the summary into
+  `state.pendingHiveCycleRestore.summary` and returns an `isError: true`
+  result (without mutating state) when no pending restore is active.
+- Added `tests/summary-capture-tool.test.ts` with two cases:
+  stashing-on-pending-restore and isError-without-pending-restore.
+- Verified: `just typecheck` clean across all 5 sub-recipes;
+  `just test` shows 375/375 passing (373 baseline + 2 new).
+
+**Learnings:**
+- Inserting the new tool in `baseTools` (rather than `typeScopedTools`)
+  keeps it available to the LLM regardless of mode — exactly what's
+  needed for the post-hive-handoff follow-up turn. The tool's own
+  `isError` return guards against misuse outside that window.
+- `HIVE_TOOL_NAMES` from `src/core/constants.ts` does not need this
+  tool added: it is not gated by `setActiveTools`, so it is always in
+  `state.normalToolNames` after `captureNormalTools` runs.
+- `buildHiveTools(state, callerName)` returns the full tool list and
+  is the right entry point for test discovery — `tools.find((t) =>
+  t.name === "hive_cycle_summary")` is enough; no separate export.
+- The `edit` tool failed to match the closing `  });\n  ];` anchor
+  on first attempt (likely a whitespace edge case in the tool's exact-
+  match protocol). Falling back to a small Python script that walks
+  lines and inserts at the matching `]` is reliable when `sed`/`edit`
+  misfire.

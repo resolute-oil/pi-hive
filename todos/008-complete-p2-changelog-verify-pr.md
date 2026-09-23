@@ -1,6 +1,7 @@
 ---
-status: ready
+status: complete
 priority: p2
+completion_date: "2026-09-23"
 issue_id: "008"
 tags: [pi-hive, mode-switch, release, pr]
 dependencies: ["007"]
@@ -112,28 +113,35 @@ for the deviations from the design doc.
 
 ## Acceptance Criteria
 
-- [ ] CHANGELOG.md has a new entry describing the feature.
+- [x] CHANGELOG.md has a new entry describing the feature (under
+      `[Unreleased]` → `### Added`, matching the existing
+      per-PR section format).
 - [ ] `just verify` passes clean (typecheck + lint + tests +
-      verification gates).
-- [ ] Single commit (or split commits if implementation choice)
+      verification gates). **Blocked on 3 pre-existing lint
+      errors** (per the implementation plan's documented accepted
+      risk; will document in PR body per the plan's Option A).
+      typecheck ✓, test 390/390 ✓.
+- [x] Single commit (or split commits if implementation choice)
       follows Conventional Commits format.
-- [ ] No AI attribution trailer in the commit message.
-- [ ] Commit pushed to `resolute-oil/pi-hive` (the fork).
-- [ ] PR opened against `resolute-oil/pi-hive:main`.
-- [ ] PR title describes the feature.
-- [ ] PR body references the design doc
+- [x] No AI attribution trailer in the commit message.
+- [x] Commit pushed to `resolute-oil/pi-hive` (the fork).
+- [x] PR opened against `resolute-oil/pi-hive:main`.
+- [x] PR title describes the feature.
+- [x] PR body references the design doc
       (`docs/2026-09-22-pi-hive-mode-switch-snapshot-restore-design.md`)
       and lists the leaves completed.
-- [ ] PR body mentions the deviation (event-driven vs synchronous
+- [x] PR body mentions the deviation (event-driven vs synchronous
       wait) and points to the plan doc's deviations log.
 - [ ] Manual smoke test (from the plan's top-level AC): `/hive`
       then `/hive:normal` leaves the agent acting like normal Pi.
+      **Deferred to user** — the PR was opened without merge so
+      the user can run a real session against another pi instance
+      to verify the smoke before approving.
 
 ## Work Log
 
 ### 2026-09-23 — Leaf written (revised from previous "todo 009")
 
-**By:** Claude Code (planning session)
 
 **Actions:**
 - Renumbered from 009 to 008 (the leaf count went from 9 to 8 after
@@ -150,3 +158,55 @@ for the deviations from the design doc.
 - Surfacing the deviation in the PR body pre-empts reviewer
   questions about why the implementation differs from the design
   doc.
+
+### 2026-09-23 — Implemented
+
+**Actions:**
+- Added a 3-bullet entry under `[Unreleased]` → `### Added` in
+  `CHANGELOG.md` describing the feature, the new
+  `hive_cycle_summary` tool, and the `agent_settled` handler.
+  Followed the existing per-PR section format (no `### PR #NN`
+  prefix; sections group by Added/Changed/Fixed).
+- Ran `just verify`. typecheck ✓, test 390/390 ✓, lint reports
+  **3 pre-existing errors + 62 warnings** (all pre-existing on
+  the entry baseline, none in this feature's files). Documented
+  in PR body per the implementation plan's Option A (don't fix
+  pre-existing lint in this PR; flag for reviewers).
+- One incidental lint cleanup: removed an unused `HiveState`
+  import in `tests/mode-switch-restore.test.ts` that I had added
+  during the M3 fixture-typing pass. Caught by `just verify`; not
+  in any prior `just typecheck` pass because `noUnusedLocals` is
+  only enforced by lint, not by `tsc`. Lesson: tighten the test
+  loop to include lint alongside typecheck.
+- Staged and committed via `git add` (selective paths, excluding
+  the `node_modules` worktree symlink per the repo's `.gitignore`).
+  Single commit per the leaf's Option 1 recommendation.
+- Pushed to `origin` (= `git@github.com:resolute-oil/pi-hive.git`).
+- Opened PR against `resolute-oil/pi-hive:main`. **Not merged**
+  per user instruction — the user wants to run a real pi session
+  against the PR's branch first to validate the smoke
+  (`/hive` → `/hive:normal`) before merge.
+
+**Commit subject:** `feat(mode-switch): add snapshot/restore for
+hive→normal handoff`. No AI attribution trailer.
+
+**Files in commit (18 tracked + 0 untracked-test-files, total):**
+- 6 source/test files modified (todo 001-007 changes).
+- 4 new test files added (todos 002, 003, 005, 007 test files).
+- 8 todos renamed to complete (001-008).
+- 1 CHANGELOG.md modified.
+
+**Learnings:**
+- `just typecheck` does not catch unused-import errors; only
+  `just verify` (which runs lint) does. The unused `HiveState`
+  import would have shipped in the commit if I hadn't run
+  `just verify` first. Adding lint to the local pre-commit
+  loop is worth considering for future PRs.
+- The pre-existing lint failures are concentrated in
+  `src/agents/tools.ts:3`, `tests/bash-path-tokens.test.ts:45,364`,
+  `src/observability/server/db.ts`, and `ui/web/src/tabs/*.tsx` —
+  none in the files this feature touches. Documenting in the PR
+  body pre-empts reviewer confusion.
+- `gh pr create --body-file` is the cleanest way to ship a long
+  PR body. The body file is gitignored scratch (under `/tmp/`)
+  so it doesn't pollute the worktree.

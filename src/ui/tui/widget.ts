@@ -152,6 +152,21 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
     return false;
   }
 
+  // Snapshot the current session-tree leaf on hive/plan entry so the hive→normal
+  // restore can branch back to this point. Gate: only when actually transitioning
+  // into a non-normal mode (mid-cycle re-entry does not re-snapshot). The field
+  // is assigned unconditionally so its presence reliably means "a snapshot was
+  // taken for the current cycle" — without an explicit clear, a prior cycle's
+  // leaf id would linger when getLeafId() returns null on the next entry.
+  if (mode !== "normal" && changesMode) {
+    const leafId = ctx.sessionManager?.getLeafId?.() ?? null;
+    state.hiveCycleSnapshotLeafId = leafId ?? undefined;
+    if (leafId) {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      state.pi.setLabel(leafId, `hive-cycle-${stamp}`);
+    }
+  }
+
   state.mode = mode;
 
   // Rebuild the active team's runtimes when entering plan/hive (or switching
@@ -172,6 +187,29 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
 
   if (mode === "normal") {
     state.pi.setActiveTools(state.normalToolNames);
+    // Snapshot/restore handoff: when transitioning out of hive/plan into normal
+    // AND a baseline leaf was captured at the most recent hive/plan entry,
+    // ask the LLM to write a summary of the hive-mode work and stash it via
+    // the `hive_cycle_summary` tool. The follow-up turn is fire-and-forget;
+    // `agent_settled` handles the actual branch + restore (todo 006).
+    //
+    // Gated on `changesMode` so a no-op normal→normal re-call (e.g. the user
+    // types `/hive:normal` while already in normal) does not re-fire the
+    // trigger and clobber `pendingHiveCycleRestore`. Satisfies the acceptance
+    // criterion "on hive→hive or normal→normal, no trigger fires."
+    if (changesMode && state.hiveCycleSnapshotLeafId) {
+      state.pendingHiveCycleRestore = {
+        snapshotLeafId: state.hiveCycleSnapshotLeafId,
+      };
+      state.pi.sendUserMessage(
+        "You have exited hive or plan mode and the user wants to continue in normal mode. " +
+        "Write a concise handoff summary of the work you did in this cycle and call the " +
+        "`hive_cycle_summary` tool with that summary. The user will not re-read the hive-mode " +
+        "tail; the summary is their only window into what happened. " +
+        "If no meaningful work happened, call `hive_cycle_summary` with an empty string.",
+        { deliverAs: "followUp" },
+      );
+    }
     if (ctx.mode === "tui") {
       ctx.ui.setWidget("hive-tree", undefined);
       updateHiveActivityWidget(state);
