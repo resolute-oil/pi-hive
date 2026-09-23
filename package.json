@@ -84,7 +84,7 @@
       "optional": false
     },
     "pi-ask-user": {
-      "optional": true
+      "optional": false
     }
   },
   "devDependencies": {

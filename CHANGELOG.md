@@ -19,6 +19,11 @@ without a corresponding section.
   file-backed `questions.md` trail is no longer auto-populated by
   `ask_user`; `recordQuestion` and `enqueueQuestion` remain available for
   code paths that want to write to the trail explicitly.
+- Flipped the `pi-ask-user` peer-dep `optional` flag from `true` to `false`.
+  npm 7+ skips auto-install for optional peer deps (only their absence is
+  tolerated), so `optional: true` left the dep out of `node_modules/` after
+  `npm install` in the consuming project. Marking it required makes `npm
+  install` auto-resolve and install `pi-ask-user` alongside pi-hive.
 
 ### Removed
 
