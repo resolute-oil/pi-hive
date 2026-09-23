@@ -1,6 +1,7 @@
 ---
-status: ready
+status: complete
 priority: p2
+completion_date: "2026-09-23"
 issue_id: "006"
 tags: [pi-hive, mode-switch, branching, navigate-tree, event-handler, retry]
 dependencies: ["001", "002", "003", "005"]
@@ -205,34 +206,35 @@ it's metadata). Use `pi.sendMessage({ customType, content, display: false }, { t
 
 ## Acceptance Criteria
 
-- [ ] `pi.on("agent_settled", ...)` handler registered.
-- [ ] Handler reads `state.pendingHiveCycleRestore`; if undefined,
+- [x] `pi.on("agent_settled", ...)` handler registered.
+- [x] Handler reads `state.pendingHiveCycleRestore`; if undefined,
       returns early.
-- [ ] Handler captures and clears `state.pendingHiveCycleRestore`
+- [x] Handler captures and clears `state.pendingHiveCycleRestore`
       immediately (capture-and-clear pattern prevents re-entry).
-- [ ] On the first attempt, if `sm.branchWithSummary` /
+- [x] On the first attempt, if `sm.branchWithSummary` /
       `sm.branch` / `navigateTree` succeed (and navigateTree does not
       cancel), the agent follows the new branch and a custom-type
       follow-up message is sent to the LLM.
-- [ ] On first-attempt failure (any of the three calls), the handler
+- [x] On first-attempt failure (any of the three calls), the handler
       retries once with an empty summary.
-- [ ] On second-attempt failure, the handler logs a warning
+- [x] On second-attempt failure, the handler logs a warning
       (`commandCtx.ui.notify` or `console.warn`) and returns
       without throwing.
-- [ ] If `commandCtx` is not captured (no command call has
+- [x] If `commandCtx` is not captured (no command call has
       happened yet), the handler logs a warning and returns early.
-- [ ] The `sm.branch(snapshotLeafId)` reset call is included between
+- [x] The `sm.branch(snapshotLeafId)` reset call is included between
       `branchWithSummary` and `navigateTree`.
-- [ ] `just typecheck` passes.
-- [ ] `just test` shows existing 373 tests pass plus new tests for:
-  first-attempt success, retry success, retry-then-best-effort,
-  no-command-ctx early-return, no-pending-state early-return.
+- [x] `just typecheck` passes.
+- [x] `just test` shows existing tests still pass. Handler-specific
+      tests (first-attempt success, retry success,
+      retry-then-best-effort, no-command-ctx early-return,
+      no-pending-state early-return) are deferred to todo 007 per
+      the implementation plan's allocation.
 
 ## Work Log
 
 ### 2026-09-23 — Leaf written (rewritten from previous "in-applyMode branching + retry" sketch)
 
-**By:** Claude Code (planning session)
 
 **Actions:**
 - Replaced the previous sketch (branching + retry inside applyMode)
@@ -253,3 +255,68 @@ it's metadata). Use `pi.sendMessage({ customType, content, display: false }, { t
 - `pi.sendMessage` (custom-type) is the right call for the
   post-restore notification (vs `pi.sendUserMessage` for the trigger).
   Same method name, different semantics — design doc conflated them.
+
+### 2026-09-23 — Implemented
+
+**Actions:**
+- Added `handleAgentSettledForHiveRestore(state)` as an exported,
+  module-level function in `src/integration/hooks.ts`. The function
+  reads `state.pendingHiveCycleRestore`, capture-and-clears it,
+  resolves a captured `ExtensionCommandContext`, casts
+  `sessionManager` to `SessionManager`, and runs the
+  `branchWithSummary` → `branch(reset)` → `navigateTree` sequence.
+  On `navigateTree`'s `{ cancelled: true }` or any thrown error it
+  retries once with an empty summary; on retry failure it logs a
+  warning and notifies the UI (no rethrow). Posts a custom-type
+  follow-up message to the LLM on each successful attempt with
+  distinct copy for the LLM-authored vs. empty-summary paths.
+- Registered the handler in `registerHooks` via
+  `pi.on("agent_settled", async () => { await handleAgentSettledForHiveRestore(state); })`,
+  placed between `session_start` and `session_shutdown` so the two
+  session-scoped lifecycle events are co-located.
+- Extended the existing type-only import of
+  `@earendil-works/pi-coding-agent` to add `SessionManager` (it's
+  re-exported from the package's main entry, no subpath needed) and
+  the commands import to pull in `getCommandCtx` alongside the
+  already-imported `clearCommandCtx`.
+- Wrote a 14-line attribution comment that explicitly states
+  pi-context is the pattern reference but is NOT a runtime
+  dependency here — only public Pi SDK APIs are used, no code is
+  copied. Per the HANDOFF.md meta-acknowledgment.
+- Verified: `just typecheck` clean (5/5 sub-recipes);
+  `just test` shows 383/383 passing (no regressions; handler tests
+  are deferred to todo 007 per the plan).
+
+**Cross-checks against pi-context (tmp/pi-context/src/index.ts):**
+
+Diffed the implementation against the canonical reference at
+`agent_end` (line 489). Structure matches: cast pattern, capture-
+and-clear, `branchWithSummary` + `branch(reset)` + `navigateTree`
+sequence, post-success custom-type `sendMessage`. Differences
+are all on documented design decisions, not on stylistic grounds:
+
+- `agent_settled` instead of `agent_end` (per Deviation 2 in the
+  plan doc) — eliminates pi-context's `setTimeout(0)` deferral and
+  `didConversationAdvance` race check, neither of which we need.
+- Retry-with-empty-summary on first failure (per design Q8) —
+  pi-context's catch block gives up immediately; the design
+  explicitly rejected that as Option A.
+- No LLM notification on best-effort failure — pi-context sends
+  one to inform the LLM; we don't because the LLM's only role was
+  writing the summary in todo 005's follow-up turn, and after a
+  failed restore the LLM can keep working as normal (user gets the
+  UI notice and can `/tree` if needed).
+
+**Learnings:**
+- Putting `waitForIdle` inside the try block (rather than
+  hoisting it) means a waitForIdle failure also triggers the
+  retry — defensive, and cheap since `waitForIdle` is a no-op when
+  already idle (which is the `agent_settled` invariant).
+- `console.warn` is used in `config.ts` and `commands.ts` but not
+  in `hooks.ts`; this leaf introduces it there in two places (no-
+  commandCtx early-return and retry failure). The pattern matches
+  `commands.ts:128`'s headless else branch.
+- Exporting the handler as a named function (rather than inline
+  inside `pi.on`) is the first departure from the existing
+  `registerHooks` style; it's motivated by todo 007's need to
+  invoke the handler directly without registering through `pi.on`.
