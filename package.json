@@ -70,6 +70,7 @@
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
+    "pi-ask-user": "*",
     "typebox": "*"
   },
   "peerDependenciesMeta": {
@@ -81,6 +82,9 @@
     },
     "typebox": {
       "optional": false
+    },
+    "pi-ask-user": {
+      "optional": true
     }
   },
   "devDependencies": {

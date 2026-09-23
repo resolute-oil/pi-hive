@@ -311,7 +311,7 @@ These extension tools can be granted via an agent's `tools` list:
 | `team_status` | any | Inspect live session, active runs, per-agent tokens/cost. |
 | `team_conversation` | any | Read **one named agent's** transcript (scoped; requires an `agent` arg). Used to inspect e.g. what a reviewer found. |
 | `hive_sdd_status` | orchestrator / leads | Inspect OpenSpec changes under `openspec/changes/` and recommended phase routing. |
-| `ask_user` | planners / leads | Ask the human before authoring when scope, requirements, or acceptance criteria are ambiguous. Opens the main TUI input from in-process delegated sessions; headless runs record/surface the question and proceed with an explicit assumption. |
+| `ask_user` (peer dep) | planners / leads | Ask the human before authoring when scope, requirements, or acceptance criteria are ambiguous. Provided by the optional [`pi-ask-user`](https://github.com/edlsh/pi-ask-user) peer dep (install with `pi install npm:pi-ask-user`). Supports multi-choice `options[]` with `title`/`description`, freeform input, optional comments, and a configurable `timeout`. In the TUI it renders a feature-rich overlay prompt; in headless sessions it throws an error containing the question — surface it and have the planner record an explicit assumption in the artifact instead. |
 
 Type-scoped hive tools (granted automatically by `agent-type`, not listed in `tools`): `submit_review_verdict` (reviewers), and `plan_new` / `plan_select` / `plan_task_complete` (leads). Human approval happens only in the authenticated dashboard review UI; there is no approval tool for agents.
 
@@ -646,8 +646,10 @@ tools:
   - ls
   - edit
   - write
-  - ask_user
   - team_status
+  # ask_user is provided by the optional pi-ask-user peer dep — install with
+  # `pi install npm:pi-ask-user` and the tool is available globally without
+  # listing it here.
 context:
   - path: .pi/hive/knowledge/<project>-architecture.md
     use-when: Grounding requirements in the current system.
@@ -779,7 +781,7 @@ Naming: prefix by scope — `behavior-*` (cross-cutting), `<role>-*` (role-owned
 - [ ] Agents that edit files have `edit`/`write` in `tools` **and** an `upsert: true` domain over their area. (Tools without a matching domain = blocked at runtime.)
 - [ ] The orchestrator has **no** `edit`/`write`/`bash`.
 - [ ] `settings.distiller.model` is set (or `distiller.enabled: false`).
-- [ ] Spec-driven planning is the default for non-trivial work: changes live under `openspec/changes/<change-id>/` with the `proposal → { design, specs } → tasks` graph. A lead creates a change with `plan_new`; planners use `ask_user` when needed and write canonical artifacts; `/hive:execute <change-id>` drives execution only after exact-content review and approval. Leads record completed execution tasks with evidence through `plan_task_complete` without editing approved `tasks.md`.
+- [ ] Spec-driven planning is the default for non-trivial work: changes live under `openspec/changes/<change-id>/` with the `proposal → { design, specs } → tasks` graph. A lead creates a change with `plan_new`; planners use `ask_user` (provided by the optional `pi-ask-user` peer dep — install with `pi install npm:pi-ask-user` to enable multi-choice options, freeform input, optional comments, and a configurable timeout) and write canonical artifacts; `/hive:execute <change-id>` drives execution only after exact-content review and approval. Leads record completed execution tasks with evidence through `plan_task_complete` without editing approved `tasks.md`.
 - [ ] Every agent `skills:` entry points to a Pi-loadable skill file or directory; only these explicit skills are exposed to that worker.
 - [ ] The local telemetry dashboard auto-starts when enabled (Bun required), binds to loopback by default, and requires bearer authentication for writes. `/hive:observe` force-restarts + opens it, `/hive:observe-stop` performs authenticated teardown, and `/hive:observe-prune <days>` prunes SQLite rows (not project JSONL). It is a shared daemon, survives individual session shutdown, adopts only an exact compatible identity, and exits after bounded idle time.
 - [ ] All YAML keys are kebab-case; no tabs; consistent 2-space indentation.
