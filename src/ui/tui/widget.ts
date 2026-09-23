@@ -37,8 +37,11 @@ async function handlePromotedQuestion(state: HiveState, ctx: ExtensionContext, a
 // tools are active only in plan mode. Approval is no longer a tool — it happens
 // in the dashboard's plan-review UI. ask_user is registered globally by the
 // optional pi-ask-user peer dep (multi-select / options / freeform / comments /
-// configurable timeout) — planners use it directly without it appearing in
-// pi-hive's tool list.
+// configurable timeout); it is NOT in either mode's tool list because it's
+// expected to survive the mode transition via the merge in `applyMode`. That
+// merge preserves any tool that was active before the transition (including
+// globally-registered peer-dep tools), drops tools exclusive to the *other*
+// hive mode, and adds the current mode's tool list on top.
 const COMMON_HIVE_TOOLS = ["route_agent", "delegate_agent", "team_status", "team_conversation", "hive_sdd_status"];
 const PLAN_MODE_TOOLS = [...COMMON_HIVE_TOOLS, "plan_new", "plan_select"];
 const HIVE_MODE_TOOLS = [...COMMON_HIVE_TOOLS, "plan_task_complete"];
@@ -222,7 +225,31 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
 
   startHiveTelemetrySession(state, ctx.cwd);
   startDashboardActionPoller(state, ctx);
-  state.pi.setActiveTools(mode === "plan" ? PLAN_MODE_TOOLS : HIVE_MODE_TOOLS);
+  // Plan/hive modes ADD hive-internal tools to the active set rather than
+  // REPLACING it. setActiveTools previously dropped everything that wasn't
+  // pi-hive's own list, which silently disabled globally-registered peer-dep
+  // tools (e.g. `ask_user` from pi-ask-user) the moment the user entered plan
+  // or hive mode, even though the tool still appeared in the orchestrator's
+  // schema description (the schema is global, the handler is per-session).
+  //
+  // Two refinements keep the merge well-behaved:
+  //   1. Optional chaining (`?.()`) plus `?? []` makes this safe against the
+  //      partial Pi mocks used by the existing test suite, which omit
+  //      getActiveTools. Production Pi always defines it.
+  //   2. Drop tools that are EXCLUSIVE to the *other* hive mode (e.g. drop
+  //      plan_new and plan_select when entering hive mode) but preserve the
+  //      shared COMMON_HIVE_TOOLS set so the orchestrator keeps its
+  //      delegation surface across both modes. This mirrors the existing
+  //      intent that plan-only lifecycle tools don't leak into hive mode
+  //      and vice versa, while still keeping globally-registered tools
+  //      (ask_user, read, grep, …) intact.
+  const previouslyActive = state.pi.getActiveTools?.() ?? [];
+  const currentModeTools = mode === "plan" ? PLAN_MODE_TOOLS : HIVE_MODE_TOOLS;
+  const otherModeTools = mode === "plan" ? HIVE_MODE_TOOLS : PLAN_MODE_TOOLS;
+  const currentModeSet = new Set(currentModeTools);
+  const exclusiveToOtherMode = new Set(otherModeTools.filter((t) => !currentModeSet.has(t)));
+  const preserved = previouslyActive.filter((name) => !exclusiveToOtherMode.has(name));
+  state.pi.setActiveTools([...new Set([...preserved, ...currentModeTools])]);
   updateWidget(state);
   if (shouldNotify && ctx.hasUI) {
     const msg = mode === "plan"
