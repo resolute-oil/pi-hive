@@ -47,6 +47,17 @@ The extension must stay safe to install globally: it should do nothing unless th
 
   Clean up with `git worktree remove .worktrees/<branch>` after the branch merges. This rule applies to every agent session that touches this repo, including the one writing this rule.
 
+- **`bash` and `edit` tool calls default to the main working tree.**
+  Each `bash` invocation starts in `APP_ROOT` (the bare checkout on
+  `main`); the cwd resets between calls, so prefix any in-worktree
+  command with `cd APP_ROOT/.worktrees/<branch>` — `cd` does not
+  persist. The `edit` tool must use the absolute worktree path; never
+  pass an APP_ROOT path. Applies to every shell command (`sed`,
+  `git mv`, `rm`, `mv`, `npm install`, etc.) and to `edit`. The rule
+  above is about *where* work happens; this one is about *not losing
+  your place* while doing it. Failing it silently pollutes `main`'s
+  working tree.
+
 ## Useful commands
 
 ```sh
