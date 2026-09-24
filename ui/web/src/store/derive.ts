@@ -1,177 +1,13 @@
-import type { AgentRuntime, HiveEvent, ProjectGroup, SessionView, Snapshot, TopologyNode } from "../types";
-import type { SessionSummary } from "../api";
-import { projectName, sessionSlug } from "../lib/format";
-import { applyHistoryToRuntime, buildHistoryBySession, type HistPeak } from "./history";
+import type { ProjectGroup, SessionView } from "../types";
+import { buildHistoryBySession } from "./history";
 import { buildEventStatus } from "./status";
-import { buildAgents, flattenTopology } from "./topology";
-import { sessionStore, sessionUpdatedAt } from "./identity";
-import { store, type HiveState, type ScopeAgent, type ScopeStats, type ScopeTitle } from "./index";
-
-// A session is "live" if its snapshot updated within this window. A running
-// agent that hasn't updated in this long is treated as stale (its process
-// likely died without a final delegation_end), so it stops counting as live.
-const STALE_LIVE_MS = 5 * 60_000;
-
-// A session's snapshot is stale when its last update is older than STALE_LIVE_MS.
-// Used to suppress the event-status overlay's running/waiting for dead sessions:
-// buildEventStatus only clears "running" on delegation_end, the one event a killed
-// process never emits, so a stale session's overlay would pin an agent "running"
-// forever. `now` defaults to the store tick so callers on the live tier stay in
-// sync with the same clock recomputeLive uses.
-export function sessionIsStale(sessionId: string, now: number): boolean {
-  const at = sessionUpdatedAt.get(sessionId) || 0;
-  return at > 0 && now - at >= STALE_LIVE_MS;
-}
-
-// Demote an overlay status for a stale session: running/waiting become idle (the
-// process is presumed dead); terminal/idle states pass through unchanged.
-export function demoteIfStale(status: string, sessionId: string, now: number): string {
-  if ((status === "running" || status === "waiting") && sessionIsStale(sessionId, now)) return "idle";
-  return status;
-}
-
-// Module-level cache of the last heavy-tier products so the scoped/live tiers
-// can rebuild off them without recomputing the heavy work.
-let historyBySession = new Map<string, Map<string, HistPeak>>();
-
-function computeAllEvents(events: HiveEvent[]): HiveEvent[] {
-  const arr = events;
-  arr.sort((a, b) => String(a.ts).localeCompare(String(b.ts)) || (a.seq || 0) - (b.seq || 0));
-  return arr;
-}
-
-type ProjectFields = { project_id?: string; project_root?: string; project_label?: string; cwd?: string };
-
-function projectFields(source: ProjectFields, sessionId: string) {
-  const key = source.project_id || `legacy:${source.cwd || sessionId}`;
-  const label = source.project_label || projectName(source.project_root || source.cwd);
-  return { key, label };
-}
-
-function computeSessions(allEvents: HiveEvent[], snapshots: Record<string, Snapshot>, eventStatus: Map<string, Map<string, string>>, summaries: Map<string, SessionSummary>): SessionView[] {
-  const present = new Set<string>();
-
-  const ensure = (id: string, source: ProjectFields = {}, ts?: string): SessionView => {
-    let v = sessionStore.get(id);
-    const identity = projectFields(source, id);
-    if (!v) {
-      v = {
-        session_id: id,
-        project_id: identity.key,
-        project_root: source.project_root,
-        project_label: identity.label,
-        cwd: source.cwd,
-        project: identity.key,
-        first_ts: ts || "",
-        last_ts: ts || "",
-        event_count: 0,
-        running: 0,
-        tokens: 0,
-        cost: 0,
-        live: false,
-        agents: new Map(),
-      };
-      sessionStore.set(id, v);
-    } else if (source.project_id && v.project_id !== source.project_id) {
-      v.project_id = source.project_id;
-      v.project = source.project_id;
-      v.project_root = source.project_root || v.project_root;
-      v.project_label = source.project_label || v.project_label;
-    }
-    present.add(id);
-    return v;
-  };
-
-  // reset per-recompute accumulators on the persisted objects
-  for (const v of sessionStore.values()) v.event_count = 0;
-
-  for (const e of allEvents) {
-    const id = e.session_id || "unknown";
-    const v = ensure(id, e, e.ts);
-    if (!v.cwd && e.cwd) v.cwd = e.cwd;
-    if (!v.first_ts || e.ts < v.first_ts) v.first_ts = e.ts;
-    if (e.ts > v.last_ts) v.last_ts = e.ts;
-    v.event_count++;
-  }
-
-  for (const snap of Object.values(snapshots)) {
-    const id = snap.session_id;
-    const v = ensure(id, snap, snap.updated_at);
-    if (!v.cwd && snap.cwd) v.cwd = snap.cwd;
-    if (snap.updated_at > v.last_ts) v.last_ts = snap.updated_at;
-    sessionUpdatedAt.set(id, new Date(snap.updated_at).getTime());
-    v.topology = snap.topology;
-    v.topologies = snap.topologies;
-    v.agents = buildAgents(snap);
-    const hist = historyBySession.get(id);
-    if (hist) {
-      for (const [name, p] of hist) {
-        const a = v.agents.get(name);
-        if (a) applyHistoryToRuntime(a, p);
-      }
-    }
-    const agents = snap.agents || [];
-    v.tokens = agents.reduce((sum, agent) => sum + (agent.inputTokens || 0) + (agent.outputTokens || 0), 0);
-    v.cost = agents.reduce((sum, agent) => sum + (agent.costUsd || 0), 0);
-  }
-
-  // Union with the server-authoritative session list (Phase 3.4): a session whose
-  // events fell outside the ~1000-row loaded window (and which has no live
-  // snapshot) would otherwise be invisible in the sidebar/session list. Seed a
-  // minimal row from its summary so it still appears; its authoritative
-  // tokens/cost/event_count come straight from the DB. Skipped once real
-  // events/snapshots arrive for it (ensure() already created the richer row).
-  for (const [id, sum] of summaries) {
-    const v = ensure(id, sum, sum.last_ts || sum.first_ts);
-    if (sum.project_root) v.project_root = sum.project_root;
-    if (sum.project_label) v.project_label = sum.project_label;
-    if (!v.cwd && sum.cwd) v.cwd = sum.cwd;
-    if (sum.first_ts && (!v.first_ts || sum.first_ts < v.first_ts)) v.first_ts = sum.first_ts;
-    if (sum.last_ts && sum.last_ts > v.last_ts) v.last_ts = sum.last_ts;
-    if (sum.event_count != null) v.event_count = sum.event_count;
-    // SQL usage_events is the sole historical authority. Live snapshots remain
-    // useful for per-agent status, but fresh runs/mode switches may reset their
-    // counters and must never lower or replace completed historical usage.
-    if (sum.tokens != null) v.tokens = sum.tokens;
-    if (sum.cost != null) v.cost = sum.cost;
-    v.usageStatus = sum.usageStatus;
-  }
-
-  // Event-driven status overlay: the topology reflects events instantly. Apply
-  // the latest event status onto each agent (creating placeholder entries for
-  // agents seen in events but not yet in a snapshot), then derive running count.
-  for (const id of present) {
-    const v = sessionStore.get(id)!;
-    const evStatus = eventStatus.get(id) || new Map<string, string>();
-    for (const [name, st] of evStatus) {
-      const a = v.agents.get(name);
-      if (a) a.status = st as AgentRuntime["status"];
-      else v.agents.set(name, { name, status: st as AgentRuntime["status"] });
-    }
-    let running = 0, active = 0;
-    for (const a of v.agents.values()) {
-      if (a.status === "running") running++;
-      if (a.status === "running" || a.status === "waiting") active++;
-    }
-    v.running = running;     // actually executing
-    v.active = active;       // running + waiting (used for liveness)
-  }
-
-  // drop sessions that no longer exist (e.g. deleted)
-  for (const id of Array.from(sessionStore.keys())) if (!present.has(id)) { sessionStore.delete(id); sessionUpdatedAt.delete(id); }
-
-  return Array.from(sessionStore.values()).sort((a, b) => String(b.last_ts).localeCompare(String(a.last_ts)));
-}
-
-function computeFleetStats(ss: SessionView[]): ScopeStats {
-  return {
-    sessions: ss.length,
-    live: ss.filter((s) => s.live).length,
-    running: ss.reduce((a, s) => a + s.running, 0),
-    tokens: ss.reduce((a, s) => a + s.tokens, 0),
-    cost: ss.reduce((a, s) => a + s.cost, 0),
-  };
-}
+import { sessionUpdatedAt } from "./identity";
+import { computeAllEvents, computeFleetStats, computeSessions } from "./sessions";
+import { computeScopedAgents, setHistoryBySession } from "./scoped-agents";
+import { STALE_LIVE_MS, sessionIsStale } from "./stale";
+import { sessionSlug } from "../lib/format";
+import { store, type HiveState, type ScopeStats, type ScopeTitle } from "./index";
+import { flattenTopology } from "./topology";
 
 // ── heavy tier: events/snapshots changed ─────────────────────────────────────
 // A burst of SSE frames or initial snapshots should trigger one bounded rebuild,
@@ -195,7 +31,8 @@ export function flushHeavyRecompute(): void {
 export function recomputeHeavy() {
   const s = store.getState();
   const allEvents = computeAllEvents(s.eventRing.values());
-  historyBySession = buildHistoryBySession(allEvents);
+  const history = buildHistoryBySession(allEvents);
+  setHistoryBySession(history);
   const eventStatus = buildEventStatus(allEvents);
   const sessions = computeSessions(allEvents, s.snapshots, eventStatus, s.sessionSummaries);
   const sessionsById = new Map<string, SessionView>();
@@ -237,7 +74,7 @@ export function recomputeLive() {
     for (const [sid, agents] of s.eventStatus) {
       const stale = sessionIsStale(sid, t);
       const copy = new Map<string, string>();
-      for (const [name, st] of agents) copy.set(name, stale ? demoteIfStale(st, sid, t) : st);
+      for (const [name, st] of agents) copy.set(name, stale ? (st === "running" || st === "waiting" ? "idle" : st) : st);
       nextStatus.set(sid, copy);
     }
   }
@@ -346,69 +183,6 @@ export function recomputeScoped() {
   }
 
   store.setState({ scopedSessions, scopedEvents, scopedDelegations, scopedStats, currentSession, scopedAgents, scopedAgentCount, scopedTeamCount, scopeTitle });
-}
-
-function computeScopedAgents(scopedSessions: SessionView[]): ScopeAgent[] {
-  const hist = historyBySession;
-  const out: ScopeAgent[] = [];
-  let order = 0;
-  const gs = store.getState();
-  const st = gs.eventStatus;
-  const now = gs.now || Date.now();
-  // W1.2: the overlay marks running/waiting but only clears on delegation_end, so a
-  // dead session's overlay pins an agent active forever. Demote overlay entries for
-  // stale sessions before they win over the snapshot status.
-  const statusOf = (sessionId: string, name: string, snapStatus?: string) =>
-    demoteIfStale(st.get(sessionId)?.get(name) || snapStatus || "idle", sessionId, now);
-  for (const sess of scopedSessions) {
-    const sessHist = hist.get(sess.session_id);
-    const seen = new Set<string>();
-    const topo = sess.topologies ? sess.topologies[sess.topologies.active] : sess.topology;
-    const rootName = topo?.orchestrator?.name;
-    const norm = (name: string | undefined) => (name || "").trim().toLowerCase();
-    const inferredRole = (node: TopologyNode, depth: number, rt?: AgentRuntime) => {
-      if (node.role || rt?.role) return node.role || rt?.role;
-      if (rootName && norm(node.name) === norm(rootName) && depth === 0) return "orchestrator";
-      return depth <= (rootName ? 1 : 0) || (node.children || []).length ? "lead" : "member";
-    };
-    const walk = (node: TopologyNode, depth: number) => {
-      const key = norm(node?.name);
-      if (!node || !key || seen.has(key)) return;
-      seen.add(key);
-      const rt = sess.agents.get(node.name);
-      const h = sessHist?.get(node.name);
-      const snapTok = (rt?.inputTokens || 0) + (rt?.outputTokens || 0);
-      const tokens = Math.max(snapTok, h ? h.input + h.output : 0);
-      const cost = Math.max(rt?.costUsd || 0, h?.cost || 0);
-      out.push({
-        key: sess.session_id + "::" + key, name: node.name, role: inferredRole(node, depth, rt), agentType: node.agentType || rt?.agentType, model: node.model || rt?.model, color: node.color,
-        status: statusOf(sess.session_id, node.name, rt?.status), tokens, cost, runs: Math.max(rt?.runCount || 0, h?.runs || 0), tools: Math.max(rt?.toolCount || 0, h?.tools || 0),
-        elapsedMs: rt?.elapsedMs, contextPct: rt?.contextPct, contextTokens: rt?.contextTokens, contextWindow: rt?.contextWindow, budgetRemaining: rt?.budgetRemaining, task: rt?.task || rt?.lastWork, session_id: sess.session_id, depth, order: order++,
-        // Enforcement contract carried from the topology node (Phase 6.1).
-        domain: node.domain, commit: node.commit, stages: node.stages, consultWhen: node.consultWhen, responsibilities: node.responsibilities,
-      });
-      for (const c of node.children || []) walk(c, depth + 1);
-    };
-    if (topo?.orchestrator) walk(topo.orchestrator, 0);
-    for (const root of topo?.agents || []) walk(root, topo?.orchestrator ? 1 : 0);
-
-    // Runtime/event-only agents may exist before (or without) a topology row.
-    for (const rt of sess.agents.values()) {
-      const key = norm(rt.name);
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      const h = sessHist?.get(rt.name);
-      const snapTok = (rt.inputTokens || 0) + (rt.outputTokens || 0);
-      const tokens = Math.max(snapTok, h ? h.input + h.output : 0);
-      const cost = Math.max(rt.costUsd || 0, h?.cost || 0);
-      out.push({
-        key: sess.session_id + "::" + key, name: rt.name, role: rt.role || "member", agentType: rt.agentType, model: rt.model, color: undefined,
-        status: statusOf(sess.session_id, rt.name, rt.status), tokens, cost, runs: Math.max(rt.runCount || 0, h?.runs || 0), tools: Math.max(rt.toolCount || 0, h?.tools || 0),
-        elapsedMs: rt.elapsedMs, contextPct: rt.contextPct, contextTokens: rt.contextTokens, contextWindow: rt.contextWindow, budgetRemaining: rt.budgetRemaining, task: rt.task || rt.lastWork, session_id: sess.session_id, depth: 0, order: order++,
-      });
-    }
-  }
-  return out;
 }
 
 export { flattenTopology };

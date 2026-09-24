@@ -5,10 +5,12 @@ import { agentRuns, parseAgentLog } from "../agent-log";
 import { projectName } from "../../shared/project";
 import { tryResolveProjectIdentity } from "../../shared/project-identity";
 import { loadConfig } from "../../core/config";
-import type { AgentConfig, HiveTeam } from "../../core/types";
+import { teamTopology } from "../../core/topology";
 import { withCrossProcessFileLock } from "../../core/file-lock";
 import { readJsonlPage } from "../../core/fs";
 import type { HiveStateSnapshot, HiveTelemetryEvent, TelemetryRegistryRow, TelemetrySessionSummary, TopologyNode } from "../../shared/telemetry";
+import type { HiveTopology } from "../../shared/telemetry";
+import type { DashboardTopologyDetail } from "../../shared/dashboard-api";
 import { BOOT_SESSION_ID, CAPTURE_THINKING, CONVERSATION_LOG, DB_PATH, PROJECT_CWD, REGISTRY_PATH, RETENTION_DAYS, SINGLE_LOG_PATH } from "./config";
 import {
   db,
@@ -269,35 +271,6 @@ export function readState(logPath: string) {
 
 const topologyCache = new Map<string, { mtimeMs: number; topologies?: HiveStateSnapshot["topologies"] }>();
 
-function agentSummary(agent: AgentConfig): TopologyNode {
-  return {
-    name: agent.name,
-    role: agent.role,
-    agentType: agent.agentType,
-    stages: agent.stages,
-    group: agent.groupName,
-    color: agent.color,
-    model: agent.model,
-    tools: agent.tools,
-    thinking: agent.thinking,
-    consultWhen: agent.consultWhen,
-    routingTags: agent.routingTags || [],
-    // C2: mirror the extension-side summary (engine/observability.ts) so the
-    // config-parse fallback path (configuredTopologies, used when a snapshot
-    // lacks topologies) fills domain/commit/responsibilities too — otherwise
-    // those columns could never populate on that path.
-    domain: (agent.domain || []).map((scope) => scope.path),
-    commit: Boolean(agent.commit && agent.commit.trim()),
-    responsibilities: (agent.responsibilities || []).join("\n") || undefined,
-    children: [...(agent.members || []), ...(agent.children || [])].map(agentSummary),
-  };
-}
-
-function teamTopology(team?: HiveTeam): HiveStateSnapshot["topology"] | undefined {
-  if (!team) return undefined;
-  return { orchestrator: team.main ? agentSummary(team.main) : undefined, agents: (team.agents || []).map(agentSummary) };
-}
-
 function configuredTopologies(cwd: string | undefined, legacy?: HiveStateSnapshot["topology"]): HiveStateSnapshot["topologies"] | undefined {
   if (!cwd) return undefined;
   const configPath = path.join(cwd, ".pi", "hive", "hive-config.yaml");
@@ -389,7 +362,7 @@ function addSnapshot(snapshot: HiveStateSnapshot) {
   snapshot = enrichSnapshotTopologies(snapshot);
   snapshots.set(snapshot.session_id, snapshot);
   const topologyHashValue = versionTopology(snapshot);
-  if (topologyHashValue) (snapshot as any).topology_hash = topologyHashValue;
+  if (topologyHashValue) snapshot.topology_hash = topologyHashValue;
   // Runtime counters stay in the snapshot for live agent detail only. Historical
   // session totals are projected from completed worker/message usage events.
   // Slim the persisted state: store runtime counters + topology_hash instead of
@@ -406,8 +379,8 @@ function addSnapshot(snapshot: HiveStateSnapshot) {
     // old "hive if the hive team is non-empty" guess (which was wrong in plan
     // mode whenever the hive team was also configured).
     const activeTeam = snapshot.topologies?.active;
-    delete slim.topologies; delete slim.topology; (slim as any).topology_hash = topologyHashValue;
-    if (activeTeam) (slim as any).active_team = activeTeam;
+    delete slim.topologies; delete slim.topology; slim.topology_hash = topologyHashValue;
+    if (activeTeam) slim.active_team = activeTeam;
   }
   db.transaction(() => {
     upsertState.run({
@@ -621,35 +594,73 @@ function materializeTypedEvent(event: HiveTelemetryEvent) {
         }, event.ts);
       }
       break;
+    // Events below intentionally do not materialize a hot entity. The raw
+    // payload still lands in the `events` table (Phase 2.2 dropped the typed
+    // `messages` table). Explicit cases (instead of `default:`) are required
+    // by `@typescript-eslint/switch-exhaustiveness-check` with the project's
+    // default config (`considerDefaultExhaustiveForUnions: false`); the lint
+    // surfaced as a merge interaction when WT-1 widened `HiveTelemetryEventType`
+    // (added `delegation_progress` and a few other recent members) without
+    // touching this switch.
+    case "session_start":
+    case "user_message": // Phase 2.2: dropped typed messages table
+    case "assistant_message": // Phase 2.2: dropped typed messages table
+    case "worker_retry":
+    case "worker_compaction":
+    case "orchestrator_compaction":
+    case "orchestrator_message":
+    case "model_select":
+    case "thinking_level_select":
+    case "turn":
+    case "provider_response":
+    case "user_bash":
+    case "input":
+    case "session_fork":
+    case "session_tree":
+    case "session_info_changed":
+    case "distill_start":
+    case "distill_end":
+    case "budget_warning":
+    case "budget_exhausted":
+    case "queue_update":
+    case "review_verdict":
+    case "plan_approval":
+    case "plan_comment":
+    case "error":
+    case "delegation_progress": // legacy progress event; filtered at ingest boundary (telemetry.ts:74)
+      break;
   }
 }
 
 // Reassemble a versioned topology's nested tree from topology_nodes (C5). Each
 // team is rebuilt from its flat preorder rows via parent_id adjacency.
-export function topologyDetail(hash: string): any {
+export function topologyDetail(hash: string): DashboardTopologyDetail | null {
   const version = topologyVersion(hash);
   if (!version) return null;
   const rows = topologyNodes(hash);
-  const buildTeam = (team: string) => {
+  const buildTeam = (team: string): HiveTopology | undefined => {
     const teamRows = rows.filter((r) => r.team === team);
-    const byId = new Map<number, any>();
+    if (!teamRows.length) return undefined;
+    const byId = new Map<number, TopologyNode>();
     for (const r of teamRows) {
       byId.set(r.nodeId, {
         name: r.name, agentType: r.agentType, model: r.model, thinking: r.thinking,
         thinkingLevels: r.thinkingLevels, color: r.color, group: r.group, tools: r.tools,
         domain: r.domain, stages: r.stages, commit: r.commitAllowed, routingTags: r.routingTags,
-        consultWhen: r.consultWhen, responsibilities: r.responsibilities, children: [] as any[],
+        consultWhen: r.consultWhen, responsibilities: r.responsibilities, children: [],
       });
     }
-    let root: any;
     for (const r of teamRows) {
       const node = byId.get(r.nodeId);
-      if (r.parentId == null) root = root || node;
-      else byId.get(r.parentId)?.children.push(node);
+      if (!node) continue;
+      if (r.parentId == null) continue;
+      byId.get(r.parentId)?.children?.push(node);
     }
-    // If there was no single root (no orchestrator), return the top-level nodes.
-    const roots = teamRows.filter((r) => r.parentId == null).map((r) => byId.get(r.nodeId));
-    return roots.length === 1 ? { orchestrator: roots[0], agents: roots[0].children } : { agents: roots };
+    // If there was no single root (no orchestrator), return the top-level nodes
+    // as a flat `agents` list; otherwise the root becomes `orchestrator` and
+    // its children become the listed agents.
+    const roots = teamRows.filter((r) => r.parentId == null).map((r) => byId.get(r.nodeId)).filter((n): n is TopologyNode => !!n);
+    return roots.length === 1 ? { orchestrator: roots[0], agents: roots[0].children ?? [] } : { agents: roots };
   };
   return {
     hash: version.hash,
@@ -676,13 +687,13 @@ function resumeIngestSources() {
 // Rehydrate a slim persisted snapshot: if it carries a topology_hash but no
 // embedded topologies, reconstruct them from the versioned tree (C3).
 function rehydrateSnapshotTopology(snapshot: HiveStateSnapshot): HiveStateSnapshot {
-  const hash = (snapshot as any).topology_hash;
+  const hash = snapshot.topology_hash;
   if (!hash || snapshot.topologies) return snapshot;
   const detail = topologyDetail(hash);
   if (!detail) return snapshot;
   // Phase 2.4: read the persisted active team; only fall back to the structural
   // guess for legacy slim rows written before active_team was stored.
-  const stored = (snapshot as any).active_team as "hive" | "planning" | undefined;
+  const stored = snapshot.active_team;
   const active: "hive" | "planning" = stored
     ?? (detail.hive?.orchestrator || detail.hive?.agents?.length ? "hive" : "planning");
   return { ...snapshot, topologies: { active, hive: detail.hive, planning: detail.planning } };
@@ -703,7 +714,7 @@ function backfillTopologies() {
     });
     stampSessionTopology(row.sessionId, hash);
     const slim: HiveStateSnapshot = { ...snap };
-    delete slim.topologies; delete slim.topology; (slim as any).topology_hash = hash;
+    delete slim.topologies; delete slim.topology; slim.topology_hash = hash;
     rewriteStateJson(row.sessionId, JSON.stringify(slim));
     // Refresh the hot cache with the rehydrated full form.
     snapshots.set(row.sessionId, enrichSnapshotTopologies(rehydrateSnapshotTopology(slim)));

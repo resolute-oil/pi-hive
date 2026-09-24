@@ -75,6 +75,44 @@ export function buildEventStatus(events: HiveEvent[]): AgentStatusBySession {
         }
         break;
       }
+      // Events below intentionally do not affect agent status — they pass
+      // through without updating bySession/parentOf/outstanding. Explicit cases
+      // (instead of `default:`) are required by
+      // `@typescript-eslint/switch-exhaustiveness-check` with the project's
+      // default config (`considerDefaultExhaustiveForUnions: false`); the lint
+      // surfaced as a merge interaction when WT-1 narrowed `HiveEvent.type`
+      // from `HiveEventType | string` to `HiveEventType`, exposing the
+      // previously-silent gaps in this switch.
+      case "error":
+      case "user_message":
+      case "assistant_message":
+      case "worker_tool_end":
+      case "worker_retry":
+      case "worker_compaction":
+      case "orchestrator_tool_start":
+      case "orchestrator_tool_end":
+      case "orchestrator_compaction":
+      case "orchestrator_message":
+      case "model_select":
+      case "thinking_level_select":
+      case "turn":
+      case "provider_response":
+      case "user_bash":
+      case "input":
+      case "session_fork":
+      case "session_tree":
+      case "session_info_changed":
+      case "model_catalog":
+      case "distill_start":
+      case "distill_end":
+      case "budget_warning":
+      case "budget_exhausted":
+      case "queue_update":
+      case "review_verdict":
+      case "plan_approval":
+      case "plan_comment":
+      case "delegation_progress":
+        break;
     }
   }
   return bySession;
