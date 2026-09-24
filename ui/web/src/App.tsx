@@ -1,6 +1,5 @@
 import { useEffect } from "react";
 import Sidebar from "./components/Sidebar";
-import Topbar from "./components/Topbar";
 import Overview from "./tabs/Overview";
 import Sessions from "./tabs/Sessions";
 import Agents from "./tabs/Agents";
@@ -54,7 +53,6 @@ export default function App() {
     <div className="flex h-screen p-3 gap-3 overflow-hidden bg-bg text-ink">
       <Sidebar />
       <main className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
-        <Topbar />
         <div className="flex-1 min-h-0 overflow-auto pt-3.5 px-0.5 pb-10">
           <div className="flex items-end justify-between gap-3 mb-4">
             <div className="min-w-0">
