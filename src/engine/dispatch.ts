@@ -1,4 +1,4 @@
-import { withFileMutationQueue, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { withFileMutationQueue, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { copyFileSync, existsSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -165,6 +165,19 @@ export function inferChangeIdFromReviewTask(task: string): string | null {
   if (pathMatch) return pathMatch[1];
   const quotedMatch = task.match(/OpenSpec change [`"]([a-z0-9]+(?:-[a-z0-9]+)*)[`"]|change [`"]([a-z0-9]+(?:-[a-z0-9]+)*)[`"]|change\s+([a-z0-9]+(?:-[a-z0-9]+)*)\b/i);
   return quotedMatch?.[1] || quotedMatch?.[2] || quotedMatch?.[3] || null;
+}
+
+// Union the agent's enumerated `tools:` list with the names of any
+// type-scoped tools `buildHiveTools` emitted. The Pi SDK treats `tools` as
+// authoritative for the function-definitions block — a customTool whose
+// name isn't in `tools` is silently dropped from the model's view even
+// though its implementation is in customTools. Without this union, a
+// type-scoped tool the agent didn't enumerate (e.g. submit_review_verdict on
+// a reviewer whose frontmatter only lists read/grep/find/ls/bash/
+// team_conversation) never reaches the function-definitions block. Exported
+// so the regression test can pin the behavior without spinning up the SDK.
+export function dispatchToolNames(toolNames: string[], hiveTools: ReadonlyArray<ToolDefinition | { name: string }>): string[] {
+  return Array.from(new Set([...toolNames, ...hiveTools.map((t) => t.name)]));
 }
 
 export function inferArtifactFromReviewTask(task: string): ArtifactId | null {
@@ -415,6 +428,15 @@ export async function dispatchAgent(
   // not the tools list, so keep them even when the agent does not enumerate
   // them. buildHiveTools only emits them for the eligible type.
   const hiveTools = buildHiveTools(state, runtime.config.name).filter((t) => toolNames.includes(t.name) || TYPE_SCOPED_TOOL_NAMES.has(t.name));
+  // The SDK treats `tools` as authoritative for the function-definitions
+  // block — a customTool whose name isn't in `tools` is silently dropped from
+  // the model's view, even though its implementation is in customTools.
+  // Without this union, a type-scoped tool the agent didn't enumerate (e.g.
+  // submit_review_verdict on a reviewer whose frontmatter only lists read/grep/
+  // find/ls/bash/team_conversation) never reaches the function-definitions
+  // block. The agent's prompt claims the tool is auto-injected; this is the
+  // half of that contract that lived only in the comment until now.
+  const allToolNames = dispatchToolNames(toolNames, hiveTools);
   const skillPaths = resolveWorkerSkillPaths(ctx.cwd, runtime.config.skills as unknown[]);
 
   const sessionManager = SessionManager.open(runtime.sessionFile);
@@ -434,7 +456,7 @@ export async function dispatchAgent(
     model: resolvedModel,
     modelRegistry: (ctx as any).modelRegistry,
     thinkingLevel: thinking as any,
-    tools: toolNames,
+    tools: allToolNames,
     customTools: hiveTools,
     sessionManager,
     resourceLoader: workerLoader,
