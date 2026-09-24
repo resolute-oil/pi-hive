@@ -90,11 +90,18 @@ function collapseByName(agents: ScopeAgent[]): ScopeAgent[] {
 // The full enforcement contract for a row, as a hover tooltip (Phase 6.1) — the
 // same answer the topology node tooltip gives, surfaced in the table. Omits
 // fields the config didn't declare.
+//
+// Defensive against malformed runtime data: the type is `string[]` but the
+// SQLite round-trip via `parseJsonMaybe` can land a string-shaped payload (e.g.
+// a legacy config that set `stages: "specs"` instead of `stages: ["specs"]`),
+// in which case `.length` is truthy and `.join` blows up the whole tab. The
+// `Array.isArray` gate makes the tooltip silently omit the field instead of
+// taking the page down.
 function enforcementTitle(r: ScopeAgent): string {
   const lines: string[] = [];
   if (r.commit) lines.push("commit: yes");
-  if (r.domain?.length) lines.push(`domains: ${r.domain.join(", ")}`);
-  if (r.stages?.length) lines.push(`plan gates: ${r.stages.join(", ")}`);
+  if (Array.isArray(r.domain) && r.domain.length) lines.push(`domains: ${r.domain.join(", ")}`);
+  if (Array.isArray(r.stages) && r.stages.length) lines.push(`plan gates: ${r.stages.join(", ")}`);
   if (r.consultWhen) lines.push(`consult when: ${r.consultWhen}`);
   if (r.responsibilities) lines.push(`responsibilities:\n${r.responsibilities}`);
   return lines.join("\n");
@@ -102,12 +109,16 @@ function enforcementTitle(r: ScopeAgent): string {
 
 // Compact enforcement cell: a commit marker (✓) plus the domain count/first path,
 // with the full contract on hover. "—" when the agent declares no boundary.
+//
+// Same defensive `Array.isArray` gate as `enforcementTitle` — see the comment
+// there for why this matters.
 function enforcementCell(r: ScopeAgent) {
-  const hasDomain = !!r.domain?.length;
-  if (!hasDomain && !r.commit && !r.stages?.length) return "—";
+  const hasDomain = Array.isArray(r.domain) && r.domain.length > 0;
+  const hasStages = Array.isArray(r.stages) && r.stages.length > 0;
+  if (!hasDomain && !r.commit && !hasStages) return "—";
   const domainLabel = hasDomain
     ? (r.domain!.length === 1 ? r.domain![0] : `${r.domain![0]} +${r.domain!.length - 1}`)
-    : (r.stages?.length ? `gates: ${r.stages.length}` : "");
+    : (hasStages ? `gates: ${r.stages!.length}` : "");
   return (
     <span title={enforcementTitle(r)}>
       {r.commit ? <span title="may commit" style={{ color: "var(--brand)" }}>✓ </span> : null}
