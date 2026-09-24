@@ -100,7 +100,14 @@ function enrichFromFrontmatter(cwd: string, agent: AgentConfig | undefined): voi
       if (!agent.thinking && attrs.thinking) agent.thinking = String(attrs.thinking).trim();
       if (agent.agentType === undefined) agent.agentType = normalizeAgentType(attrs.agentType) as AgentConfig["agentType"];
       if (agent.stages === undefined) agent.stages = normalizePlanStages(attrs.stages) as AgentConfig["stages"];
-      if (agent.network === undefined && attrs.network !== undefined) agent.network = attrs.network;
+      // `attrs.network` is `unknown` (frontmatter is JSON-y), so the raw value
+      // passes through unchecked here — the schema validator at schema.ts:111
+      // (`.network must be true or false when provided`) catches non-booleans
+      // such as `network: yes`. We deliberately do NOT coerce with Boolean(),
+      // which would silently turn `"yes"` into `true` and bypass that check.
+      if (agent.network === undefined && attrs.network !== undefined) {
+        agent.network = attrs.network as unknown as boolean;
+      }
       if (agent.commit === undefined) agent.commit = normalizeCommit(attrs.commit);
     }
   }

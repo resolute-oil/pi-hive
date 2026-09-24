@@ -156,20 +156,21 @@ test("explode → topologyDetail reassembles the exact tree + canonical JSON (L2
   expect(detail).toBeTruthy();
   // Adjacency/identity reassembles: Lead is the hive orchestrator with Coder +
   // Tester as its children; Planner is the planning orchestrator.
-  expect(detail.hive.orchestrator.name).toBe("Lead");
-  const childNames = (detail.hive.orchestrator.children || []).map((c: any) => c.name).sort();
+  if (!detail) throw new Error("detail should be defined after expect");
+  expect(detail.hive?.orchestrator?.name).toBe("Lead");
+  const childNames = (detail.hive?.orchestrator?.children || []).map((c) => c.name).sort();
   expect(childNames).toEqual(["Coder", "Tester"]);
-  const coder = detail.hive.orchestrator.children.find((c: any) => c.name === "Coder");
-  expect(coder.model).toBe("anthropic/sonnet");
-  expect(coder.commit).toBe(false);
-  expect(detail.hive.orchestrator.commit).toBe(true);
-  expect(detail.hive.orchestrator.domain).toEqual(["src/**"]);
-  expect(detail.planning.orchestrator.name).toBe("Planner");
+  const coder = detail.hive?.orchestrator?.children?.find((c) => c.name === "Coder");
+  expect(coder?.model).toBe("anthropic/sonnet");
+  expect(coder?.commit).toBe(false);
+  expect(detail.hive?.orchestrator?.commit).toBe(true);
+  expect(detail.hive?.orchestrator?.domain).toEqual(["src/**"]);
+  expect(detail.planning?.orchestrator?.name).toBe("Planner");
 
   // The canonical JSON stored round-trips byte-for-byte, and re-hashing the
   // reassembled canonical form yields the SAME hash (stable identity).
   expect(detail.canonicalJson).toBe(hash.canonicalTopologyJson(TOPO as any));
-  expect(hash.topologyHash(JSON.parse(detail.canonicalJson))).toBe(h);
+  expect(hash.topologyHash(JSON.parse(detail.canonicalJson!))).toBe(h);
 });
 
 test("hash is invariant under key insertion-order permutation (L2)", () => {

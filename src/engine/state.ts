@@ -2,7 +2,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { appendFileSync, chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { slug } from "../core/utils";
-import type { JsonRecord, HiveState } from "../core/types";
+import type { HiveState } from "../core/types";
+import type { JsonRecord } from "../shared/telemetry";
 import { redactSensitive } from "../shared/privacy";
 
 function ensurePrivateDir(path: string): void {

@@ -2,10 +2,11 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, renameSync, statSync,
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import type { AgentConfig, AgentRuntime, HiveState, HiveTeam } from "../core/types";
+import type { AgentRuntime, HiveState } from "../core/types";
 import type { HiveStateSnapshot, HiveTelemetryEvent, HiveTelemetryEventType, JsonRecord, TelemetryAgentStatus, TopologyNode } from "../shared/telemetry";
 import { tryResolveProjectIdentity } from "../shared/project-identity";
 import { agentSlug, truncateMiddle } from "../core/utils";
+import { agentSummary, teamTopology } from "../core/topology";
 import { currentAgentName } from "./session";
 import { withCrossProcessFileLock } from "../core/file-lock";
 import { redactSensitive } from "../shared/privacy";
@@ -72,38 +73,11 @@ export function registerHiveTelemetrySession(state: HiveState, cwd: string) {
   });
 }
 
-function agentSummary(agent: AgentConfig): TopologyNode {
-  return {
-    slug: agentSlug(agent),
-    name: agent.name,
-    role: agent.role,
-    agentType: agent.agentType,
-    stages: agent.stages,
-    group: agent.groupName,
-    color: agent.color,
-    model: agent.model,
-    tools: agent.tools,
-    thinking: agent.thinking,
-    consultWhen: agent.consultWhen,
-    routingTags: agent.routingTags || [],
-    // The enforcement boundary (A8): the glob list the agent may write, whether
-    // it may commit (presence of commit guidance unlocks the gate), and its
-    // declared responsibilities. These are what Phase E renders and what the
-    // versioned topology (Phase C) hashes.
-    domain: (agent.domain || []).map((scope) => scope.path),
-    commit: Boolean(agent.commit && agent.commit.trim()),
-    responsibilities: (agent.responsibilities || []).join("\n") || undefined,
-    children: [...(agent.members || []), ...(agent.children || [])].map(agentSummary),
-  };
-}
-
-function teamTopology(team?: HiveTeam): HiveStateSnapshot["topology"] | undefined {
-  if (!team) return undefined;
-  return {
-    orchestrator: team.main ? agentSummary(team.main) : undefined,
-    agents: (team.agents || []).map(agentSummary),
-  };
-}
+// `agentSummary` and `teamTopology` live in `core/topology` (the single source
+// of truth shared with the server's config-parse fallback path). Importing
+// here removes the byte-near-duplicate that used to live in this file and
+// the server side; the canonicalNode hash in `observability/server/topology-hash`
+// deliberately excludes `slug` so the row shape is still topology-hash-stable.
 
 export function hiveTopology(state: HiveState): HiveStateSnapshot["topology"] {
   const roots = state.config?.agents || [];

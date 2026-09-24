@@ -1,5 +1,5 @@
-import type { AgentToolUpdateCallback, ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { defineTool as definePiTool, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import type { AgentToolUpdateCallback, ExtensionAPI, ExtensionContext, ToolDefinition, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
+import { Theme, defineTool as definePiTool, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type, type TSchema } from "typebox";
 import { resolve } from "node:path";
@@ -12,7 +12,8 @@ import {
   truncateMiddle,
 } from "../core/utils";
 import { routeAgents } from "../engine/routing";
-import { dispatchAgent, scheduleMentalModelDistillation } from "../engine/dispatch";
+import { dispatchAgent } from "../engine/dispatch";
+import { scheduleMentalModelDistillation } from "../engine/distiller";
 import { renderHiveSddStatus, resolveHiveSddStatus } from "../engine/sdd";
 import { currentChangeId } from "../engine/session";
 import { emitHiveEvent } from "../engine/observability";
@@ -22,7 +23,12 @@ import { agentSlug } from "../core/utils";
 import { budgetRemaining, effectiveWorkerGovernance } from "../engine/governance";
 
 type ToolUpdate = AgentToolUpdateCallback<object>;
-type ToolRenderOptions = { isPartial?: boolean; expanded?: boolean };
+// Replaced the local `ToolRenderOptions` shape with the SDK's
+// `ToolRenderResultOptions` so the renderer surface stays in sync with pi.
+// The SDK pins `expanded` and `isPartial` as required booleans (the local
+// shape had both optional, which let `renderResult` be called with an unset
+// `isPartial` flag and pass through silently).
+type ToolRenderOptions = ToolRenderResultOptions;
 
 // Pi infers a tool's details shape from the first return branch. Hive tools
 // intentionally return several bounded detail variants, so widen details to a
@@ -99,7 +105,7 @@ function contextAdvice(contextPct?: number): "resume-ok" | "consider-fresh" | "f
 export function buildHiveTools(state: HiveState, callerName: string): ToolDefinition[] {
   // Render an agent's name in ITS OWN configured color (matching the status
   // modal), falling back to the theme accent if no/invalid hex is configured.
-  const agentColored = (name: string, theme: any): string => {
+  const agentColored = (name: string, theme: Theme): string => {
     const runtime = resolveRuntime(state, name);
     const color = runtime?.config.color;
     return hexAnsi(color, runtime?.config.name || name) || theme.fg("accent", runtime?.config.name || name);
@@ -216,7 +222,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
         details: { agent, task, status: result.exitCode === 0 ? "done" : "error", elapsed: result.elapsed, exitCode: result.exitCode, finalAnswer, outputPreview: output },
       };
     },
-    renderCall(args: unknown, theme: any) {
+    renderCall(args: unknown, theme: Theme) {
       const agent = (args as any).agent || "?";
       const task = String((args as any).task || "");
       const header = theme.fg("toolTitle", theme.bold("delegate_agent ")) +
@@ -234,7 +240,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
         : [header];
       return boundedToolRender(lines, theme.fg("dim", "…"));
     },
-    renderResult(result: any, options: ToolRenderOptions, theme: any) {
+    renderResult(result: any, options: ToolRenderOptions, theme: Theme) {
       const details = result.details as any;
       const agent = details?.agent || "agent";
       // While a delegation is running, the persistent Hive activity widget is
@@ -262,8 +268,12 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
     }),
     async execute(_toolCallId: string, params: unknown) {
       if (!state.session) return { content: [{ type: "text", text: "hive session not initialized" }], details: { ok: false } };
-      const lines = boundedPositiveInteger((params as any).lines, 80, 1000);
-      const agentName = String((params as any).agent || "").trim();
+      // `params: unknown` is the SDK boundary; the schema-derived shape
+      // carries the field types (`agent: string`, `lines?: number`) so the
+      // execute body stops reaching for `(params as any).field`.
+      const teamParams = params as { agent?: string; lines?: number };
+      const lines = boundedPositiveInteger(teamParams.lines, 80, 1000);
+      const agentName = String(teamParams.agent || "").trim();
       // Scoped-only: an empty agent (including a lines-only call) is rejected.
       // Reading the shared log dumped its entire interleaved tail — individual
       // records embed full agent outputs, so an 80-line tail could be >500KB and
@@ -466,7 +476,10 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
         changeId: Type.Optional(Type.String({ description: "The change-id to activate. Omit to list available changes." })),
       }),
       async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
-        const changeId = String((params as any).changeId || "").trim();
+        // Schema-derived shape: `changeId?: string`. Replaces `(params as any).changeId`
+        // so the SDK boundary is the only cast.
+        const planParams = params as { changeId?: string };
+        const changeId = String(planParams.changeId || "").trim();
         const available = openspec.listChanges(ctx.cwd).map((c) => c.name);
         if (!changeId) {
           const list = available.length ? available.map((id) => `- ${id}${state.activeChangeId === id ? " (active)" : ""}`).join("\n") : "(none)";
