@@ -12,7 +12,8 @@ import {
   truncateMiddle,
 } from "../core/utils";
 import { routeAgents } from "../engine/routing";
-import { dispatchAgent, scheduleMentalModelDistillation } from "../engine/dispatch";
+import { dispatchAgent } from "../engine/dispatch";
+import { scheduleMentalModelDistillation } from "../engine/distiller";
 import { renderHiveSddStatus, resolveHiveSddStatus } from "../engine/sdd";
 import { currentChangeId } from "../engine/session";
 import { emitHiveEvent } from "../engine/observability";

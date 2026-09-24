@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeF
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { dispatchAgent, distillMentalModel, inferArtifactFromReviewTask, inferChangeIdFromReviewTask, isPendingArtifactRevisionTask, resolveWorkerSkillPaths, scheduleMentalModelDistillation, type CreateAgentSession } from "../src/engine/dispatch.ts";
+import { dispatchAgent, inferArtifactFromReviewTask, inferChangeIdFromReviewTask, isPendingArtifactRevisionTask, resolveWorkerSkillPaths, type CreateAgentSession } from "../src/engine/dispatch.ts";
+import { distillMentalModel, scheduleMentalModelDistillation } from "../src/engine/distiller.ts";
 import { restoreRuntimeCounters, runAtDelegationDepth } from "../src/engine/session.ts";
 import type { AgentRuntime, HiveState } from "../src/core/types.ts";
 

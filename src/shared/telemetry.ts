@@ -207,6 +207,15 @@ export interface HiveStateSnapshot {
   topology?: HiveTopology;
   // Both configured team topologies, when available: execution hive + planning.
   topologies?: HiveTeamTopologies;
+  // Hash of the versioned topology stored separately on the server (Phase C).
+  // Slim persisted rows keep this on the snapshot so the hot cache can rehydrate
+  // the full nested tree from the versioned topology_nodes table without
+  // re-parsing every event. Not part of the public dashboard wire format.
+  topology_hash?: string;
+  // The active team of the slim row at last-write time. Phase 2.4: without
+  // this flag rehydration can't recover `active` from the hash alone — it
+  // must read what was actually selected, not guess from tree non-emptiness.
+  active_team?: "hive" | "planning";
   active_runs?: number;
   agents?: TelemetryAgentRuntime[];
 }
