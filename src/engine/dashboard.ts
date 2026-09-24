@@ -428,3 +428,43 @@ export async function stopDashboard(
   const lock = deps.withLock ?? ((path, fn) => withCrossProcessFileLockAsync(path, fn, { timeoutMs: 15_000, staleMs: 30_000 }));
   return lock(dashboardStartupLockPath(), () => stopDashboardUnlocked(state, host, port, deps));
 }
+
+/**
+ * On session quit, kill the dashboard if this session spawned it.
+ *
+ * For other shutdown reasons (`reload`, `new`, `resume`, `fork`) the
+ * daemon is intentionally shared so the next session can adopt it.
+ *
+ * Returns the PIDs of the killed processes, or an empty array if no
+ * action was taken (adopted dashboard, non-quit reason, or no dashboard
+ * reference on `state`).
+ *
+ * Multi-session note: a user who opens `/hive:observe` from two pi
+ * windows and quits the FIRST one loses the dashboard for the SECOND.
+ * Accepted tradeoff — the primary UX request is the single-session
+ * "close the app when pi closes" case. Users who need the multi-session
+ * behavior can re-run `/hive:observe` in the surviving session.
+ *
+ * Best-effort: if the authenticated shutdown fails, the daemon's own
+ * server-side idle-timeout fallback still terminates it once the browser
+ * SSE stream disconnects. We log a warning rather than rethrow so a
+ * shutdown-hook error never blocks the rest of `session_shutdown`.
+ */
+export async function killOwnedDashboardOnQuit(
+  state: HiveState,
+  reason: "quit" | "reload" | "new" | "resume" | "fork",
+  deps: { stop?: typeof stopDashboard } = {},
+): Promise<number[]> {
+  const stop = deps.stop ?? stopDashboard;
+  if (reason !== "quit") return [];
+  // `adopted === false` means THIS session's `ensureDashboard` spawned the
+  // daemon. `adopted === true` means we attached to an existing daemon
+  // owned by another session — do NOT kill in that case.
+  if (!state.obsServer || state.obsServer.adopted !== false) return [];
+  try {
+    return await stop(state);
+  } catch (err: any) {
+    console.warn("[pi-hive] session_shutdown: dashboard stop failed:", err?.message || err);
+    return [];
+  }
+}
