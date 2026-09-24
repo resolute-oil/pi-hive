@@ -68,6 +68,15 @@ describe("Sidebar", () => {
     // lives at the very bottom of the sidebar, below the theme toggle.
     expect(dark.compareDocumentPosition(clock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(light.compareDocumentPosition(clock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    // The clock sits in its own card that mirrors the connection card frame
+    // (bg-well + border-line + rounded-xl). jsdom doesn't apply Tailwind, so
+    // assert via className rather than getComputedStyle.
+    const card = clock.parentElement;
+    expect(card).toBeTruthy();
+    expect(card!.className).toContain("bg-well");
+    expect(card!.className).toContain("border-line");
+    expect(card!.className).toContain("rounded-xl");
   });
 
   it("hides the provider pressure counter when there are no recent 429/529 events", () => {
