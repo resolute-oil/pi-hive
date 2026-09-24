@@ -1,21 +1,15 @@
 import { withFileMutationQueue, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
-import { copyFileSync, existsSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, renameSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { TYPE_SCOPED_TOOL_NAMES } from "../core/constants";
-import { normalizeMentalModelSpine } from "../core/mental-model";
 import type { AgentRuntime, HiveState } from "../core/types";
 import {
   boundedDiagnostics,
-  ensureDir,
   modelFrom,
   normalizeWorkerTools,
-  readJsonlPage,
   safeJson,
-  safeRead,
-  slug,
   agentSlug,
-  tailLines,
   textFromMessage,
   textOfResult,
   truncateMiddle,
@@ -24,7 +18,7 @@ import {
 import { logRecord } from "./state";
 import { currentAgentName, currentChangeId, currentDelegationDepth, reloadAgentConfig, runAsAgent, runAtDelegationDepth, runWithChange } from "./session";
 import { canDelegateTo } from "./domain";
-import { agentMentalModelTarget, buildDistillerPrompt, buildWorkerPrompt, extractTagged } from "./prompts";
+import { buildWorkerPrompt } from "./prompts";
 import { emitHiveEvent, runtimeSummary, writeHiveStateSnapshot } from "./observability";
 import { buildHiveTools } from "../agents/tools";
 import { normalizeWorkerSkillPaths, workerResourceLoader } from "./worker-extension";
@@ -34,21 +28,13 @@ import { agentRoster, resolveRuntime } from "./agent-lookup";
 import { addHiveActivity } from "../ui/tui/activity";
 import { resolveConfiguredPath } from "../core/safe-path";
 import { acquireWorkerSlot, budgetRemaining, checkDispatchBudgets, effectiveWorkerGovernance, releaseWorkerSlot } from "./governance";
+import { WorkerRunLifecycle } from "./worker-lifecycle";
+import { modelKey, resolveModel } from "./model-resolution";
 
 // Dashboard activity should show reviewer/worker conclusions without confusing
 // middle elision in normal cases. Keep a high hard cap to avoid unbounded shared
 // telemetry rows if an agent accidentally returns a huge dump.
 const DELEGATION_EVENT_MESSAGE_LIMIT = 64_000;
-
-function resolveModel(ctx: ExtensionContext, modelString: string): any {
-  const [provider, ...idParts] = modelString.split("/");
-  return (ctx as any).modelRegistry?.find(provider, idParts.join("/"));
-}
-
-function modelKey(model: any, fallback: string): string {
-  if (model?.provider && model?.id) return `${model.provider}/${model.id}`;
-  return fallback;
-}
 
 function publishRuntimeUpdate(state: HiveState) {
   state.onRuntimeUpdate?.(state);
@@ -85,56 +71,6 @@ function archivePriorRun(sessionFile: string) {
 // can inject a scripted AgentSession to drive dispatchAgent end-to-end without a
 // live model. Kept as the last optional param so existing callers are unchanged.
 export type CreateAgentSession = typeof createAgentSession;
-
-class WorkerRunLifecycle {
-  private session: any;
-  private unsubscribe?: () => void;
-  private abortListener?: () => void;
-  private closed = false;
-  private readonly state: HiveState;
-  private readonly runtime: AgentRuntime;
-  private readonly abortSignal?: AbortSignal;
-
-  constructor(state: HiveState, runtime: AgentRuntime, abortSignal?: AbortSignal) {
-    this.state = state;
-    this.runtime = runtime;
-    this.abortSignal = abortSignal;
-  }
-
-  attachSession(session: any): void {
-    this.session = session;
-    this.runtime.session = session;
-  }
-
-  attachSubscription(unsubscribe: () => void): void {
-    this.unsubscribe = unsubscribe;
-  }
-
-  watchParentAbort(listener: () => void): void {
-    this.abortListener = listener;
-    if (this.abortSignal?.aborted) listener();
-    else this.abortSignal?.addEventListener("abort", listener, { once: true });
-  }
-
-  async close(failed: boolean): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
-    if (this.abortListener) this.abortSignal?.removeEventListener("abort", this.abortListener);
-    if (this.runtime.timer) {
-      clearInterval(this.runtime.timer);
-      this.runtime.timer = undefined;
-    }
-    try { this.unsubscribe?.(); } catch { /* cleanup must continue */ }
-    if (failed && this.session?.abort) {
-      // Do not let a hung provider abort strand the slot forever. Invoking abort
-      // starts cancellation; disposal and counter release remain unconditional.
-      try { void Promise.resolve(this.session.abort()).catch((): void => undefined); } catch { /* cleanup must continue */ }
-    }
-    try { this.session?.dispose?.(); } catch { /* cleanup must continue */ }
-    this.runtime.session = undefined;
-    releaseWorkerSlot(this.state);
-  }
-}
 
 export function resolveWorkerSkillPaths(cwd: string, refs: unknown[] = []): string[] {
   return normalizeWorkerSkillPaths(refs).flatMap((skillPath, index) => {
@@ -882,150 +818,4 @@ export async function dispatchAgent(
   writeHiveStateSnapshot(state);
   state.onRuntimeFinish?.(runtime, ctx);
   return { output, exitCode, elapsed: runtime.elapsedMs };
-}
-
-// ── Mental-model distiller ────────────────────────────────────────────────
-// After a worker finishes, a separate constrained `pi` run reads a SNAPSHOT of
-// the just-completed conversation plus the agent's current mental model, then
-// returns a consolidated rewrite of that file. This replaces inline self-update
-// tools: the worker focuses on the task; memory is curated out-of-band, can
-// consolidate (not just append), and never pollutes the worker's context.
-
-export async function runDistillerProcess(state: HiveState, ctx: ExtensionContext, prompt: string, model: string): Promise<string> {
-  const resolvedModel = resolveModel(ctx, model);
-  if (!resolvedModel) return "";
-
-  // In-process now: no separate session to inherit. The distiller's transcript
-  // is a scratch prompt/response pair, not durably meaningful on its own, so it
-  // never needs a session file — SessionManager.inMemory() is correct here.
-  const { session } = await createAgentSession({
-    cwd: ctx.cwd,
-    model: resolvedModel,
-    modelRegistry: (ctx as any).modelRegistry,
-    thinkingLevel: "off",
-    tools: [],
-    noTools: "all",
-    sessionManager: SessionManager.inMemory(ctx.cwd),
-  });
-
-  const chunks: string[] = [];
-  let streamedSnapshot = "";
-  (state.backgroundDistillerSessions ||= new Set()).add(session);
-  session.subscribe((event: any) => {
-    if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
-      const delta = event.assistantMessageEvent;
-      const deltaText = typeof delta.delta === "string" ? delta.delta : "";
-      if (deltaText) chunks.push(deltaText);
-      const snapshot = textFromMessage(event.message) || (typeof delta.text === "string" ? delta.text : "");
-      if (snapshot) streamedSnapshot = snapshot;
-    } else if (event.type === "agent_end") {
-      const last = [...(event.messages || [])].reverse().find((m: any) => m.role === "assistant");
-      if (last && !chunks.length && !streamedSnapshot) chunks.push(textFromMessage(last));
-    }
-  });
-
-  try {
-    await session.prompt(prompt);
-  } catch {
-    return "";
-  } finally {
-    state.backgroundDistillerSessions?.delete(session);
-    session.dispose();
-  }
-  return chunks.join("").trim() || streamedSnapshot.trim();
-}
-
-export async function distillMentalModel(state: HiveState, ctx: ExtensionContext, runtime: AgentRuntime): Promise<void> {
-  if (!state.config || !state.session || !state.config.settings.distiller.enabled) return;
-  const target = agentMentalModelTarget(runtime);
-  if (!target) return;
-
-  // Config validation already requires an explicit opt-in for targets outside
-  // the project. Re-apply that rule at the write site before queueing mutation.
-  const safeTarget = resolveConfiguredPath(ctx.cwd, target.path, target.allowOutsideProject === true, { allowMissing: true });
-  if (!safeTarget) return;
-  const targetPath = safeTarget.canonicalPath;
-
-  // Snapshot the just-finished conversation, distill from the copy, then delete
-  // it — so a re-delegation of the same agent can reuse its live session freely.
-  const snapshotDir = join(state.session.sessionDir, "distill");
-  ensureDir(snapshotDir);
-  const snapshotPath = join(snapshotDir, `${slug(runtime.config.name)}-${runtime.runCount}.jsonl`);
-  let conversation = "";
-  try {
-    if (existsSync(runtime.sessionFile)) {
-      copyFileSync(runtime.sessionFile, snapshotPath);
-      const tail = readJsonlPage(snapshotPath, { before: Number.MAX_SAFE_INTEGER, maxBytes: 1024 * 1024 });
-      conversation = tailLines(tail.text, state.config.settings.distiller.conversationLines);
-    }
-  } catch { /* no session yet */ }
-  if (!conversation) { try { rmSync(snapshotPath, { force: true }); } catch { /* noop */ } return; }
-
-  let changed = false;
-  let errorMessage: string | undefined;
-  emitHiveEvent(state, "distill_start", { agent: runtime.config.name, target: target.path, model: state.config.settings.distiller.model, distillerRunCount: runtime.distillerRunCount || 0 }, "Distiller");
-  try {
-    const currentModel = safeRead(targetPath);
-    const today = new Date().toISOString().slice(0, 10);
-    const prompt = buildDistillerPrompt(runtime.config.name, currentModel, conversation, today);
-    const output = await runDistillerProcess(state, ctx, prompt, state.config.settings.distiller.model);
-    const extracted = extractTagged(output, "mental_model");
-    // Mechanical safety net: guarantee the hard spine (owner/updated/spine keys)
-    // even if the distiller's output drifts. The soft body is left byte-exact.
-    const distilled = extracted ? normalizeMentalModelSpine(extracted, runtime.config.name).trim() : null;
-    if (distilled && distilled !== currentModel.trim() && !state.shuttingDown) {
-      await withFileMutationQueue(targetPath, async () => {
-        // Re-read inside the queued mutation window. If another tool updated the
-        // model while distillation was running, do not overwrite fresher state
-        // with a result derived from the old snapshot.
-        const latestModel = safeRead(targetPath);
-        if (state.shuttingDown || latestModel.trim() !== currentModel.trim()) return;
-        writeFileSync(targetPath, `${distilled}\n`);
-        changed = true;
-      });
-      if (changed) {
-        logRecord(state, { from: "Distiller", to: runtime.config.name, type: "mental_model_distilled", message: `Updated ${target.path}`, path: target.path });
-      }
-    }
-  } catch (error: any) {
-    errorMessage = truncateMiddle(error?.message || String(error), 500);
-  } finally {
-    emitHiveEvent(state, "distill_end", { agent: runtime.config.name, target: target.path, changed, errorMessage }, "Distiller");
-    try { rmSync(snapshotPath, { force: true }); } catch { /* noop */ }
-  }
-}
-
-export function scheduleMentalModelDistillation(
-  state: HiveState,
-  ctx: ExtensionContext,
-  runtime: AgentRuntime,
-  runDistiller: typeof distillMentalModel = distillMentalModel,
-): Promise<void> {
-  const target = agentMentalModelTarget(runtime);
-  if (!target || state.shuttingDown) return Promise.resolve();
-  const governance = effectiveWorkerGovernance(state, runtime);
-  if (governance.distillerRuns !== undefined && (runtime.distillerRunCount || 0) >= governance.distillerRuns) {
-    emitHiveEvent(state, "budget_exhausted", { agent: runtime.config.name, scope: "worker", resource: "distillerRuns", remaining: 0, limit: governance.distillerRuns }, "Distiller");
-    return Promise.resolve();
-  }
-  const runCount = runtime.runCount;
-  const queues = state.distillQueues ||= new Map<string, Promise<void>>();
-  const background = state.backgroundTasks ||= new Set<Promise<void>>();
-  const previous = queues.get(target.path) || Promise.resolve();
-  const task = previous.catch((): void => undefined).then(async () => {
-    // A newer run for the same runtime supersedes this queued snapshot. Skipping
-    // it prevents an old conversation from overwriting a newer mental model.
-    if (state.shuttingDown || runtime.runCount !== runCount) return;
-    // Reserve at launch time so queued distillers cannot all pass the same cap.
-    if (governance.distillerRuns !== undefined && (runtime.distillerRunCount || 0) >= governance.distillerRuns) return;
-    runtime.distillerRunCount = (runtime.distillerRunCount || 0) + 1;
-    await runDistiller(state, ctx, runtime);
-  }).catch((): void => undefined);
-  queues.set(target.path, task);
-  background.add(task);
-  void task.finally(() => {
-    background.delete(task);
-    if (queues.get(target.path) === task) queues.delete(target.path);
-  });
-  return task;
 }
