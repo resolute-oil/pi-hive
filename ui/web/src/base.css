@@ -329,20 +329,21 @@
 @layer components {
   .modal-backdrop { @apply fixed inset-0 z-50 grid place-items-center p-5 animate-fadein; background: #0008; backdrop-filter: blur(6px); }
   /* Backdrop for the fullscreen modal variant: drop the p-5 down to p-1 so
-     the visible margin around the panel is uniform (8px) on every side —
-     with the standard p-5 the panel would either overflow the padding
-     asymmetrically or hide the click-away strip. */
+     the visible margin around the panel is uniform on every side — with the
+     standard p-5 the panel would either overflow the padding asymmetrically
+     or hide the click-away strip. The backdrop's p-1 (4px) padding is small
+     so the panel can be sized close to the viewport (100vw / 100vh minus
+     40px) and still leave a uniform 20px gap between panel and viewport edge. */
   .modal-backdrop-fullscreen { @apply fixed inset-0 z-50 grid place-items-center p-1 animate-fadein; background: #0008; backdrop-filter: blur(6px); }
   .modal-panel { @apply bg-panel border border-border rounded-[18px] flex flex-col overflow-hidden; box-shadow: 0 30px 80px #000a; width: min(1800px, 96vw); height: min(1100px, 94vh); animation: activityIn .2s cubic-bezier(.2,.7,.3,1); }
-  /* Fullscreen variant of the modal surface: hugs the viewport edge-to-edge
-     with an 8px backdrop strip on every side so the click-away backdrop is
-     visible symmetrically (and the box-shadow doesn't get clipped). The
-     backdrop uses p-1 (4px) instead of the standard p-5 to keep the visible
-     margin consistent on all four sides; the panel itself is 100vw / 100vh
-     minus those 4px padding × 2 = 8px so it covers everything but the strip.
-     Used by the Overview "expand topology" affordance so the topology fills
-     the monitor instead of being letterboxed to 80vw/80vh. */
-  .modal-panel-fullscreen { @apply bg-panel border border-border rounded-[10px] flex flex-col overflow-hidden; box-shadow: 0 30px 80px #000a; width: calc(100vw - 8px); height: calc(100vh - 8px); animation: activityIn .2s cubic-bezier(.2,.7,.3,1); }
+  /* Fullscreen variant of the modal surface: hugs the viewport with a
+     uniform 20px gap between the panel and the viewport edge on every
+     side. The backdrop uses p-1 (4px) padding so the panel can be sized
+     to 100vw / 100vh minus 40px and still leave the click-away backdrop
+     visible symmetrically (and the box-shadow doesn't get clipped). Used
+     by the Overview "expand topology" affordance so the topology fills
+     the monitor instead of being letterboxed. */
+  .modal-panel-fullscreen { @apply bg-panel border border-border rounded-[10px] flex flex-col overflow-hidden; box-shadow: 0 30px 80px #000a; width: calc(100vw - 40px); height: calc(100vh - 40px); animation: activityIn .2s cubic-bezier(.2,.7,.3,1); }
   .modal-panel-fullscreen .graph-wrap { @apply m-0 rounded-none; }
   .modal-body { @apply flex-1 flex flex-col min-h-0 overflow-auto; }
   .modal-body > * { @apply flex-1; }
