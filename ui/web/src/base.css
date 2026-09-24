@@ -413,7 +413,8 @@
   .tl-scroll { @apply overflow-y-auto overflow-x-hidden px-2 pb-2 flex-1 min-h-0; }
   /* two-line feed entry (Overview LiveActivity) — mirrors the Activity tab's
      per-agent color language: a left accent tinted by the agent's identity. */
-  .feed-row { @apply relative px-2.5 py-[7px] rounded-[10px] overflow-hidden; --agent-color: var(--brand); border-left: 3px solid color-mix(in srgb, var(--agent-color) 70%, transparent); }
+  .feed-row { @apply relative px-2.5 py-[7px] rounded-[10px] overflow-hidden mb-1; --agent-color: var(--brand); border-left: 3px solid color-mix(in srgb, var(--agent-color) 70%, transparent); }
+  .feed-row:last-child { @apply mb-0; }
   .feed-row::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 32px; background: linear-gradient(90deg, color-mix(in srgb, var(--agent-color) 12%, transparent), transparent); pointer-events: none; }
   .feed-row:hover { background: color-mix(in srgb, var(--agent-color) 6%, transparent); }
   .feed-pill { @apply font-mono text-[9px] font-medium rounded-full px-2 py-0.5 whitespace-nowrap; letter-spacing: .05em; }
