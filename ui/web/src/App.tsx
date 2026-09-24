@@ -17,7 +17,8 @@ import { relTime, sessionSlug } from "./lib/format";
 
 // Scope subtitle. Isolated into its own leaf so the 1s `now` tick (needed only
 // for the "updated Xs ago" clause at session scope) re-renders this line alone,
-// not the whole tab tree.
+// not the whole tab tree. Renders as a right-aligned flex sibling of the page
+// title (see the App layout below) — no top margin since it's on the same row.
 function ScopeSubtitle() {
   const scope = useHive((s) => s.scope);
   const scopeTitle = useHive((s) => s.scopeTitle);
@@ -33,13 +34,25 @@ function ScopeSubtitle() {
     const sess = scopeTitle.session;
     text = sess ? `Session ${sessionSlug(sess.session_id)} · ${sess.live ? `${sess.running} agents running` : "idle"} · updated ${relTime(sess.last_ts, now || Date.now())}` : "session";
   }
-  return <div className="text-ink-dim text-xs mt-1">{text}</div>;
+  return <div className="text-ink-dim text-xs shrink-0">{text}</div>;
 }
+
+// Page-title labels per active tab. Kept as a local map (rather than reading
+// from Sidebar's `nav`) so the heading text can diverge from the nav label if
+// a future tab needs a longer page title without renaming the sidebar entry.
+const TAB_TITLES: Record<string, string> = {
+  overview: "Overview",
+  sessions: "Sessions",
+  agents: "Agents",
+  activity: "Activity",
+  plans: "Plans",
+  cost: "Cost",
+  settings: "Settings",
+};
 
 export default function App() {
   const activeTab = useHive((s) => s.activeTab);
   const scope = useHive((s) => s.scope);
-  const scopeTitle = useHive((s) => s.scopeTitle);
 
   useEffect(() => { connect(); }, []);
 
@@ -54,25 +67,23 @@ export default function App() {
       <Sidebar />
       <main className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
         <div className="flex-1 min-h-0 overflow-auto pt-3.5 px-0.5 pb-10">
-          <div className="flex items-end justify-between gap-3 mb-4">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2.5">
-                <h1 className="m-0 text-[21px] font-bold tracking-[-.015em]">{scopeTitle.title}</h1>
-                {scope.level === "session" && (
-                  <button
-                    type="button"
-                    className="inline-flex items-center gap-1.5 bg-brand-bg text-brand rounded-full pl-2.5 pr-2 py-1 text-[11px] font-semibold cursor-pointer border-0 hover:brightness-110"
-                    title="Back to project — clear session filter"
-                    onClick={() => selectProject((scope as { project: string }).project)}
-                  >
-                    <span className="w-[6px] h-[6px] rounded-full bg-brand" />
-                    session {sessionSlug((scope as { sessionId: string }).sessionId)}
-                    <span className="text-brand/70 text-[13px] leading-none ml-0.5">×</span>
-                  </button>
-                )}
-              </div>
-              <ScopeSubtitle />
+          <div className="flex items-center justify-between gap-4 mb-4">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <h1 className="m-0 text-[21px] font-bold tracking-[-.015em] truncate">{TAB_TITLES[activeTab] ?? "Overview"}</h1>
+              {scope.level === "session" && (
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1.5 bg-brand-bg text-brand rounded-full pl-2.5 pr-2 py-1 text-[11px] font-semibold cursor-pointer border-0 hover:brightness-110"
+                  title="Back to project — clear session filter"
+                  onClick={() => selectProject((scope as { project: string }).project)}
+                >
+                  <span className="w-[6px] h-[6px] rounded-full bg-brand" />
+                  session {sessionSlug((scope as { sessionId: string }).sessionId)}
+                  <span className="text-brand/70 text-[13px] leading-none ml-0.5">×</span>
+                </button>
+              )}
             </div>
+            <ScopeSubtitle />
           </div>
           {activeTab === "sessions" ? <Sessions search="" />
             : activeTab === "agents" ? <Agents search="" />
