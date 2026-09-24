@@ -77,6 +77,11 @@ describe("Sidebar", () => {
     expect(card!.className).toContain("bg-well");
     expect(card!.className).toContain("border-line");
     expect(card!.className).toContain("rounded-xl");
+
+    // The theme toggle and the connection card both use `mb-3` (12px) so the
+    // gap between Connected ↔ Theme and Theme ↔ Clock are equal. Without
+    // `mb-3` on the theme toggle, the two cards were virtually touching.
+    expect(dark.parentElement!.className).toContain("mb-3");
   });
 
   it("hides the provider pressure counter when there are no recent 429/529 events", () => {
