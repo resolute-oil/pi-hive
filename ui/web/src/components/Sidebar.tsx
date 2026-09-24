@@ -1,5 +1,7 @@
+import { useMemo } from "react";
 import { useHive } from "../store";
 import { selectFleet, selectProject, setActiveTab, setTheme } from "../store/raw";
+import { hhmmss } from "../lib/agents";
 
 // Hand-drawn inline nav icons (16×16, stroke currentColor 1.5), per the design
 // spec's "small hand-drawn inline SVGs" — a 2×2 grid, two bars, a pulse line,
@@ -34,6 +36,52 @@ function OrbitMark() {
       <circle cx="19" cy="15.5" r="1.5" fill="var(--brand)" />
       <circle cx="5" cy="15.5" r="1.5" fill="var(--brand)" />
     </svg>
+  );
+}
+
+// Live wall clock. Reads the store's 1s `now` tick — no second timer.
+function Clock() {
+  const now = useHive((s) => s.now);
+  return (
+    <span className="font-mono text-[13px] font-medium tracking-[.04em] text-ink-dim tabular-nums">
+      {hhmmss(now || Date.now())}
+    </span>
+  );
+}
+
+// Recent provider back-pressure (Phase 4.11): `provider_response` is emitted
+// only for non-2xx responses (429/529 rate-limit/overload). Surface a count of
+// those seen in the last 5 minutes so a stalled fleet has a visible cause.
+// Silent when there's no recent pressure.
+//
+// Reads `scopedEvents` (already filtered to the selected scope) so the
+// indicator reflects pressure on what the user is actually looking at, not
+// the whole fleet. The window filter is memoized so it doesn't re-scan on
+// every unrelated render (the 1s `now` tick advances the window boundary,
+// so it recomputes ~once a second by design, not per keystroke).
+const PRESSURE_WINDOW_MS = 5 * 60_000;
+function ProviderPressure() {
+  const events = useHive((s) => s.scopedEvents);
+  const now = useHive((s) => s.now);
+  const recent = useMemo(
+    () => events.filter(
+      (e) => e.type === "provider_response" && (now || Date.now()) - new Date(e.ts).getTime() < PRESSURE_WINDOW_MS,
+    ),
+    [events, now],
+  );
+  if (!recent.length) return null;
+  // scopedEvents is newest-first, so recent[0] is the latest pressure response.
+  const last = recent[0];
+  const status = last?.payload?.status;
+  return (
+    <span
+      role="status"
+      className="mt-2 flex items-center gap-[6px] text-[11px] font-semibold tracking-[.05em] text-crit"
+      title={`${recent.length} provider rate-limit/overload response${recent.length === 1 ? "" : "s"} in the last 5 min (latest ${status ?? "?"})`}
+    >
+      <span className="w-[6px] h-[6px] rounded-full bg-crit animate-softblink-fast" aria-hidden="true" />
+      {recent.length}× {status ?? "429/529"}
+    </span>
   );
 }
 
@@ -143,6 +191,7 @@ export default function Sidebar() {
           <span className="capitalize">{live ? "Connected" : connection}</span>
         </div>
         <div className="font-mono text-[11px] text-ink-dim mt-1.5 pl-[17px]">{host}</div>
+        <ProviderPressure />
       </div>
 
       {/* Theme toggle (2-segment) */}
@@ -163,6 +212,11 @@ export default function Sidebar() {
             </button>
           );
         })}
+      </div>
+
+      {/* Wall clock — reads the store's 1s `now` tick, no second timer. */}
+      <div className="mt-3 flex justify-center">
+        <Clock />
       </div>
     </aside>
   );
