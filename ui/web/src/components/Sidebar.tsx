@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { useHive } from "../store";
 import { selectFleet, selectProject, setActiveTab, setTheme } from "../store/raw";
 import { hhmmss } from "../lib/agents";
+import { bundleEvents, mergeThinking } from "../lib/activity";
 
 // Hand-drawn inline nav icons (16×16, stroke currentColor 1.5), per the design
 // spec's "small hand-drawn inline SVGs" — a 2×2 grid, two bars, a pulse line,
@@ -93,7 +94,26 @@ export default function Sidebar() {
   const projectGroups = useHive((s) => s.projectGroups);
   const scopedStats = useHive((s) => s.scopedStats);
   const scopedEvents = useHive((s) => s.scopedEvents);
+  const scopedSessions = useHive((s) => s.scopedSessions);
+  const thinkingBySession = useHive((s) => s.thinkingBySession);
   const scopedAgentCount = useHive((s) => s.scopedAgentCount);
+
+  // Count badge for the Activity nav must match what the Activity tab actually
+  // shows. The tab computes items = mergeThinking(bundleEvents(scopedEvents),
+  // thinking) so tool start/end pairs collapse into a single feed item and
+  // transcript thinking entries are merged in. Showing the raw
+  // scopedEvents.length here would overcount by exactly the number of tool
+  // pairs collapsed by bundleEvents minus any thinking entries added — which is
+  // exactly the discrepancy the user reported (sidebar "1000", list "692").
+  const thinking = useMemo(() => {
+    const out: Array<{ agent: string; ts: string; text: string; tokens?: number }> = [];
+    for (const s of scopedSessions) for (const t of thinkingBySession.get(s.session_id) || []) out.push(t);
+    return out;
+  }, [scopedSessions, thinkingBySession]);
+  const activityCount = useMemo(
+    () => mergeThinking(bundleEvents(scopedEvents), thinking).length,
+    [scopedEvents, thinking],
+  );
 
   const scopeValue = scope.level === "fleet" ? "__fleet" : scope.project;
   const live = connection === "live";
@@ -106,7 +126,7 @@ export default function Sidebar() {
     { id: "overview", label: "Overview", count: "" },
     { id: "sessions", label: "Sessions", count: scopedStats.sessions ? String(scopedStats.sessions) : "" },
     { id: "agents", label: "Agents", count: scopedAgentCount ? String(scopedAgentCount) : "" },
-    { id: "activity", label: "Activity", count: scopedEvents.length ? String(scopedEvents.length) : "" },
+    { id: "activity", label: "Activity", count: activityCount ? String(activityCount) : "" },
     { id: "plans", label: "Plans", count: "" },
     { id: "cost", label: "Cost", count: "" },
     ...(projectSelected ? [{ id: "settings", label: "Settings", count: "" }] : []),
