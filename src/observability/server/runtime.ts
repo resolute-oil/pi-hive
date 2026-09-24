@@ -5,7 +5,7 @@ import { agentRuns, parseAgentLog } from "../agent-log";
 import { projectName } from "../../shared/project";
 import { tryResolveProjectIdentity } from "../../shared/project-identity";
 import { loadConfig } from "../../core/config";
-import { agentSummary, teamTopology } from "../../core/topology";
+import { teamTopology } from "../../core/topology";
 import { withCrossProcessFileLock } from "../../core/file-lock";
 import { readJsonlPage } from "../../core/fs";
 import type { HiveStateSnapshot, HiveTelemetryEvent, TelemetryRegistryRow, TelemetrySessionSummary } from "../../shared/telemetry";
