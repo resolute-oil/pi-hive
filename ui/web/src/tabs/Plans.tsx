@@ -187,6 +187,12 @@ export default function Plans(props: { search: string }) {
   const [fallbackCwd, setFallbackCwd] = useState<string | undefined>(undefined);
   useEffect(() => { void bootCwd().then((c) => setFallbackCwd(c || undefined)); }, []);
   const cwd = scopeCwd || fallbackCwd;
+  // The plan-review iframe is a separate document and cannot read the
+  // dashboard's `:root[data-theme]`. We pass the current theme to the
+  // server (so the initial iframe URL has the right theme) AND push
+  // `pi-hive-theme` postMessages on every toggle (so a running iframe
+  // transitions live).
+  const theme = useHive((s) => s.theme);
 
   const [plans, setPlans] = useState<PlanSummary[]>([]);
   const [loading, setLoading] = useState(false);
@@ -277,13 +283,20 @@ export default function Plans(props: { search: string }) {
     setReviewSessionFailed(false);
     if (!rid || !cwd || !selectedArtifact || reviewFinal) { setReviewSessionPending(false); return; }
     setReviewSessionPending(true);
-    void createReviewSession(rid, cwd).then((session) => {
+    void createReviewSession(rid, cwd, theme).then((session) => {
       if (cancelled) return;
       setReviewSessionPending(false);
       if (session) setReviewSession({ rid, url: session.reviewUrl });
       else setReviewSessionFailed(true);
     });
     return () => { cancelled = true; };
+    // `theme` is intentionally omitted from deps. The session URL is baked
+    // once at mint time; live theme changes are delivered via the
+    // `pi-hive-theme` postMessage effect below, not by re-minting the
+    // session (which would force the iframe to reload the artifact).
+    // `selectedArtifact?.id` (vs the whole object) avoids re-running when
+    // unrelated fields on the selected artifact change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cwd, reviewFinal, rid, selectedArtifact?.id, reviewRetry]);
 
   // Mount the review app once. Subsequent capabilities are delivered to the
@@ -292,8 +305,17 @@ export default function Plans(props: { search: string }) {
   useEffect(() => {
     if (!reviewSession) return;
     if (!reviewFrameSrc) { setReviewFrameSrc(reviewSession.url); return; }
-    if (reviewFrameReady) reviewFrameRef.current?.contentWindow?.postMessage({ type: "pi-hive-review-context", url: reviewSession.url }, "*");
-  }, [reviewFrameReady, reviewFrameSrc, reviewSession]);
+    if (reviewFrameReady) reviewFrameRef.current?.contentWindow?.postMessage({ type: "pi-hive-review-context", url: reviewSession.url, theme }, "*");
+  }, [reviewFrameReady, reviewFrameSrc, reviewSession, theme]);
+
+  // Push live theme changes to a mounted review iframe. The dashboard's
+  // `<html data-theme>` attribute is its own — the iframe is a separate
+  // document and has to mirror the change explicitly. Without this the
+  // review surface stays dark when the user toggles to light mode.
+  useEffect(() => {
+    if (!reviewFrameReady) return;
+    reviewFrameRef.current?.contentWindow?.postMessage({ type: "pi-hive-theme", theme }, "*");
+  }, [theme, reviewFrameReady]);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
@@ -302,7 +324,7 @@ export default function Plans(props: { search: string }) {
       if (event.origin !== "null" || event.source !== reviewFrameRef.current?.contentWindow) return;
       if (event.data?.type === "pi-hive-review-ready") {
         setReviewFrameReady(true);
-        if (reviewSession) reviewFrameRef.current?.contentWindow?.postMessage({ type: "pi-hive-review-context", url: reviewSession.url }, "*");
+        if (reviewSession) reviewFrameRef.current?.contentWindow?.postMessage({ type: "pi-hive-review-context", url: reviewSession.url, theme }, "*");
         return;
       }
       if (event.data?.type !== "pi-hive-review-result" || !selected) return;
@@ -311,7 +333,7 @@ export default function Plans(props: { search: string }) {
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [cwd, reviewSession, selected]);
+  }, [cwd, reviewSession, selected, theme]);
 
   useEffect(() => {
     let cancelled = false;

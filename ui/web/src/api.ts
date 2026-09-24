@@ -415,12 +415,16 @@ export async function fetchPlanFile(changeId: string, path: string, cwd?: string
 }
 
 export interface ReviewSessionResult { reviewUrl: string; expiresAt: string; }
-export async function createReviewSession(rid: string, cwd?: string): Promise<ReviewSessionResult | null> {
+export async function createReviewSession(
+  rid: string,
+  cwd?: string,
+  theme: "dark" | "light" = "dark",
+): Promise<ReviewSessionResult | null> {
   try {
     const res = await writeFetch("/review-sessions", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ rid, cwd }),
+      body: JSON.stringify({ rid, cwd, theme }),
     });
     if (!res.ok) return null;
     const body = await res.json() as Partial<ReviewSessionResult>;

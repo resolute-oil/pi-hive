@@ -9,7 +9,19 @@
   },
   "derivedSources": {
     "review.html": "a821eb48a2e0c563f0f57bde80b594e01c5067e3ee44cb5be003ee985a10f319",
-    "review.css": "e9029f280c3a8b1700e35a506029ea1b1d841a1587c666bc6756108ec47174e1",
-    "review.js": "08783508627171491457b1efc9d8f84a31eeb1bfedc35de23bf999482356235c"
-  }
+    "review.css": "b3b06d02b421adf9692fb46cf8f08d843904c066f00e2c23b10a9c83da68c5f8",
+    "review.js": "d6ab5bd678e516a7a073814fa008b77d202e34914ce0390b4318ae4efb770cb1"
+  },
+  "patches": [
+    {
+      "purpose": "Sync the iframe with the dashboard's dark/light theme toggle.",
+      "rationale": "Upstream Plannotator is dark-only. The dashboard's theme toggle was leaving the review surface dark after switching to light mode, because the iframe is a separate document and does not inherit the dashboard's :root[data-theme] attribute.",
+      "files": {
+        "review.css": "Added a :root[data-theme=\"light\"] block overriding the CSS custom properties (--bg, --panel, --text, etc.) plus overrides for hardcoded selectors (.source-line::before, .source-line:hover, .source-line.selected, button, .error, .approve).",
+        "review.js": "Added an applyTheme() helper that mirrors the dashboard's data-theme onto the iframe's <html>. Reads theme from the URL query param on initial load and listens for pi-hive-theme postMessages for runtime toggles. The existing pi-hive-review-context handler was extended to also forward theme from event.data.theme. The duplicate message listener was removed (the original handler is now subsumed)."
+      },
+      "wire": "Dashboard passes ?theme=<dark|light> on the initial /pl-review/ URL via the server's POST /review-sessions body, and pushes {type: \"pi-hive-theme\", theme} postMessages to a mounted iframe on every theme toggle.",
+      "reapply": "When bumping @plannotator/pi-extension to a newer version, reapply the theme patch against the new source and refresh the SHA256s in derivedSources. Review the diff for merge conflicts; the patch is small and isolated."
+    }
+  ]
 }
