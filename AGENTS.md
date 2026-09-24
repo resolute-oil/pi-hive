@@ -58,6 +58,14 @@ The extension must stay safe to install globally: it should do nothing unless th
   your place* while doing it. Failing it silently pollutes `main`'s
   working tree.
 
+## Browser testing
+
+- A remote ChromeDriver is available at `http://localhost:9515` (W3C WebDriver). The Pi sandbox cannot launch Chrome locally, so any layout, CSS, or DOM-behavior check must drive this driver. `GET /status` returns `{ready: true}` once it has a browser booted.
+- Sessions are created by `POST /session` with `capabilities.alwaysMatch.browserName: "chrome"` and `goog:chromeOptions.args: ["--headless=new", "--disable-gpu", "--no-sandbox", "--window-size=W,H"]`. The response wraps the new id under `value.sessionId` (W3C shape, not the legacy top-level `sessionId`).
+- Script results from `POST /session/{id}/execute/sync` are wrapped: numbers/booleans come back as `{value: N}`, but objects are returned as the plain object. `JSON.stringify` the script return value before parsing so the protocol's coercion does not produce `[object Object]` on error paths.
+- The dashboard serves content-addressed assets (`/pl-review/assets/review.{html,css,js}`) with `cache-control: public, max-age=31536000, immutable`, so a CSS or JS fix requires a dashboard-server restart, not just a browser reload, to clear the in-memory `cachedReviewAssets`. Hit `POST /shutdown` with the daemon bearer to stop a test server, then start a fresh one on a free port (e.g. `HIVE_TELEMETRY_PORT=43195`) so the user's 43191 instance keeps running.
+- `POST /review-sessions` requires the dashboard bearer token from `GET /bootstrap.json` plus matching `host`, `origin`, and `referer` headers; without all four the mint is rejected before any HTML is served. The minted URL embeds the nonce — if the proposal file changes, the nonce is invalidated (409 "review artifact changed"), so re-mint before re-running a browser check.
+
 ## Useful commands
 
 ```sh
