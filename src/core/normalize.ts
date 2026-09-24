@@ -36,15 +36,28 @@ export function normalizeCommit(value: any): string | undefined {
   return text || undefined;
 }
 
-export function normalizeTools(tools: string | undefined, fallback: string): string {
-  return (tools || fallback || "read, grep, find, ls")
-    .split(",")
+export function normalizeTools(
+  tools: string | string[] | undefined,
+  fallback: string | string[],
+): string {
+  // Accept both a comma-separated string and a YAML-list array. YAML parses
+  // `tools: [read, grep]` into an array even though `AgentConfig.tools` is
+  // typed as `string` — the type is erased at runtime, so callers can hand us
+  // an array here. `normalizeStringList` already handles both shapes.
+  //
+  // Empty strings and empty arrays both mean "absent" — preserve the
+  // original `||` fall-through to the built-in default by treating them
+  // as undefined via `effectiveList`.
+  return (effectiveList(tools) ?? effectiveList(fallback) ?? ["read", "grep", "find", "ls"])
     .map((tool) => tool.trim())
     .filter(Boolean)
     .join(",");
 }
 
-export function normalizeWorkerTools(tools: string | undefined, fallback: string): string {
+export function normalizeWorkerTools(
+  tools: string | string[] | undefined,
+  fallback: string | string[],
+): string {
   // Nested delegation is intentionally enabled: workers may receive extension
   // tools such as delegate_agent when their per-agent config grants them. Filter
   // retired Hive tools so older configs don't pass unknown names to child pi.
@@ -52,6 +65,16 @@ export function normalizeWorkerTools(tools: string | undefined, fallback: string
     .split(",")
     .filter((tool) => tool !== "load_skill")
     .join(",");
+}
+
+// Treat absent and empty inputs as "use the next fallback". Strings use
+// `=== ""`; arrays use `length === 0`. Returning `undefined` lets `??` chain
+// to the next non-empty input — preserving the pre-fix `tools || fallback
+// || default` semantics for both string and array inputs.
+function effectiveList(value: string | string[] | undefined): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  const list = normalizeStringList(value);
+  return list.length > 0 ? list : undefined;
 }
 
 export function normalizeStringList(value: any): string[] {
