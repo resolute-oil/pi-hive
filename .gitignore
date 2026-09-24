@@ -12,6 +12,7 @@ coverage/
 /ui/web/playwright-report/
 .env
 .env.*
+tmp/
 
 # Runtime hive state / local telemetry
 .pi/
