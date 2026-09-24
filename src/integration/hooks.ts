@@ -10,7 +10,7 @@ import { buildOrchestratorPrompt } from "../agents/prompts";
 import { applyMode, captureNormalTools, installHeader, updateWidget } from "../ui/tui/widget";
 import { clearHiveActivityWidget } from "../ui/tui/activity";
 import { resolveHiveSddStatus } from "../engine/sdd";
-import { ensureDashboard } from "../engine/dashboard";
+import { ensureDashboard, killOwnedDashboardOnQuit } from "../engine/dashboard";
 import { resolveRuntime } from "../engine/agent-lookup";
 import { emitHiveEvent, emitModelCatalog, writeHiveStateSnapshot } from "../engine/observability";
 import { resolveConfiguredPath } from "../core/safe-path";
@@ -493,7 +493,7 @@ ${catalog}`,
     await handleAgentSettledForHiveRestore(state);
   });
 
-  pi.on("session_shutdown", async (_event, ctx: ExtensionContext) => {
+  pi.on("session_shutdown", async (event, ctx: ExtensionContext) => {
     state.shuttingDown = true;
     state.lifecycleGeneration = (state.lifecycleGeneration || 0) + 1;
     // Drop any captured ExtensionCommandContext — without this, a stale ctx
@@ -530,10 +530,21 @@ ${catalog}`,
     state.backgroundDistillerSessions?.clear();
     state.backgroundTasks?.clear();
     state.distillQueues?.clear();
-    // The telemetry dashboard is a SHARED global daemon — other sessions may be
-    // using it — so we do NOT kill it here. Just drop this session's reference.
-    // Explicit teardown is /hive:observe-stop; the server also self-terminates
-    // after its bounded idle timeout when no browser event stream remains.
+    // The telemetry dashboard is owned by the session that spawned it.
+    // On a `quit` (user exiting pi), kill it — this matches the
+    // `/hive:observe closes when pi closes` expectation. For other
+    // shutdown reasons (`reload`, `new`, `resume`, `fork`) the daemon
+    // is intentionally shared so the next session can adopt it.
+    //
+    // We only kill if THIS session's `ensureDashboard` call spawned the
+    // daemon (`adopted === false`). When this session adopted an
+    // existing daemon owned by another session, we leave it running.
+    //
+    // Multi-session note: a user who opens /hive:observe from two pi
+    // windows loses the dashboard when the first window quits — that
+    // window IS the spawner from its perspective. Accepted tradeoff;
+    // the surviving session can re-run /hive:observe if needed.
+    await killOwnedDashboardOnQuit(state, event.reason);
     state.obsServer = undefined;
     if (state.dashboardActionTimer) clearInterval(state.dashboardActionTimer);
     state.dashboardActionTimer = undefined;
