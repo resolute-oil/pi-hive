@@ -27,10 +27,10 @@
     "review.js": {
       "path": "review.js.gz",
       "contentType": "text/javascript; charset=utf-8",
-      "bytes": 7319,
-      "compressedBytes": 2260,
-      "sourceSha256": "51f2dc28e6c650e55f4dee4928bb707207f40779fb182532bca87f1ac7f0041a",
-      "sha256": "2f55f592c060fbe141cce125520187ee8f1b8722e18de4c4bc2fcab98032901b"
+      "bytes": 7619,
+      "compressedBytes": 2414,
+      "sourceSha256": "08783508627171491457b1efc9d8f84a31eeb1bfedc35de23bf999482356235c",
+      "sha256": "3a4e7a40ee7eb9645927e7601e7a6329423d3cf763d2cfaeefb6a410050da25d"
     }
   }
 }

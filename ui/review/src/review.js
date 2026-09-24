@@ -168,7 +168,11 @@
   window.addEventListener("message", (event) => {
     if (event.source !== parent || event.origin !== expectedOrigin || event.data?.type !== "pi-hive-review-context") return;
     let next;
-    try { next = new URL(String(event.data.url)); } catch { return; }
+    // The parent sends the server-issued reviewUrl, which is a path-only string
+    // (`/pl-review/?rid=...&cwd=...&nonce=...`). Resolving it against
+    // location.href keeps the existing host check meaningful and lets the
+    // capability-update flow work without absolute URLs.
+    try { next = new URL(String(event.data.url), location.href); } catch { return; }
     if (next.origin !== expectedOrigin || next.pathname !== "/pl-review/" || !next.searchParams.get("rid") || !next.searchParams.get("cwd") || !next.searchParams.get("nonce")) return;
     void load(next);
   });
