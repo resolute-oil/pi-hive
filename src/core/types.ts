@@ -5,7 +5,6 @@ import type { PlanStage } from "../shared/openspec-artifacts";
 export type { PlanStage } from "../shared/openspec-artifacts";
 
 export type AgentStatus = "idle" | "running" | "done" | "error" | "queued";
-export type JsonRecord = Record<string, any>;
 // The three session modes:
 //   normal — plain Pi chat: no hive tools, no domain/type enforcement.
 //   plan   — hive active but scoped to the PLANNING team (planners + the leads

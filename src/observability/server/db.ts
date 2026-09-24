@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { DB_PATH } from "./config";
-import type { HiveStateSnapshot, HiveTelemetryEvent, JsonRecord } from "../../shared/telemetry";
+import type { HiveStateSnapshot, HiveTelemetryEvent, HiveTelemetryEventType, JsonRecord } from "../../shared/telemetry";
+import { isJsonRecord } from "../../shared/telemetry";
 import { tryResolveProjectIdentity } from "../../shared/project-identity";
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true, mode: 0o700 });
@@ -550,7 +551,7 @@ export function rowToEvent(row: EventDbRow): HiveTelemetryEvent {
   let payload: JsonRecord = {};
   try {
     const parsed: unknown = JSON.parse(row.payload_json || "{}");
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) payload = parsed as JsonRecord;
+    payload = isJsonRecord(parsed) ? parsed : {};
   } catch { /* ignore */ }
   return {
     event_id: row.event_id,
@@ -558,7 +559,13 @@ export function rowToEvent(row: EventDbRow): HiveTelemetryEvent {
     project_id: row.project_id || undefined,
     seq: row.seq,
     ts: row.ts,
-    type: row.type,
+    // SQLite stores `type` as TEXT (no enum constraint), so the read shape is
+    // `string` even though every row in practice is a known event type. The
+    // runtime filter in runtime.ts:500 catches the legacy `delegation_progress`
+    // shape; everything else should be in `HiveTelemetryEventType`. The cast
+    // is the documented boundary — see WT-1b for the generic tightenings
+    // planned at parseJsonMaybe and the topology-row mappers.
+    type: row.type as HiveTelemetryEventType,
     actor: row.actor,
     pid: row.pid,
     cwd: row.cwd || undefined,
@@ -1212,6 +1219,19 @@ export interface TopologyNodeRow {
   commitAllowed?: boolean; routingTags?: string[]; consultWhen?: string; responsibilities?: string;
 }
 
+// Raw snake_case row shape read from SQLite. Mirrors TOPOLOGY_NODE_COLS. The
+// mapper `topologyNodeRow` (below) converts this into the camelCase
+// `TopologyNodeRow` for callers; everything inside that mapper is the only
+// place snake_case touches the type system, so the `any` anchor that used to
+// sit here is gone.
+interface TopologyNodeDbRow {
+  topology_hash: string; team: string; node_id: number; parent_id: number | null;
+  name: string; agent_type?: string; model?: string; thinking?: string;
+  thinking_levels?: string; color?: string; group_name?: string; tools_json?: string;
+  domain_json?: string; stages_json?: string; commit_allowed?: number;
+  routing_tags_json?: string; consult_when?: string; responsibilities_json?: string;
+}
+
 const countTopologyNodesStmt = db.query(`SELECT COUNT(*) AS n FROM topology_nodes WHERE topology_hash = $hash`);
 
 // Insert a version (idempotent by hash) and explode its nodes. The whole thing
@@ -1248,20 +1268,36 @@ export function fillNodeThinkingLevels(hash: string, name: string, levels: strin
   updateNodeThinkingLevelsStmt.run({ $topology_hash: hash, $name: name, $thinking_levels: JSON.stringify(levels) });
 }
 
-function parseJsonMaybe(value: unknown): any {
+// SQLite stores JSON columns as TEXT (or JSONB via `json(...)` extraction,
+// which still returns TEXT to the caller). `parseJsonMaybe<T>` decodes one
+// such cell with an explicit guard so the result is typeable at the call
+// site. `parseStringArray` is the common-shape helper — most JSON columns on
+// topology_nodes and model_versions are string arrays. `parseString` covers
+// the responsibilities column, which is a JSON-stringified single string.
+function parseJsonMaybe<T>(value: unknown, guard: (x: unknown) => x is T): T | undefined {
   if (typeof value !== "string" || !value) return undefined;
-  try { return JSON.parse(value); } catch { return undefined; }
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return guard(parsed) ? parsed : undefined;
+  } catch { return undefined; }
+}
+function parseStringArray(value: unknown): string[] | undefined {
+  return parseJsonMaybe(value, (x): x is string[] =>
+    Array.isArray(x) && x.every((s) => typeof s === "string"));
+}
+function parseString(value: unknown): string | undefined {
+  return parseJsonMaybe(value, (x): x is string => typeof x === "string");
 }
 
-function topologyNodeRow(r: any): TopologyNodeRow {
+function topologyNodeRow(r: TopologyNodeDbRow): TopologyNodeRow {
   return {
     topologyHash: r.topology_hash, team: r.team, nodeId: r.node_id, parentId: r.parent_id,
     name: r.name, agentType: r.agent_type || undefined, model: r.model || undefined,
-    thinking: r.thinking || undefined, thinkingLevels: parseJsonMaybe(r.thinking_levels),
+    thinking: r.thinking || undefined, thinkingLevels: parseStringArray(r.thinking_levels),
     color: r.color || undefined, group: r.group_name || undefined, tools: r.tools_json || undefined,
-    domain: parseJsonMaybe(r.domain_json), stages: parseJsonMaybe(r.stages_json),
-    commitAllowed: !!r.commit_allowed, routingTags: parseJsonMaybe(r.routing_tags_json),
-    consultWhen: r.consult_when || undefined, responsibilities: parseJsonMaybe(r.responsibilities_json),
+    domain: parseStringArray(r.domain_json), stages: parseStringArray(r.stages_json),
+    commitAllowed: !!r.commit_allowed, routingTags: parseStringArray(r.routing_tags_json),
+    consultWhen: r.consult_when || undefined, responsibilities: parseString(r.responsibilities_json),
   };
 }
 
@@ -1274,7 +1310,7 @@ const TOPOLOGY_NODE_COLS = `topology_hash, team, node_id, parent_id, name, agent
   json(routing_tags_json) AS routing_tags_json, consult_when, json(responsibilities_json) AS responsibilities_json`;
 
 export function topologyNodes(hash: string): TopologyNodeRow[] {
-  const rows = db.query(`SELECT ${TOPOLOGY_NODE_COLS} FROM topology_nodes WHERE topology_hash = $hash ORDER BY team, node_id`).all({ $hash: hash }) as any[];
+  const rows = db.query(`SELECT ${TOPOLOGY_NODE_COLS} FROM topology_nodes WHERE topology_hash = $hash ORDER BY team, node_id`).all({ $hash: hash }) as TopologyNodeDbRow[];
   return rows.map(topologyNodeRow);
 }
 
@@ -1375,12 +1411,28 @@ export interface ModelVersionRow {
   lastSeenAt: string;
 }
 
-function modelRow(r: any): ModelVersionRow {
+// Raw snake_case row shape read from SQLite. Mirrors the SELECT below. The
+// mapper `modelRow` (below) converts this into the camelCase `ModelVersionRow`
+// for callers.
+interface ModelVersionDbRow {
+  model_hash: string; provider: string; model_id: string;
+  name?: string; api?: string; reasoning?: number;
+  thinking_levels?: string;
+  context_window?: number; max_tokens?: number;
+  // Cost columns are nullable REALs; SQLite returns `null` (not `undefined`)
+  // for unset cells, so the mapper feeds them into the `number | null`
+  // `costRates` shape unchanged.
+  cost_input?: number | null; cost_output?: number | null;
+  cost_cache_read?: number | null; cost_cache_write?: number | null;
+  first_seen_at: string; last_seen_at: string;
+}
+
+function modelRow(r: ModelVersionDbRow): ModelVersionRow {
   return {
     modelHash: r.model_hash, provider: r.provider, modelId: r.model_id, name: r.name || undefined, api: r.api || undefined,
-    reasoning: !!r.reasoning, thinkingLevels: parseJsonMaybe(r.thinking_levels) || [],
+    reasoning: !!r.reasoning, thinkingLevels: parseStringArray(r.thinking_levels) ?? [],
     contextWindow: r.context_window || undefined, maxTokens: r.max_tokens || undefined,
-    costRates: { input: r.cost_input, output: r.cost_output, cacheRead: r.cost_cache_read, cacheWrite: r.cost_cache_write },
+    costRates: { input: r.cost_input ?? null, output: r.cost_output ?? null, cacheRead: r.cost_cache_read ?? null, cacheWrite: r.cost_cache_write ?? null },
     firstSeenAt: r.first_seen_at, lastSeenAt: r.last_seen_at,
   };
 }
@@ -1389,7 +1441,7 @@ function modelRow(r: any): ModelVersionRow {
 // the UI's capability lookup (thinking dial). Pass allVersions=true for history.
 export function listModels(allVersions = false): ModelVersionRow[] {
   if (allVersions) {
-    const rows = db.query(`SELECT ${MODEL_VERSION_COLS} FROM model_versions mv ORDER BY provider, model_id, last_seen_at DESC`).all() as any[];
+    const rows = db.query(`SELECT ${MODEL_VERSION_COLS} FROM model_versions mv ORDER BY provider, model_id, last_seen_at DESC`).all() as ModelVersionDbRow[];
     return rows.map(modelRow);
   }
   const rows = db.query(`
@@ -1397,7 +1449,7 @@ export function listModels(allVersions = false): ModelVersionRow[] {
     JOIN (SELECT provider, model_id, MAX(last_seen_at) AS mx FROM model_versions GROUP BY provider, model_id) latest
       ON mv.provider = latest.provider AND mv.model_id = latest.model_id AND mv.last_seen_at = latest.mx
     ORDER BY mv.provider, mv.model_id
-  `).all() as any[];
+  `).all() as ModelVersionDbRow[];
   return rows.map(modelRow);
 }
 

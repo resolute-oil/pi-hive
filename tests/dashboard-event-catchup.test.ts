@@ -12,7 +12,7 @@ function event(cursor: number): HiveEvent {
     ts: new Date(cursor).toISOString(),
     type: "message",
     payload: {},
-  } as HiveEvent;
+  } as unknown as HiveEvent;
 }
 
 function response(body: unknown): Response {

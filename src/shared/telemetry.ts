@@ -1,5 +1,31 @@
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+/**
+ * The wire shape for arbitrary JSON payloads on telemetry events. `unknown`
+ * (not `any`) so the SDK enforces narrow access — consumers must either index
+ * a known field or narrow via a type guard.
+ *
+ * `isJsonRecord` is the runtime guard counterpart: it narrows an `unknown`
+ * value (e.g. the result of `JSON.parse`) to this type. Use it at every
+ * boundary that deserializes JSON — SQLite rows, SSE frames, the front-end
+ * store — to make the unsafe cast explicit.
+ */
 export type JsonRecord = Record<string, unknown>;
+export const isJsonRecord = (v: unknown): v is JsonRecord =>
+  !!v && typeof v === "object" && !Array.isArray(v);
+
+/**
+ * Per-type payload shape for the telemetry wire contract. Currently
+ * homogeneous — every event type carries a `JsonRecord` payload — but the
+ * mapped-type shape lets us narrow per-type later without breaking callers
+ * that index it by `event.type`. Add a per-type payload interface here as
+ * event types gain strict shapes; keep it exhaustive (every member of
+ * `HiveTelemetryEventType` listed) so a new event type fails typecheck
+ * until its payload is defined.
+ */
+export type EventPayloadByType = {
+  [K in HiveTelemetryEventType]: JsonRecord;
+};
 
 export type HiveTelemetryEventType =
   | "session_start"
@@ -42,7 +68,12 @@ export type HiveTelemetryEventType =
   | "plan_approval"
   | "plan_comment"
   // Emitted on delegation failure with { agent, message, stopReason }.
-  | "error";
+  | "error"
+  // Legacy progress event from older telemetry logs. Filtered out at the
+  // server-runtime ingest boundary (and on the dashboard store) so event
+  // counts/lists stay meaningful; kept in the union so the filter check is
+  // typeable. Production emit sites should never write this type.
+  | "delegation_progress";
 
 export type TelemetryAgentStatus = "idle" | "running" | "waiting" | "done" | "error";
 export type TelemetryAgentRole = "orchestrator" | "lead" | "member";
@@ -50,7 +81,12 @@ export type TelemetryAgentRole = "orchestrator" | "lead" | "member";
 export interface HiveTelemetryEvent<P = JsonRecord> {
   event_id: string;
   ts: string;
-  type: HiveTelemetryEventType | string;
+  // Tightened from `HiveTelemetryEventType | string`. The `| string` widening
+  // defeated the discriminated union: `switch (event.type)` collapsed to
+  // `string`, losing exhaustiveness checking. Adding a new event type to the
+  // SDK without updating this union now causes a compile error at the emit
+  // site — which is the desired safety.
+  type: HiveTelemetryEventType;
   session_id: string;
   project_id?: string;
   project_root?: string;
