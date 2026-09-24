@@ -43,7 +43,7 @@ function OrbitMark() {
 function Clock() {
   const now = useHive((s) => s.now);
   return (
-    <span className="font-mono text-[13px] font-medium tracking-[.04em] text-ink-dim tabular-nums">
+    <span className="font-mono text-[18px] font-semibold tracking-[.04em] text-ink tabular-nums">
       {hhmmss(now || Date.now())}
     </span>
   );
@@ -214,8 +214,8 @@ export default function Sidebar() {
         })}
       </div>
 
-      {/* Wall clock — reads the store's 1s `now` tick, no second timer. */}
-      <div className="mt-3 flex justify-center">
+      {/* Wall clock — its own card, matching the connection card frame. */}
+      <div className="bg-well border border-line rounded-xl p-[12px_13px] flex items-center justify-center">
         <Clock />
       </div>
     </aside>
