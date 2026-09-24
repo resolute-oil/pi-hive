@@ -195,7 +195,7 @@ export default function Sidebar() {
       </div>
 
       {/* Theme toggle (2-segment) */}
-      <div className="flex bg-well border border-line rounded-[11px] p-[3px] gap-[3px]">
+      <div className="flex bg-well border border-line rounded-[11px] p-[3px] gap-[3px] mb-3">
         {(["dark", "light"] as const).map((mode) => {
           const on = theme === mode;
           return (
