@@ -28,15 +28,21 @@ function nodeWidthFor(name: string, tag: string): number {
 // hover (Phase 6.1). Answers "what may this agent touch / can it commit / which
 // gates does this planner own". Absent fields are omitted so the tooltip only
 // shows what the config actually declares; returns "" when nothing is known.
+//
+// Defensive against malformed runtime data: the type is `string[]` for
+// `domain`/`stages`/`routingTags` but the SQLite round-trip via
+// `parseJsonMaybe` can land a string-shaped payload, in which case `.length`
+// is truthy and `.join` blows up the whole tooltip. The `Array.isArray` gates
+// keep the tooltip rendering even when an upstream row is malformed.
 function enforcementSummary(node: TopologyNode): string {
   const lines: string[] = [];
   const kind = node.agentType || node.role;
   if (kind) lines.push(`type: ${kind}`);
   if (node.commit) lines.push("commit: yes");
-  if (node.domain?.length) lines.push(`domains: ${node.domain.join(", ")}`);
-  if (node.stages?.length) lines.push(`plan gates: ${node.stages.join(", ")}`);
+  if (Array.isArray(node.domain) && node.domain.length) lines.push(`domains: ${node.domain.join(", ")}`);
+  if (Array.isArray(node.stages) && node.stages.length) lines.push(`plan gates: ${node.stages.join(", ")}`);
   if (node.consultWhen) lines.push(`consult when: ${node.consultWhen}`);
-  if (node.routingTags?.length) lines.push(`routing: ${node.routingTags.join(", ")}`);
+  if (Array.isArray(node.routingTags) && node.routingTags.length) lines.push(`routing: ${node.routingTags.join(", ")}`);
   if (node.responsibilities) lines.push(`responsibilities:\n${node.responsibilities}`);
   return lines.join("\n");
 }
