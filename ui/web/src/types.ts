@@ -17,7 +17,17 @@ export type HiveEventType = HiveTelemetryEventType;
 // `cursor` is the daemon's global events.rowid, present on SQL-served events and
 // SSE frames (Phase B5). The store tracks the max seen cursor for lossless SSE
 // reconnect catch-up (E1).
-export type HiveEvent = HiveTelemetryEvent<Record<string, any>> & { type: HiveEventType | string; cursor?: number };
+//
+// `type` is `HiveEventType` (was `HiveEventType | string`); the `| string`
+// widening defeated the discriminated union at the wire boundary. The payload
+// is intentionally kept as `Record<string, any>` here — the dashboard is a
+// consumer of events that originate from the wire contract, and the store
+// has many permissive readers (Activity, Agents, Status, History). Tightening
+// the consumer side is its own refactor that requires per-event-type payload
+// shapes (see the open question in HANDOFF.md WT-1). The wire contract itself
+// is tightened in `src/shared/telemetry.ts` (the `HiveTelemetryEvent` default
+// is now `Record<string, unknown>` and `type` is `HiveTelemetryEventType`).
+export type HiveEvent = HiveTelemetryEvent<Record<string, any>> & { type: HiveEventType; cursor?: number };
 export type Topology = HiveTopology;
 export type TeamTopologies = HiveTeamTopologies;
 export type { TopologyNode };

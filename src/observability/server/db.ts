@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { DB_PATH } from "./config";
-import type { HiveStateSnapshot, HiveTelemetryEvent, JsonRecord } from "../../shared/telemetry";
+import type { HiveStateSnapshot, HiveTelemetryEvent, HiveTelemetryEventType, JsonRecord } from "../../shared/telemetry";
+import { isJsonRecord } from "../../shared/telemetry";
 import { tryResolveProjectIdentity } from "../../shared/project-identity";
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true, mode: 0o700 });
@@ -550,7 +551,7 @@ export function rowToEvent(row: EventDbRow): HiveTelemetryEvent {
   let payload: JsonRecord = {};
   try {
     const parsed: unknown = JSON.parse(row.payload_json || "{}");
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) payload = parsed as JsonRecord;
+    payload = isJsonRecord(parsed) ? parsed : {};
   } catch { /* ignore */ }
   return {
     event_id: row.event_id,
@@ -558,7 +559,13 @@ export function rowToEvent(row: EventDbRow): HiveTelemetryEvent {
     project_id: row.project_id || undefined,
     seq: row.seq,
     ts: row.ts,
-    type: row.type,
+    // SQLite stores `type` as TEXT (no enum constraint), so the read shape is
+    // `string` even though every row in practice is a known event type. The
+    // runtime filter in runtime.ts:500 catches the legacy `delegation_progress`
+    // shape; everything else should be in `HiveTelemetryEventType`. The cast
+    // is the documented boundary — see WT-1b for the generic tightenings
+    // planned at parseJsonMaybe and the topology-row mappers.
+    type: row.type as HiveTelemetryEventType,
     actor: row.actor,
     pid: row.pid,
     cwd: row.cwd || undefined,
