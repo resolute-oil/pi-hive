@@ -22,7 +22,7 @@
     busy = value;
     els.approve.disabled = value;
     els.deny.disabled = value;
-    els.addComment.disabled = value || selected.size === 0 || !els.comment.value.trim();
+    els["add-comment"].disabled = value || selected.size === 0 || !els.comment.value.trim();
   }
 
   function selectedIndexes() { return [...selected].sort((a, b) => a - b); }
@@ -152,7 +152,7 @@
   }
 
   els.comment.addEventListener("input", () => setBusy(busy));
-  els.addComment.addEventListener("click", () => {
+  els["add-comment"].addEventListener("click", () => {
     const comment = els.comment.value.trim();
     const quote = selectedQuote();
     if (!comment || !quote || annotations.length >= 100) return;
