@@ -6,6 +6,13 @@
 
 The extension must stay safe to install globally: it should do nothing unless the current project opts in with `.pi/hive/hive-config.yaml`.
 
+## Repository boundaries
+
+- This checkout's `origin` is the fork (`resolute-oil/pi-hive`); `upstream` is the source repo (`demetere/pi-hive`) and is owned by someone else.
+- **NEVER push code, commits, branches, or PRs to `upstream`.** All `git push`, `gh pr create`, and merge activity goes through `origin` only. Opening a PR against the source repo is treated as the same class of mistake as writing to a foreign filesystem.
+- `git fetch upstream` is allowed for reading recent history so we know what `origin/main` is behind, but the result is informational — nothing in this checkout ever lands there.
+- If a fix genuinely needs the source repo, surface that to the human and stop. Do not work around the boundary with admin tokens, SSH keys, or other repos that happen to have write access.
+
 ## Pi package rules
 
 - Package entrypoint is `index.ts` and must remain declared in `package.json` under `pi.extensions`.
