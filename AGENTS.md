@@ -13,6 +13,12 @@ The extension must stay safe to install globally: it should do nothing unless th
 - `git fetch upstream` is allowed for reading recent history so we know what `origin/main` is behind, but the result is informational — nothing in this checkout ever lands there.
 - If a fix genuinely needs the source repo, surface that to the human and stop. Do not work around the boundary with admin tokens, SSH keys, or other repos that happen to have write access.
 
+## Subagent tool selection
+
+Use the `Agent` and `SubagentWorkflow` tools from the globally-installed `@tintinweb/pi-subagents` extension for subagent work in this project. Full guide: [`docs/agents/subagent-workflow.md`](docs/agents/subagent-workflow.md).
+
+**Do not use the `subagent` tool or any skill-driven subagent from `compound-engineering-pi`.** That tool spawns skill-based subagents and is not the right delegation mechanism here. The `Agent` tool from `@tintinweb/pi-subagents` is the only subagent-spawning tool you should reach for in this project. If a request looks like it needs `subagent` (skill-driven fan-out), route it through `Agent` or `SubagentWorkflow` instead.
+
 ## Pi package rules
 
 - Package entrypoint is `index.ts` and must remain declared in `package.json` under `pi.extensions`.
@@ -46,6 +52,7 @@ The extension must stay safe to install globally: it should do nothing unless th
 - Do not commit `node_modules/`, `.tgz` package artifacts, runtime sessions, logs, or local telemetry databases.
 - Use Conventional Commits for commit messages, for example `feat: add hive policy checks`, `fix(dashboard): preserve runtime counters`, or `docs: update setup guide`.
 - For audit remediation backlog tasks (`Txx`), completion includes committing, pushing, and opening a PR after required checks pass. Do not begin the next task until that PR exists.
+- **Never merge a pull request without explicit user permission.** Committing, pushing, and creating PRs is allowed; merging requires the user to instruct it each time. A PR is "ready" when it is open and its checks have passed — it is not "done" until the user merges. Do not run `gh pr merge`, do not click the GitHub merge button, and do not auto-merge via branch protection or repo settings on the agent's own initiative.
 - Do not add AI attribution trailers or generated-by notices to commits, docs, package text, or release notes.
 - Prefer complete, production-ready changes: no TODO placeholders, no debug logs, and no unexplained temporary behavior.
 - **All file edits go in a git worktree, never in the main working tree.** Even single-line docs changes, chore updates, and small fixes must be done in a worktree under `APP_ROOT/.worktrees/`, not as siblings of `APP_ROOT` and not directly on `main`. The `.worktrees/` directory is gitignored so `git add .` from a parent path can't drag a sibling checkout into a commit. Create with `git worktree add .worktrees/<branch> <base>` from `APP_ROOT`, then symlink `node_modules` if the worktree needs to run tests.
