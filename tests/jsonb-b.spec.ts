@@ -110,10 +110,12 @@ test("legacy TEXT node columns coexist with JSONB rows and both read (topologyDe
   );
   expect(storageType(`SELECT typeof(thinking_levels) AS t FROM topology_nodes WHERE topology_hash = '${topologyHash}' AND name = 'Legacy'`)).toBe("text");
   const detail = runtime.topologyDetail(topologyHash);
-  const root = detail.hive.orchestrator;
-  expect(root.name).toBe("Root");
-  expect(root.thinkingLevels).toEqual(["off", "low"]);
-  const legacy = root.children.find((c: any) => c.name === "Legacy");
-  expect(legacy.thinkingLevels).toEqual(["off", "medium"]); // legacy TEXT decoded via json()
-  expect(legacy.domain).toEqual(["b/**"]);
+  expect(detail).toBeTruthy();
+  if (!detail) throw new Error("detail should be defined after expect");
+  const root = detail.hive?.orchestrator;
+  expect(root?.name).toBe("Root");
+  expect(root?.thinkingLevels).toEqual(["off", "low"]);
+  const legacy = root?.children?.find((c) => c.name === "Legacy");
+  expect(legacy?.thinkingLevels).toEqual(["off", "medium"]); // legacy TEXT decoded via json()
+  expect(legacy?.domain).toEqual(["b/**"]);
 });
