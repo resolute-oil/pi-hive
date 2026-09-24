@@ -13,6 +13,12 @@ The extension must stay safe to install globally: it should do nothing unless th
 - `git fetch upstream` is allowed for reading recent history so we know what `origin/main` is behind, but the result is informational — nothing in this checkout ever lands there.
 - If a fix genuinely needs the source repo, surface that to the human and stop. Do not work around the boundary with admin tokens, SSH keys, or other repos that happen to have write access.
 
+## Subagent tool selection
+
+Use the `Agent` and `SubagentWorkflow` tools from the globally-installed `@tintinweb/pi-subagents` extension for subagent work in this project. Full guide: [`docs/agents/subagent-workflow.md`](docs/agents/subagent-workflow.md).
+
+**Do not use the `subagent` tool or any skill-driven subagent from `compound-engineering-pi`.** That tool spawns skill-based subagents and is not the right delegation mechanism here. The `Agent` tool from `@tintinweb/pi-subagents` is the only subagent-spawning tool you should reach for in this project. If a request looks like it needs `subagent` (skill-driven fan-out), route it through `Agent` or `SubagentWorkflow` instead.
+
 ## Pi package rules
 
 - Package entrypoint is `index.ts` and must remain declared in `package.json` under `pi.extensions`.
