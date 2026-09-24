@@ -240,6 +240,9 @@
   .graph-controls { @apply absolute top-3 right-3 z-[2] flex flex-col gap-1; }
   .graph-controls button { @apply w-[30px] h-[30px] rounded-lg border border-line bg-surface text-ink-dim cursor-pointer text-[15px] leading-none grid place-items-center shadow-panel; }
   .graph-controls button:hover { @apply text-ink; border-color: color-mix(in srgb, var(--brand) 45%, var(--line)); }
+  /* Expand-to-fullscreen sits below the zoom/fit cluster; the 4px gap + a
+     thin top border read as "different group" without breaking the column. */
+  .graph-controls .graph-expand { @apply mt-1 border-t border-line pt-[2px]; }
 
   /* Edges: idle static line2; active (running child) animated dashed run flow. */
   .g-edge { fill: none; stroke: var(--line2); stroke-width: 1.5; }
@@ -326,6 +329,12 @@
 @layer components {
   .modal-backdrop { @apply fixed inset-0 z-50 grid place-items-center p-5 animate-fadein; background: #0008; backdrop-filter: blur(6px); }
   .modal-panel { @apply bg-panel border border-border rounded-[18px] flex flex-col overflow-hidden; box-shadow: 0 30px 80px #000a; width: min(1800px, 96vw); height: min(1100px, 94vh); animation: activityIn .2s cubic-bezier(.2,.7,.3,1); }
+  /* Fullscreen variant of the modal surface: hugs the viewport edge-to-edge
+     with just enough padding for click-away on the blurred backdrop. Used by
+     the Overview "expand topology" affordance so the topology fills the
+     monitor instead of being letterboxed to 80vw/80vh. */
+  .modal-panel-fullscreen { @apply bg-panel border border-border rounded-[14px] flex flex-col overflow-hidden; box-shadow: 0 30px 80px #000a; width: calc(100vw - 16px); height: calc(100vh - 16px); animation: activityIn .2s cubic-bezier(.2,.7,.3,1); }
+  .modal-panel-fullscreen .graph-wrap { @apply m-0 rounded-none; }
   .modal-body { @apply flex-1 flex flex-col min-h-0 overflow-auto; }
   .modal-body > * { @apply flex-1; }
   .w-collapsed { @apply w-full border-0 bg-transparent flex-1 grid place-items-center text-muted text-xs cursor-pointer min-h-[120px]; }
