@@ -115,7 +115,7 @@ export interface TopoSource {
 // none     — every node reads idle (historical version view, K2 modal).
 export type TopoStatusMode = "live" | "snapshot" | "none";
 
-export default function TopologyGraph(props: { kind?: TopologyKind; source?: TopoSource; statusMode?: TopoStatusMode }) {
+export default function TopologyGraph(props: { kind?: TopologyKind; source?: TopoSource; statusMode?: TopoStatusMode; onExpand?: () => void }) {
   const liveSession = useHive((s) => s.currentSession);
   // Prefer an explicit source (replay/modal); fall back to the live session.
   const session = (props.source ?? liveSession) as (SessionView & TopoSource) | undefined;
@@ -251,7 +251,31 @@ export default function TopologyGraph(props: { kind?: TopologyKind; source?: Top
       <div className="graph-controls">
         <button type="button" aria-label="Zoom in" onClick={() => setView((v) => ({ ...v, k: Math.min(2.5, v.k * 1.15) }))} title="Zoom in">+</button>
         <button type="button" aria-label="Zoom out" onClick={() => setView((v) => ({ ...v, k: Math.max(0.25, v.k / 1.15) }))} title="Zoom out">−</button>
-        <button type="button" aria-label="Fit topology to view" onClick={() => fit()} title="Fit to view">⤢</button>
+        <button type="button" aria-label="Fit topology to view" onClick={() => fit()} title="Fit to view">
+          {/* Corner brackets frame the view; the dashed inner rectangle is the
+              content scaled to fit inside. Communicates "size content to bounds"
+              without looking like the universal "expand" / fullscreen icon. */}
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M2 6 L2 2 L6 2" />
+            <path d="M10 2 L14 2 L14 6" />
+            <path d="M14 10 L14 14 L10 14" />
+            <path d="M6 14 L2 14 L2 10" />
+            <rect x="5.5" y="5.5" width="5" height="5" strokeDasharray="1.5 1.3" />
+          </svg>
+        </button>
+        {props.onExpand && (
+          <button type="button" aria-label="Expand topology to fullscreen" onClick={props.onExpand} title="Expand to fullscreen" className="graph-expand">
+            {/* Canonical fullscreen icon: corner brackets only (no inner rect)
+                so it reads as "the view itself grows", not "content fits in a
+                frame". Distinct from the Fit-to-view icon above. */}
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M3 6 L3 3 L6 3" />
+              <path d="M10 3 L13 3 L13 6" />
+              <path d="M13 10 L13 13 L10 13" />
+              <path d="M6 13 L3 13 L3 10" />
+            </svg>
+          </button>
+        )}
       </div>
       {!layout ? <div className="g-empty">{emptyText}</div> : (
         <svg

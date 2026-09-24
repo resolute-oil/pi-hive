@@ -1,4 +1,5 @@
-import { lazy, Suspense, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import Kpis from "../components/Kpis";
 import Widget from "../components/WidgetModal";
 import LiveActivity from "../components/LiveActivity";
@@ -7,6 +8,7 @@ import ModelMix from "../components/ModelMix";
 import Replay from "../components/Replay";
 import { useHive } from "../store";
 import { replayTopoSource } from "../store/replay";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import { absTime } from "../lib/format";
 
 // The topology graph pulls in d3-hierarchy; code-split it so that dependency
@@ -36,6 +38,9 @@ function StatusLegend() {
 
 export default function Overview() {
   const [topologyView, setTopologyView] = useState<"hive" | "planning">("hive");
+  // True while the fullscreen topology modal is open. Wired to the new
+  // expand affordance in the topology pane's control cluster.
+  const [topoExpanded, setTopoExpanded] = useState(false);
   const currentSession = useHive((s) => s.currentSession);
   const scopedAgents = useHive((s) => s.scopedAgents);
   const scope = useHive((s) => s.scope);
@@ -133,8 +138,8 @@ export default function Overview() {
             </div>
             <Suspense fallback={<div className="g-empty">Loading topology…</div>}>
               {replaying
-                ? <TopologyGraph kind={topologyView} source={replaySource} statusMode="snapshot" />
-                : <TopologyGraph kind={topologyView} />}
+                ? <TopologyGraph kind={topologyView} source={replaySource} statusMode="snapshot" onExpand={() => setTopoExpanded(true)} />
+                : <TopologyGraph kind={topologyView} onExpand={() => setTopoExpanded(true)} />}
             </Suspense>
           </div>
         </Widget>
@@ -170,6 +175,74 @@ export default function Overview() {
           <ModelMix />
         </Widget>
       </div>
+      {/* Fullscreen topology modal: opened by the "Expand" affordance in the
+          Overview's topology pane. Backdrop click, ESC, and the X button all
+          close it; Tab focus is trapped inside until it does (matches the
+          AgentLog and K2 modal patterns). */}
+      <TopologyFullscreenModal
+        open={topoExpanded}
+        onClose={() => setTopoExpanded(false)}
+        kind={topologyView}
+        replaying={replaying}
+        replaySource={replaySource}
+      />
     </>
+  );
+}
+
+// Fullscreen topology surface. Renders nothing when closed. Re-mounts a fresh
+// TopologyGraph so panning/zoom state starts clean inside the modal — matches
+// how the K2 version modal in Sessions.tsx wraps the same component.
+function TopologyFullscreenModal(props: {
+  open: boolean;
+  onClose: () => void;
+  kind: "hive" | "planning";
+  replaying: boolean;
+  replaySource: ReturnType<typeof replayTopoSource> | undefined;
+}) {
+  const trapRef = useFocusTrap<HTMLDivElement>(props.open);
+  useEffect(() => {
+    if (!props.open) return;
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") props.onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [props.open, props.onClose]);
+  if (!props.open) return null;
+  return createPortal(
+    <div className="modal-backdrop" onClick={props.onClose}>
+      <div
+        ref={trapRef}
+        className="modal-panel-fullscreen"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Agent topology"
+        tabIndex={-1}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-line flex-none">
+          <b className="text-[13px] text-ink">Agent Topology <span className="text-ink-dim font-normal">— {props.kind === "hive" ? "Hive" : "Planning"}</span></b>
+          <button
+            type="button"
+            onClick={props.onClose}
+            aria-label="Close topology"
+            title="Close (Esc)"
+            className="w-[28px] h-[28px] rounded-md border border-line bg-surface text-ink-dim hover:text-ink grid place-items-center"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="flex-1 min-h-0">
+          <Suspense fallback={<div className="g-empty">Loading topology…</div>}>
+            {/* The inner graph deliberately omits onExpand: there's no larger
+                surface to escalate to from here, and rendering the button
+                would invite nested-modal recursion if the user clicked it. */}
+            {props.replaying
+              ? <TopologyGraph kind={props.kind} source={props.replaySource} statusMode="snapshot" />
+              : <TopologyGraph kind={props.kind} />}
+          </Suspense>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
