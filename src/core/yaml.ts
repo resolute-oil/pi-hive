@@ -1,6 +1,7 @@
 // ── YAML-lite parser ─────────────────────────────────────────────────────────
 
-import type { JsonRecord, YamlLine } from "./types";
+import type { YamlLine } from "./types";
+import type { JsonRecord } from "../shared/telemetry";
 
 export function stripComment(line: string): string {
   let quote: string | null = null;

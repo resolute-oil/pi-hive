@@ -12,7 +12,7 @@ function event(cursor: number, sessionId = "s1"): HiveEvent {
     ts: new Date(cursor * 1000).toISOString(),
     type: "message",
     payload: {},
-  } as HiveEvent;
+  } as unknown as HiveEvent;
 }
 
 test("event ring retains the newest cursor-ordered window without duplicates", () => {
