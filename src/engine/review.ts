@@ -3,7 +3,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as openspec from "./openspec";
-import { applyBrowserSecurityHeaders } from "../observability/security";
+import { applyBrowserSecurityHeaders } from "../shared/browser-security";
 
 // Generic embed layer for the compact review-only UI on pi-hive's dashboard
 // server. It runs no per-review process: production streams deterministic gzip
