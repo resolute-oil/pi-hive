@@ -1,6 +1,6 @@
 import type { AgentToolUpdateCallback, ExtensionAPI, ExtensionContext, ToolDefinition, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import { Theme, defineTool as definePiTool, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { Type, type TSchema } from "typebox";
 import { resolve } from "node:path";
 import type { AgentType, HiveState, ReviewVerdictLevel } from "../core/types";

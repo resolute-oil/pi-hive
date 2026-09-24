@@ -42,7 +42,7 @@
 // documents the gap.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -361,7 +361,7 @@ test("shell expansions — quoted, variable, and escaped args bypass the regex t
       // local-key dest still extracts.
       ["aws s3 cp s3://bucket/key ./local/key", ["./local/key"], "s3:// (local dest still extracts)"],
     ];
-    for (const [cmd, expected, label] of cases) assertExtracts(cmd, expected);
+    for (const [cmd, expected, _label] of cases) assertExtracts(cmd, expected);
   } finally {
     cleanup(fx);
   }
