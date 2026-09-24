@@ -5,10 +5,10 @@ import { agentRuns, parseAgentLog } from "../agent-log";
 import { projectName } from "../../shared/project";
 import { tryResolveProjectIdentity } from "../../shared/project-identity";
 import { loadConfig } from "../../core/config";
-import type { AgentConfig, HiveTeam } from "../../core/types";
+import { teamTopology } from "../../core/topology";
 import { withCrossProcessFileLock } from "../../core/file-lock";
 import { readJsonlPage } from "../../core/fs";
-import type { HiveStateSnapshot, HiveTelemetryEvent, TelemetryRegistryRow, TelemetrySessionSummary, TopologyNode } from "../../shared/telemetry";
+import type { HiveStateSnapshot, HiveTelemetryEvent, TelemetryRegistryRow, TelemetrySessionSummary } from "../../shared/telemetry";
 import { BOOT_SESSION_ID, CAPTURE_THINKING, CONVERSATION_LOG, DB_PATH, PROJECT_CWD, REGISTRY_PATH, RETENTION_DAYS, SINGLE_LOG_PATH } from "./config";
 import {
   db,
@@ -268,35 +268,6 @@ export function readState(logPath: string) {
 }
 
 const topologyCache = new Map<string, { mtimeMs: number; topologies?: HiveStateSnapshot["topologies"] }>();
-
-function agentSummary(agent: AgentConfig): TopologyNode {
-  return {
-    name: agent.name,
-    role: agent.role,
-    agentType: agent.agentType,
-    stages: agent.stages,
-    group: agent.groupName,
-    color: agent.color,
-    model: agent.model,
-    tools: agent.tools,
-    thinking: agent.thinking,
-    consultWhen: agent.consultWhen,
-    routingTags: agent.routingTags || [],
-    // C2: mirror the extension-side summary (engine/observability.ts) so the
-    // config-parse fallback path (configuredTopologies, used when a snapshot
-    // lacks topologies) fills domain/commit/responsibilities too — otherwise
-    // those columns could never populate on that path.
-    domain: (agent.domain || []).map((scope) => scope.path),
-    commit: Boolean(agent.commit && agent.commit.trim()),
-    responsibilities: (agent.responsibilities || []).join("\n") || undefined,
-    children: [...(agent.members || []), ...(agent.children || [])].map(agentSummary),
-  };
-}
-
-function teamTopology(team?: HiveTeam): HiveStateSnapshot["topology"] | undefined {
-  if (!team) return undefined;
-  return { orchestrator: team.main ? agentSummary(team.main) : undefined, agents: (team.agents || []).map(agentSummary) };
-}
 
 function configuredTopologies(cwd: string | undefined, legacy?: HiveStateSnapshot["topology"]): HiveStateSnapshot["topologies"] | undefined {
   if (!cwd) return undefined;
