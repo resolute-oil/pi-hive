@@ -360,6 +360,16 @@ function computeScopedAgents(scopedSessions: SessionView[]): ScopeAgent[] {
   // stale sessions before they win over the snapshot status.
   const statusOf = (sessionId: string, name: string, snapStatus?: string) =>
     demoteIfStale(st.get(sessionId)?.get(name) || snapStatus || "idle", sessionId, now);
+  // Defense-in-depth copy of an array-typed field from a topology row. The
+  // `TopologyNode` type declares `stages?: string[]` and `domain?: string[]`,
+  // but SQLite round-trips occasionally hand back a string-shaped value
+  // (legacy configs that wrote `stages: "specs"` instead of `["specs"]`); we
+  // coerce that to `undefined` here so the downstream `.join()` callers can
+  // trust the shape. The `Array.isArray(...).every(...)` guards in
+  // Agents.tsx/TopologyGraph.tsx added in 9e126c9 stay as belt-and-suspenders
+  // — cheap and explicit — but this is the load-bearing check.
+  const copyStringArray = (value: unknown): string[] | undefined =>
+    Array.isArray(value) && value.every((s) => typeof s === "string") ? value as string[] : undefined;
   for (const sess of scopedSessions) {
     const sessHist = hist.get(sess.session_id);
     const seen = new Set<string>();
@@ -385,7 +395,11 @@ function computeScopedAgents(scopedSessions: SessionView[]): ScopeAgent[] {
         status: statusOf(sess.session_id, node.name, rt?.status), tokens, cost, runs: Math.max(rt?.runCount || 0, h?.runs || 0), tools: Math.max(rt?.toolCount || 0, h?.tools || 0),
         elapsedMs: rt?.elapsedMs, contextPct: rt?.contextPct, contextTokens: rt?.contextTokens, contextWindow: rt?.contextWindow, budgetRemaining: rt?.budgetRemaining, task: rt?.task || rt?.lastWork, session_id: sess.session_id, depth, order: order++,
         // Enforcement contract carried from the topology node (Phase 6.1).
-        domain: node.domain, commit: node.commit, stages: node.stages, consultWhen: node.consultWhen, responsibilities: node.responsibilities,
+        // Array-shaped fields go through `copyStringArray` so a malformed
+        // string value from a legacy config or DB row drops to undefined
+        // rather than propagating as a runtime `Array.isArray()` failure at
+        // every `.join()` site downstream.
+        domain: copyStringArray(node.domain), commit: node.commit, stages: copyStringArray(node.stages), consultWhen: node.consultWhen, responsibilities: node.responsibilities,
       });
       for (const c of node.children || []) walk(c, depth + 1);
     };
