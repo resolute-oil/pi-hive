@@ -575,13 +575,19 @@
   .plan-artifacts { @apply flex items-center gap-1.5 mt-3.5 flex-wrap; }
   .plan-artifact { @apply flex items-center gap-1.5 text-[11.5px] px-2.5 py-1 rounded-lg border border-border bg-chip text-fg2 cursor-pointer transition-all duration-[.12s]; font: inherit; }
   .plan-artifact:hover { @apply bg-hover text-fg; }
-  .plan-artifact.active { @apply bg-accent-soft text-accent border-accent-border; }
   .plan-artifact-id { @apply font-semibold; }
   .plan-artifact-review { @apply text-[9.5px] uppercase tracking-[.35px] opacity-80; }
   .plan-artifact.state-approved { @apply text-ok border-ok-border bg-ok-soft; }
   .plan-artifact.state-denied { @apply text-crit; border-color: var(--err); background: var(--crit-soft); }
   .plan-artifact.state-review { @apply text-accent border-accent-border bg-accent-soft; }
   .plan-artifact.state-agent { @apply opacity-60; }
+  /* Active tab indicator — must come AFTER the state-* rules above so it
+     wins by CSS source order when a tab is both selected and in some
+     review state (selected+approved used to look identical to approved).
+     The inset brand-color ring gives a visible indicator that works in
+     both light and dark themes; `bg-accent-soft` alone (the previous rule)
+     was ~13% opacity and effectively invisible. */
+  .plan-artifact.active { @apply bg-accent-soft text-accent border-accent-border; box-shadow: inset 0 0 0 1px var(--brand); }
   .plan-artifact-next { @apply text-[11px] text-muted italic px-1; }
   .plan-artifact-none { @apply text-[11.5px] text-muted; }
   .plan-issues { @apply mt-3 pl-[18px] text-[11.5px]; list-style: disc; }
