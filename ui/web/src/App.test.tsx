@@ -107,6 +107,26 @@ describe("App page header", () => {
     expect(card!.className).toContain("rounded-2xl");
   });
 
+  it("aligns the title card's top edge with the sidebar's top edge (no extra top padding on the scroll container)", () => {
+    render(<App />);
+
+    // The outer shell is `p-3 gap-3 flex h-screen`, so the sidebar's outer
+    // box and <main>'s outer box both start 12px from the top of the
+    // viewport. The scroll container inside <main> must NOT add its own top
+    // padding, or the title card sits ~14px below the sidebar's top edge.
+    // jsdom doesn't apply CSS, so assert the scroll container's className
+    // rather than its computed padding-top.
+    const heading = screen.getByRole("heading", { level: 1, name: "Overview" });
+    const scrollContainer = heading.parentElement?.parentElement?.parentElement;
+    expect(scrollContainer).toBeTruthy();
+    // Must use `pt-0` (no top padding on the scroll container — the outer
+    // shell's `p-3` already gives 12px of breathing room and matches the
+    // sidebar). The old code used `pt-3.5` which pushed the title card
+    // ~14px below the sidebar's top edge.
+    expect(scrollContainer!.className).toMatch(/\bpt-0\b/);
+    expect(scrollContainer!.className).not.toMatch(/\bpt-(?:0\.[5-9]|[1-9])/);
+  });
+
   it("keeps the session-scope badge next to the title when scope narrows to a session", () => {
     // Seed the store directly with a session scope so the badge renders on
     // first paint (avoids act() gymnastics around in-test scope mutations).
