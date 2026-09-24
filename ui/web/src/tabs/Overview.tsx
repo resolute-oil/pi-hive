@@ -209,7 +209,7 @@ function TopologyFullscreenModal(props: {
   }, [props.open, props.onClose]);
   if (!props.open) return null;
   return createPortal(
-    <div className="modal-backdrop" onClick={props.onClose}>
+    <div className="modal-backdrop-fullscreen" onClick={props.onClose}>
       <div
         ref={trapRef}
         className="modal-panel-fullscreen"
@@ -231,7 +231,11 @@ function TopologyFullscreenModal(props: {
             ✕
           </button>
         </div>
-        <div className="flex-1 min-h-0">
+        {/* flex flex-col is required: the .graph-wrap child's `flex-1` only
+            expands inside a flex container; without it the column collapses
+            to the SVG's intrinsic 300px min-height instead of filling the
+            modal's body. */}
+        <div className="flex-1 min-h-0 flex flex-col">
           <Suspense fallback={<div className="g-empty">Loading topology…</div>}>
             {/* The inner graph deliberately omits onExpand: there's no larger
                 surface to escalate to from here, and rendering the button

@@ -101,7 +101,7 @@ describe("Overview topology expand modal", () => {
     render(<Overview />);
     await waitFor(() => expect(screen.getByTestId("stub-graph")).toBeInTheDocument());
     await user.click(screen.getByLabelText("stub-expand"));
-    const backdrop = document.querySelector(".modal-backdrop");
+    const backdrop = document.querySelector(".modal-backdrop-fullscreen");
     expect(backdrop).toBeTruthy();
     await user.click(backdrop as HTMLElement);
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Agent topology" })).toBeNull());
@@ -116,5 +116,20 @@ describe("Overview topology expand modal", () => {
     expect(panel).toBeTruthy();
     await user.click(panel);
     expect(screen.getByRole("dialog", { name: "Agent topology" })).toBeInTheDocument();
+  });
+
+  it("makes the content wrapper a flex column so the inner graph's flex-1 actually fills the body height", async () => {
+    const user = userEvent.setup();
+    render(<Overview />);
+    await waitFor(() => expect(screen.getByTestId("stub-graph")).toBeInTheDocument());
+    await user.click(screen.getByLabelText("stub-expand"));
+    // The wrapper directly above the graph must carry the flex-col utilities;
+    // otherwise .graph-wrap's flex-1 is a no-op and the SVG collapses to its
+    // 300px min-height instead of filling the modal body. jsdom does not run
+    // Tailwind, so verify via className rather than getComputedStyle.
+    const wrapper = document.querySelector(".modal-panel-fullscreen > div.flex-1") as HTMLElement;
+    expect(wrapper).toBeTruthy();
+    expect(wrapper.className).toContain("flex");
+    expect(wrapper.className).toContain("flex-col");
   });
 });
