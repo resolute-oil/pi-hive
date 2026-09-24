@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 import Sidebar from "./Sidebar";
 import { store } from "../store";
+import type { HiveEvent } from "../types";
 
 beforeEach(() => {
   localStorage.clear();
@@ -24,6 +25,7 @@ beforeEach(() => {
     scopedStats: { sessions: 2, live: 1, running: 1, tokens: 0, cost: 0 },
     scopedEvents: [],
     scopedAgentCount: 3,
+    now: 0,
   });
 });
 
@@ -50,5 +52,47 @@ describe("Sidebar", () => {
 
     expect(store.getState().scope).toEqual({ level: "project", project: "project-1" });
     expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+  });
+
+  it("places the wall clock below the Dark/Light theme buttons", () => {
+    render(<Sidebar />);
+
+    const dark = screen.getByRole("button", { name: "Dark" });
+    const light = screen.getByRole("button", { name: "Light" });
+    // The clock span renders HH:MM:SS — match by format, not exact text, since
+    // the store's `now` defaults to 0 and the component falls back to Date.now().
+    const clock = screen.getByText(/^\d{2}:\d{2}:\d{2}$/);
+    expect(clock).toBeInTheDocument();
+
+    // Both theme buttons must precede the clock in document order — the clock
+    // lives at the very bottom of the sidebar, below the theme toggle.
+    expect(dark.compareDocumentPosition(clock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(light.compareDocumentPosition(clock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("hides the provider pressure counter when there are no recent 429/529 events", () => {
+    render(<Sidebar />);
+    // scopedEvents is [] in beforeEach, so the pressure counter must not render.
+    expect(screen.queryByRole("status", { name: /provider rate-limit/i })).toBeNull();
+  });
+
+  it("surfaces the recent provider-pressure count when scopedEvents contain 429/529", () => {
+    const now = Date.now();
+    const events: HiveEvent[] = [
+      { event_id: "e1", session_id: "s1", seq: 1, pid: 1, ts: new Date(now - 30_000).toISOString(), type: "provider_response", actor: "test", payload: { status: 429 } },
+      { event_id: "e2", session_id: "s1", seq: 2, pid: 1, ts: new Date(now - 60_000).toISOString(), type: "provider_response", actor: "test", payload: { status: 529 } },
+    ];
+    store.setState({
+      scopedEvents: events,
+      now,
+    });
+
+    render(<Sidebar />);
+
+    const pressure = screen.getByRole("status");
+    expect(pressure.textContent).toMatch(/2×/);
+    // The most recent event (newest-first in scopedEvents) is shown as the
+    // "latest" status in the title attribute and visible label.
+    expect(pressure.textContent).toMatch(/429/);
   });
 });
