@@ -87,6 +87,26 @@ describe("App page header", () => {
     expect(subtitle.contains(heading)).toBe(false);
   });
 
+  it("wraps the page header in a card frame matching the dashboard's card language", () => {
+    render(<App />);
+
+    const heading = screen.getByRole("heading", { level: 1, name: "Overview" });
+
+    // Walk up to the card wrapper (title cluster's parent = card div).
+    const card = heading.parentElement?.parentElement;
+    expect(card).toBeTruthy();
+
+    // jsdom doesn't apply Tailwind, so assert via className rather than
+    // getComputedStyle. The card frame matches the dashboard's main-content
+    // card vocabulary (bg-panel + border-border + rounded-2xl) — the same
+    // palette and radius the .tab-card / .kpi tiles use, so the header
+    // visually pairs with the content below it instead of floating bare on
+    // the page background.
+    expect(card!.className).toContain("bg-panel");
+    expect(card!.className).toContain("border-border");
+    expect(card!.className).toContain("rounded-2xl");
+  });
+
   it("keeps the session-scope badge next to the title when scope narrows to a session", () => {
     // Seed the store directly with a session scope so the badge renders on
     // first paint (avoids act() gymnastics around in-test scope mutations).

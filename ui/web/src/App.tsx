@@ -67,7 +67,7 @@ export default function App() {
       <Sidebar />
       <main className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
         <div className="flex-1 min-h-0 overflow-auto pt-3.5 px-0.5 pb-10">
-          <div className="flex items-center justify-between gap-4 mb-4">
+          <div className="bg-panel border border-border rounded-2xl px-4 py-3.5 mb-4 flex items-center justify-between gap-4">
             <div className="flex items-center gap-2.5 min-w-0">
               <h1 className="m-0 text-[21px] font-bold tracking-[-.015em] truncate">{TAB_TITLES[activeTab] ?? "Overview"}</h1>
               {scope.level === "session" && (
