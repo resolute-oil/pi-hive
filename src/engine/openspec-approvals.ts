@@ -79,7 +79,18 @@ export function approvalRecordPath(cwd: string, name: string, artifact: string, 
   const id = toArtifactId(artifact);
   if (!id || !isSafeChangeId(name)) return null;
   const identity = approvalIdentity(cwd);
-  return join(approvalBaseDir(), identity.projectId, identity.canonicalRoot, name, id, `${authority}.json`);
+  // Path shape: <base>/<projectId>/<changeId>/<artifactId>/<authority>.json
+  //
+  // The project's canonical root is *not* a path component here, even
+  // though every ApprovalRecord carries a `canonicalRoot` field. The
+  // `projectId` is a hash of the canonical root (see
+  // `shared/project-identity.ts`), so adding the canonical root as a
+  // directory segment would be redundant for identification AND would
+  // produce ugly long paths with embedded absolute filesystem paths
+  // (e.g. ~/.pi/agent/hive/approvals/<hash>/Users/cgrant/code/<repo>/<branch>).
+  // The canonical root stays on the record for content-binding and
+  // cross-checks (see `validRecordShape`).
+  return join(approvalBaseDir(), identity.projectId, name, id, `${authority}.json`);
 }
 
 const UPSTREAM = Object.fromEntries(
