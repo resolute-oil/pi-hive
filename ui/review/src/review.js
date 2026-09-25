@@ -4,6 +4,34 @@
   const capabilityKeys = { rid: "__hive_rid", cwd: "__hive_cwd", nonce: "__hive_nonce" };
   const els = Object.fromEntries(["artifact","status","document","selection","comment","add-comment","annotations","feedback","error","deny","approve"].map((id) => [id, document.getElementById(id)]));
   let context = new URL(location.href);
+
+  // Theme sync with the dashboard. The dashboard passes the active theme as
+  // a `theme` query param on the initial iframe URL (so the first paint
+  // matches), then pushes `pi-hive-theme` postMessages when the user
+  // toggles dark/light. The review app is a separate document so it does
+  // NOT inherit the dashboard's `:root[data-theme]` attribute — we mirror
+  // it onto our own `<html>` and let the CSS variables cascade. This is a
+  // local patch on top of vendored Plannotator; see `ui/review/vendor.json`'s
+  // `patches` field for the upstream-tracking rationale.
+  function applyTheme(theme) {
+    if (theme !== "dark" && theme !== "light") return;
+    document.documentElement.dataset.theme = theme;
+  }
+  applyTheme(context.searchParams.get("theme"));
+  window.addEventListener("message", (event) => {
+    if (event.source !== parent || event.origin !== expectedOrigin) return;
+    if (event.data?.type === "pi-hive-theme") {
+      applyTheme(event.data.theme);
+      return;
+    }
+    if (event.data?.type !== "pi-hive-review-context") return;
+    let next;
+    try { next = new URL(String(event.data.url), location.href); } catch { return; }
+    if (next.origin !== expectedOrigin || next.pathname !== "/pl-review/" || !next.searchParams.get("rid") || !next.searchParams.get("cwd") || !next.searchParams.get("nonce")) return;
+    if (typeof event.data.theme === "string") applyTheme(event.data.theme);
+    else if (next.searchParams.get("theme")) applyTheme(next.searchParams.get("theme"));
+    void load(next);
+  });
   let lines = [];
   let selected = new Set();
   let anchor = null;
@@ -165,17 +193,6 @@
   });
   els.approve.addEventListener("click", () => void decide(true));
   els.deny.addEventListener("click", () => void decide(false));
-  window.addEventListener("message", (event) => {
-    if (event.source !== parent || event.origin !== expectedOrigin || event.data?.type !== "pi-hive-review-context") return;
-    let next;
-    // The parent sends the server-issued reviewUrl, which is a path-only string
-    // (`/pl-review/?rid=...&cwd=...&nonce=...`). Resolving it against
-    // location.href keeps the existing host check meaningful and lets the
-    // capability-update flow work without absolute URLs.
-    try { next = new URL(String(event.data.url), location.href); } catch { return; }
-    if (next.origin !== expectedOrigin || next.pathname !== "/pl-review/" || !next.searchParams.get("rid") || !next.searchParams.get("cwd") || !next.searchParams.get("nonce")) return;
-    void load(next);
-  });
   parent.postMessage({ type: "pi-hive-review-ready" }, expectedOrigin);
   void load(context);
 })();
