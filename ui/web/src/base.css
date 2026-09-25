@@ -594,7 +594,7 @@
      rule below adds the orange "primary tab" treatment only when there
      is no state to inherit (selected+no-state otherwise looked identical
      to idle in the previous all-amber treatment). */
-  .plan-artifact.active { box-shadow: inset 0 0 0 2px currentColor; }
+  .plan-artifact.active { box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 50%, transparent); }
   .plan-artifact.active:not([class*="state-"]) { @apply text-accent bg-accent-soft; }
   .plan-artifact-next { @apply text-[11px] text-muted italic px-1; }
   .plan-artifact-none { @apply text-[11.5px] text-muted; }
