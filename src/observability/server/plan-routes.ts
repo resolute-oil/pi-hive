@@ -142,7 +142,13 @@ export interface PlanDetail {
   nextReady: string | null;
   files: string[];
   validation: { passed: boolean; failed: number; issues: openspec.ValidateIssue[] };
-  readyToExecute: boolean;
+  artifactsReady: boolean;
+  // Gated to isExecutionGateOpen (artifacts ready + validation passes +
+  // every artifact has a current human approval). The dashboard uses this
+  // for the green "ready to execute" pill; `artifactsReady` alone stays as
+  // the "artifacts ready, awaiting human approval" signal so the pill can
+  // render in a neutral pending state until approval completes.
+  executionReady: boolean;
   taskProgress: openspec.ExecutionTaskProgress[];
   verdicts: ReturnType<typeof listVerdicts>;
 }
@@ -183,7 +189,8 @@ export async function planDetail(cwd: string, changeId: string, options: PlanRou
     nextReady: loaded.detail.nextReady,
     files: openspec.listArtifacts(cwd, changeId),
     validation: loaded.validation,
-    readyToExecute: openspec.isReadyToExecuteWithValidation(cwd, changeId, loaded.validation),
+    artifactsReady: openspec.isReadyToExecuteWithValidation(cwd, changeId, loaded.validation),
+    executionReady: openspec.isExecutionGateOpen(cwd, changeId),
     taskProgress: openspec.executionTaskProgress(cwd, changeId),
     verdicts: listVerdicts(changeId, cwd),
   };

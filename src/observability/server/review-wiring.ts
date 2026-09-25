@@ -79,7 +79,7 @@ const surface: ReviewSurface | null = registerReviewSurface({
         changeId: ctx.change,
         artifact: ctx.artifact,
         nextArtifact: openspec.nextAuthorableArtifact(ctx.cwd, ctx.change),
-        readyToExecute: tasks && !!validation && openspec.isReadyToExecuteWithValidation(ctx.cwd, ctx.change, validation),
+        artifactsReady: tasks && !!validation && openspec.isReadyToExecuteWithValidation(ctx.cwd, ctx.change, validation),
         feedback: feedback || undefined,
       });
       return { ok: true as const };
