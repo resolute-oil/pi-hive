@@ -380,6 +380,12 @@ export interface PlanDetail {
   files: string[];
   validation: { passed: boolean; failed: number; issues: Array<{ level: string; path: string; message: string }> };
   artifactsReady: boolean;
+  // Deprecated alias for `artifactsReady`, kept for backward-compat reads
+  // against a server that hasn't yet been restarted to the renamed field.
+  // Dashboard reads `artifactsReady ?? readyToExecute` so a hard refresh
+  // is enough while the long-running pi-hive server still serves the old
+  // payload. Remove once no in-flight upgrades remain possible.
+  readyToExecute?: boolean;
   // True only when every artifact is approved AND validation passes. The
   // green "ready to execute" pill is gated on this; `artifactsReady` alone
   // means "artifacts are ready, awaiting human approval".
