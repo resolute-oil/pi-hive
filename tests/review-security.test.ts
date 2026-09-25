@@ -341,3 +341,65 @@ test("not-ready and persistence failures return 409 and 500", async () => {
   assert.equal(response.status, 500);
   assert.equal(response.headers.get("cache-control"), "no-store");
 });
+
+// ── theme propagation on /review-sessions ────────────────────────────────────
+//
+// The dashboard passes its current `dark | light` theme to the server on
+// mint, the server bakes it into the iframe URL's `theme` query param, and
+// the iframe applies it on first paint. Without this, the iframe is dark
+// even when the dashboard is in light mode, because the two documents
+// don't share `:root[data-theme]`.
+
+async function mintWithTheme(h: Harness, theme: unknown): Promise<string | undefined> {
+  const req = new Request(`${ORIGIN}/review-sessions`, {
+    method: "POST",
+    headers: { ...STRICT_HEADERS, referer: `${ORIGIN}/`, "content-type": "application/json" },
+    body: JSON.stringify({ rid: "add-auth#proposal.md", cwd: h.cwd, theme }),
+  });
+  const response = (await handleReviewSurface(h.surface, req, new URL(req.url)))!;
+  if (response.status !== 201) return undefined;
+  const body = await response.clone().json() as { reviewUrl?: string };
+  return body.reviewUrl;
+}
+
+test("review-sessions: theme=light bakes into the iframe URL", async () => {
+  const h = harness();
+  const url = await mintWithTheme(h, "light");
+  assert.ok(url, "mint should succeed");
+  // The `theme=light` query param appears verbatim so the iframe's initial
+  // paint matches the dashboard's active theme. The iframe's review.js
+  // reads ?theme=... and mirrors it onto document.documentElement.dataset.theme.
+  assert.match(url!, /[?&]theme=light(?:&|$)/);
+  // ...and the dark default is NOT also emitted (would be redundant).
+  assert.doesNotMatch(url!, /[?&]theme=dark(?:&|$)/);
+});
+
+test("review-sessions: theme=dark bakes into the iframe URL", async () => {
+  const h = harness();
+  const url = await mintWithTheme(h, "dark");
+  assert.ok(url);
+  assert.match(url!, /[?&]theme=dark(?:&|$)/);
+});
+
+test("review-sessions: missing theme defaults to dark in the URL", async () => {
+  // Pre-fix, the URL had no theme at all and the iframe rendered dark.
+  // Post-fix, the URL always carries `theme=...` so the iframe's behavior
+  // is explicit even when the dashboard didn't say which it wanted.
+  const h = harness();
+  const url = await mintWithTheme(h, undefined);
+  assert.ok(url);
+  assert.match(url!, /[?&]theme=dark(?:&|$)/);
+});
+
+test("review-sessions: invalid theme values default to dark (fail-closed)", async () => {
+  // The dashboard never sends anything other than "dark" | "light", but
+  // the server must not trust untyped input. A bogus theme is coerced to
+  // the dark default rather than crashing or passing through a value the
+  // iframe can't validate.
+  const h = harness();
+  for (const bogus of ["red", "high-contrast", null, 42, {}]) {
+    const url = await mintWithTheme(h, bogus);
+    assert.ok(url, `mint with bogus theme ${JSON.stringify(bogus)} should still succeed`);
+    assert.match(url!, /[?&]theme=dark(?:&|$)/, `bogus theme ${JSON.stringify(bogus)} should coerce to dark`);
+  }
+});

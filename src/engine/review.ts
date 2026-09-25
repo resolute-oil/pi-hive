@@ -446,6 +446,12 @@ export async function handleReviewSurface(surface: ReviewSurface, req: Request, 
     const cwd = body.value.cwd;
     if (typeof rid !== "string" || !rid || rid.length > 1_000) return json({ error: "rid required" }, 400, true);
     if (cwd !== undefined && (typeof cwd !== "string" || cwd.length > 4_096)) return json({ error: "cwd must be a string" }, 400, true);
+    // The dashboard's current theme is forwarded into the review URL so the
+    // first paint of the iframe matches the dashboard's active theme. The
+    // dashboard also pushes subsequent theme changes via postMessage — the
+    // query-param is purely for initial-load correctness.
+    const themeRaw = body.value.theme;
+    const theme = themeRaw === "light" || themeRaw === "dark" ? themeRaw : "dark";
     const ctx = hooks.resolveContext(rid, typeof cwd === "string" ? cwd : null);
     if (!ctx) return json({ error: "unknown review" }, 404, true);
     const artifactHash = openspec.artifactHash(ctx.cwd, ctx.change, ctx.artifact);
@@ -454,7 +460,7 @@ export async function handleReviewSurface(surface: ReviewSurface, req: Request, 
     const nonce = `${randomUUID()}${randomUUID()}`.replace(/-/g, "");
     const expiresAt = Date.now() + REVIEW_SESSION_TTL_MS;
     surface.sessions.set(nonce, { nonce, ...ctx, artifactHash, expiresAt, used: false });
-    const query = new URLSearchParams({ rid, cwd: ctx.cwd, nonce });
+    const query = new URLSearchParams({ rid, cwd: ctx.cwd, nonce, theme });
     return json({ nonce, expiresAt: new Date(expiresAt).toISOString(), reviewUrl: `${mountPath}?${query}` }, 201, true);
   }
 

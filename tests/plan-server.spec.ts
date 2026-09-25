@@ -73,6 +73,49 @@ test.if(OSX)("planDetail includes artifact graph + validation + empty verdicts",
   expect(await routes.planDetail(PROJECT, "nope")).toBeNull();
 });
 
+// The dashboard's "ready to execute" pill is gated on `executionReady`, not on
+// `artifactsReady` — the former requires a current human approval for every
+// artifact, the latter only requires authored artifacts + passing validation.
+// `artifactsReady` true + `executionReady` false = artifacts ready, awaiting
+// human approval. `artifactsReady` true + `executionReady` true = the gate
+// for coder/tester dispatch is open.
+test.if(OSX)("planDetail exposes executionReady (gated on human approval, not just artifact completeness)", async () => {
+  routes.clearPlanRouteCaches();
+
+  // Authored artifacts + tasks.md with tasks → artifactsReady true.
+  const dir = join(PROJECT, "openspec", "changes", "execution-ready");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "proposal.md"), "# Exec ready\n\nA plan that becomes truly execution-ready.\n");
+  writeFileSync(join(dir, "tasks.md"), "# Tasks\n\n- [ ] one\n");
+
+  const beforeApproval = (await routes.planDetail(PROJECT, "execution-ready"))!;
+  expect(beforeApproval).not.toBeNull();
+  expect(beforeApproval.artifactsReady).toBe(true);
+  // No human verdicts recorded yet → gate is closed.
+  expect(beforeApproval.executionReady).toBe(false);
+
+  // Record a current approval for the only authored artifact (proposal).
+  // `isArtifactApproved` requires a content-bound human verdict; writing
+  // the ledger row directly is the cheapest way to simulate a dashboard
+  // approval flow without going through the full review surface.
+  db.insertPlanVerdict({
+    id: "verdict-exec-ready-proposal",
+    changeId: "execution-ready",
+    reviewer: "ui",
+    verdict: "green",
+    cwd: PROJECT,
+    createdAt: new Date().toISOString(),
+  });
+  routes.clearPlanRouteCaches();
+
+  const afterApproval = (await routes.planDetail(PROJECT, "execution-ready"))!;
+  expect(afterApproval).not.toBeNull();
+  // `artifactsReady` stays the same — it's about artifact completeness.
+  expect(afterApproval.artifactsReady).toBe(true);
+  // `executionReady` flips to true now that the only authored artifact is approved.
+  expect(afterApproval.executionReady).toBe(true);
+});
+
 test.if(OSX)("plan detail caches by artifact metadata and coalesces concurrent CLI work", async () => {
   const changeId = "cache-coalesce";
   osx(["new", "change", changeId]);

@@ -85,7 +85,14 @@ function startDashboardActionPoller(state: HiveState, ctx: ExtensionContext) {
         if (!line.trim()) continue;
         const action = JSON.parse(line);
         if (action.type === "plan_review_approved" && action.changeId) {
-          const next = action.readyToExecute
+          // Read `artifactsReady` (new name, mirrors the PlanDetail field).
+          // Fall back to `readyToExecute` for old unread action-log entries
+          // written before the rename — the action log persists on disk,
+          // and the widget's offset can skip past entries from before the
+          // upgrade, but a clean read avoids losing the "plan is ready"
+          // signal on actions queued during the deploy window.
+          const artifactsReady = action.artifactsReady ?? action.readyToExecute;
+          const next = artifactsReady
             ? `The plan-review UI approved the tasks artifact for change "${action.changeId}". The plan is validated and ready; summarize readiness and ask whether to run /hive:execute ${action.changeId}.`
             : action.nextArtifact
               ? `The plan-review UI approved the ${action.artifact || "artifact"} for change "${action.changeId}". Author the next artifact (${action.nextArtifact}) with the planning team, then submit it for review.`
