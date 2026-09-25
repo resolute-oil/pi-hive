@@ -594,7 +594,6 @@ export default function Plans(props: { search: string }) {
                       )}
                     </div>
                     <div className="plan-review-actions">
-                      {!reviewFinal && <a className="plan-review-btn" href={reviewSrc} target="_blank" rel="noreferrer" title="Open in a new tab">↗ New Tab</a>}
                       {/* Preview is redundant when the inline approved-artifact
                           panel already renders MarkdownView. Hide it once the
                           artifact is final (humanVerdict === "green"). */}
@@ -608,6 +607,7 @@ export default function Plans(props: { search: string }) {
                           👁 Preview
                         </button>
                       )}
+                      {!reviewFinal && <a className="plan-review-btn" href={reviewSrc} target="_blank" rel="noreferrer" title="Open in a new tab">↗ New Tab</a>}
                       <button type="button" className="plan-review-btn" title={fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"} onClick={() => setFullscreen((v) => !v)}>
                         {fullscreen ? "✕ Close" : "⤢ Fullscreen"}
                       </button>
