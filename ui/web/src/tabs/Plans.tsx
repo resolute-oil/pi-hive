@@ -425,7 +425,7 @@ export default function Plans(props: { search: string }) {
                 ) : (
                   <span className="plan-validation progress">in progress</span>
                 )}
-                {detail.artifactsReady && (
+                {(detail.artifactsReady ?? detail.readyToExecute) && (
                   <span
                     className={`plan-ready ${detail.executionReady ? "ready" : "pending"}`}
                     title={detail.executionReady ? "All artifacts approved — the gate is open for coder/tester dispatch." : "Artifacts are ready, but human approval is still pending."}
