@@ -6,10 +6,19 @@ import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 export const PACKAGE_BASELINES = Object.freeze({
-  packedBytes: 368_000,
-  unpackedBytes: 1_160_000,
-  reviewRawBytes: 12_625,
-  reviewCompressedBytes: 4_304,
+  // Bumped for the plan-review markdown renderer in PR #44. The dashboard
+  // switched from a regex-based MarkdownView to react-markdown + remark-gfm
+  // + rehype-highlight (10-language subset: ts/js/py/bash/json/yaml/md/xml/
+  // css/diff). Measured post-build with the new stack: ~511KB packed,
+  // ~1.62MB unpacked. reviewRawBytes / reviewCompressedBytes were already
+  // ~520B / ~185B over their old baseline (artifact drift, not a feature
+  // change) — bumped to 14_500 / 5_000 to absorb that too. If a future
+  // change pushes the build past `baseline * 1.1`, the regression check
+  // will flag it and the baseline should be re-evaluated.
+  packedBytes: 520_000,
+  unpackedBytes: 1_650_000,
+  reviewRawBytes: 14_500,
+  reviewCompressedBytes: 5_000,
 });
 export const MAX_REGRESSION_RATIO = 0.1;
 

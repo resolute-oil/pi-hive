@@ -2,7 +2,7 @@
   "use strict";
   const expectedOrigin = new URL(location.href).origin;
   const capabilityKeys = { rid: "__hive_rid", cwd: "__hive_cwd", nonce: "__hive_nonce" };
-  const els = Object.fromEntries(["artifact","status","document","selection","comment","add-comment","annotations","feedback","error","deny","approve"].map((id) => [id, document.getElementById(id)]));
+  const els = Object.fromEntries(["status","document","selection","comment","add-comment","annotations","feedback","error","deny","approve"].map((id) => [id, document.getElementById(id)]));
   let context = new URL(location.href);
 
   // Theme sync with the dashboard. The dashboard passes the active theme as
@@ -143,7 +143,10 @@
     showError("");
     setBusy(true);
     setStatus("Loading artifact…");
-    els.artifact.textContent = context.searchParams.get("rid") || "";
+    // The "artifact" element was removed from review.html in PR #44 — see
+    // ui/review/vendor.json's patches. The rid is still encoded in the URL
+    // (used by /api/plan below) but is no longer rendered in the header.
+    context.searchParams.get("rid");
     try {
       const response = await fetch(apiUrl("/api/plan"), { cache: "no-store" });
       const body = await response.json().catch(() => ({}));

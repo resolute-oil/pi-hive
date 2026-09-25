@@ -629,6 +629,75 @@
   .plan-markdown th, .plan-markdown td { @apply border border-border px-3 py-2 align-top; }
   .plan-markdown th { @apply bg-chip text-fg font-semibold; }
   .plan-markdown a { @apply text-accent underline; }
+  /* Elements react-markdown + remark-gfm produce that the old regex parser didn't. */
+  .plan-markdown hr { @apply my-6 border-0 border-t border-border; }
+  .plan-markdown del { @apply text-muted; }
+  /* Task-list checkboxes (remark-gfm emits disabled <input> inside <li>). */
+  .plan-markdown li > input[type="checkbox"] {
+    @apply align-middle mr-1.5 cursor-default;
+    appearance: none;
+    width: 13px;
+    height: 13px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--chip-bg);
+    position: relative;
+    top: -1px;
+  }
+  .plan-markdown li > input[type="checkbox"]:checked {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .plan-markdown li > input[type="checkbox"]:checked::after {
+    content: "";
+    position: absolute;
+    left: 3px;
+    top: 0;
+    width: 4px;
+    height: 8px;
+    border: solid var(--bg-panel);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
+  /* Minimal syntax-highlight palette for rehype-highlight. Covers the common
+     token types — keywords, strings, numbers, comments, function names,
+     attributes — without pulling in the full highlight.js theme CSS. */
+  .plan-markdown .hljs-keyword,
+  .plan-markdown .hljs-selector-tag,
+  .plan-markdown .hljs-built_in { color: #c586c0; }
+  .plan-markdown .hljs-string,
+  .plan-markdown .hljs-attr,
+  .plan-markdown .hljs-symbol,
+  .plan-markdown .hljs-bullet { color: #ce9178; }
+  .plan-markdown .hljs-number,
+  .plan-markdown .hljs-literal { color: #b5cea8; }
+  .plan-markdown .hljs-comment,
+  .plan-markdown .hljs-quote { color: #6a9955; font-style: italic; }
+  .plan-markdown .hljs-title,
+  .plan-markdown .hljs-section,
+  .plan-markdown .hljs-function .hljs-title { color: #dcdcaa; }
+  .plan-markdown .hljs-variable,
+  .plan-markdown .hljs-template-variable,
+  .plan-markdown .hljs-name { color: #9cdcfe; }
+  .plan-markdown .hljs-tag { color: #569cd6; }
+  :root[data-theme="light"] .plan-markdown .hljs-keyword,
+  :root[data-theme="light"] .plan-markdown .hljs-selector-tag,
+  :root[data-theme="light"] .plan-markdown .hljs-built_in { color: #af00db; }
+  :root[data-theme="light"] .plan-markdown .hljs-string,
+  :root[data-theme="light"] .plan-markdown .hljs-attr,
+  :root[data-theme="light"] .plan-markdown .hljs-symbol,
+  :root[data-theme="light"] .plan-markdown .hljs-bullet { color: #a31515; }
+  :root[data-theme="light"] .plan-markdown .hljs-number,
+  :root[data-theme="light"] .plan-markdown .hljs-literal { color: #098658; }
+  :root[data-theme="light"] .plan-markdown .hljs-comment,
+  :root[data-theme="light"] .plan-markdown .hljs-quote { color: #008000; font-style: italic; }
+  :root[data-theme="light"] .plan-markdown .hljs-title,
+  :root[data-theme="light"] .plan-markdown .hljs-section,
+  :root[data-theme="light"] .plan-markdown .hljs-function .hljs-title { color: #795e26; }
+  :root[data-theme="light"] .plan-markdown .hljs-variable,
+  :root[data-theme="light"] .plan-markdown .hljs-template-variable,
+  :root[data-theme="light"] .plan-markdown .hljs-name { color: #001080; }
+  :root[data-theme="light"] .plan-markdown .hljs-tag { color: #800000; }
   .plan-review-frame.fullscreen { @apply fixed inset-0 z-[100] rounded-none border-0; }
   .plan-review-frame.fullscreen .plan-review-iframe,
   .plan-review-frame.fullscreen .plan-review-readonly { @apply flex-1; height: auto; }

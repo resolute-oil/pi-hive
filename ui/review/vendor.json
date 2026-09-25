@@ -8,9 +8,9 @@
     "artifactSha256": "d843509878458c8f369d643c082b9cec04e30905bb6ee6c706c756443c4716e5"
   },
   "derivedSources": {
-    "review.html": "a821eb48a2e0c563f0f57bde80b594e01c5067e3ee44cb5be003ee985a10f319",
+    "review.html": "12141affc2c47bb4939851b4c947a9e1d04192006f6e86abc68ec420f827494a",
     "review.css": "e49b89aad6924cf17395262873b078832f1826b32c5379503c82f0f1e8ba2246",
-    "review.js": "d6ab5bd678e516a7a073814fa008b77d202e34914ce0390b4318ae4efb770cb1"
+    "review.js": "250066f87a3ca469c7329327b60e1759b6c332fe1a55298c170d4640e4625ae3"
   },
   "patches": [
     {
@@ -31,6 +31,16 @@
       },
       "wire": "N/A — purely visual recolor of an existing button. The button still posts `type: \"plan_review_denied\"` to the dashboard on click, identical behavior to upstream.",
       "reapply": "When bumping @plannotator/pi-extension to a newer version, check if the upstream `.deny` rule has changed (e.g., upstream might add a hover state). Reapply the per-theme color override if the structure still matches."
+    },
+    {
+      "purpose": "Remove the rid (changeId#artifactFile) text from the iframe header.",
+      "rationale": "Upstream Plannotator renders `<changeId>#<artifactFile>` next to the \"Plan artifact review\" title. The dashboard already shows the changeId in the plan-head-title above the iframe AND the artifact file name in the plan-review-bar inside the iframe — the rid in the header is redundant noise for the dashboard's UX. The rid is still encoded in the URL (used by `/api/plan` to fetch the artifact) so this is purely a visual removal.",
+      "files": {
+        "review.html": "Removed `<span id=\"artifact\"></span>` from the <header>. The \"Plan artifact review\" <strong> stays as the only header text.",
+        "review.js": "Removed `\"artifact\"` from the element lookup array. Removed the `els.artifact.textContent = context.searchParams.get(\"rid\") || \"\"` setter in load(). Added a placeholder `context.searchParams.get(\"rid\")` call so the `rid` query param is still parsed (it feeds `/api/plan` below)."
+      },
+      "wire": "N/A — purely visual. The rid URL parameter, the /api/plan fetch, and the postMessage flow are unchanged.",
+      "reapply": "When bumping @plannotator/pi-extension to a newer version, check if upstream re-introduced the artifact element. If they renamed or restructured the header, reapply by deleting the corresponding element/setter in the new source and refresh the SHA256s in derivedSources."
     }
   ]
 }
