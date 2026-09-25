@@ -1,4 +1,35 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import ReactMarkdown from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
+import bashMod from "highlight.js/lib/languages/bash";
+import cssMod from "highlight.js/lib/languages/css";
+import diffMod from "highlight.js/lib/languages/diff";
+import javascriptMod from "highlight.js/lib/languages/javascript";
+import jsonMod from "highlight.js/lib/languages/json";
+import markdownMod from "highlight.js/lib/languages/markdown";
+import pythonMod from "highlight.js/lib/languages/python";
+import typescriptMod from "highlight.js/lib/languages/typescript";
+import xmlMod from "highlight.js/lib/languages/xml";
+import yamlMod from "highlight.js/lib/languages/yaml";
+import remarkGfm from "remark-gfm";
+
+// highlight.js ships each language as CommonJS (`module.exports = fn`). ESM
+// default imports return the namespace object (`{ default: fn }`) instead of
+// the function, which lowlight's `registerLanguage` rejects at module-load
+// time with "languageDefinition is not a function". Unwrap to the function
+// once at import time so the languages object can hand functions straight to
+// rehype-highlight.
+const bash = (bashMod as { default?: unknown }).default ?? bashMod;
+const css = (cssMod as { default?: unknown }).default ?? cssMod;
+const diff = (diffMod as { default?: unknown }).default ?? diffMod;
+const javascript = (javascriptMod as { default?: unknown }).default ?? javascriptMod;
+const json = (jsonMod as { default?: unknown }).default ?? jsonMod;
+const markdownLang = (markdownMod as { default?: unknown }).default ?? markdownMod;
+const python = (pythonMod as { default?: unknown }).default ?? pythonMod;
+const typescript = (typescriptMod as { default?: unknown }).default ?? typescriptMod;
+const xml = (xmlMod as { default?: unknown }).default ?? xmlMod;
+const yaml = (yamlMod as { default?: unknown }).default ?? yamlMod;
 import {
   bootCwd, createReviewSession, fetchPlanDetail, fetchPlanFile, fetchPlans,
   type ArtifactReview, type ArtifactState, type PlanDetail, type PlanSummary,
@@ -74,103 +105,103 @@ function ArtifactChip({
   );
 }
 
-function inlineMarkdown(text: string): ReactNode[] {
-  const parts: ReactNode[] = [];
-  const re = /(\[[^\]]+\]\([^)]+\)|`[^`]+`|\*\*[^*]+\*\*)/g;
-  let last = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) {
-    if (m.index > last) parts.push(text.slice(last, m.index));
-    const token = m[0];
-    const key = `${m.index}-${token}`;
-    if (token.startsWith("`")) parts.push(<code key={key}>{token.slice(1, -1)}</code>);
-    else if (token.startsWith("**")) parts.push(<strong key={key}>{token.slice(2, -2)}</strong>);
-    else {
-      const close = token.indexOf("](");
-      const label = token.slice(1, close);
-      const href = token.slice(close + 2, -1);
-      // Artifact Markdown is untrusted. React escapes text/HTML; additionally
-      // refuse executable or local-action URL schemes in rendered links.
-      const safeHref = safeArtifactHref(href);
-      parts.push(safeHref
-        ? <a key={key} href={safeHref} target="_blank" rel="noopener noreferrer">{label}</a>
-        : <span key={key}>{label}</span>);
-    }
-    last = m.index + token.length;
-  }
-  if (last < text.length) parts.push(text.slice(last));
-  return parts;
+// Render artifact markdown through react-markdown with GitHub-Flavored
+// Markdown and highlight.js for code-block coloring. react-markdown emits
+// React elements (never dangerouslySetInnerHTML), so untrusted text is
+// escaped by React. Links still pass through safeArtifactHref to drop
+// javascript:, data:, and other executable schemes — same defense the
+// regex-based renderer used. The rehype-highlight language list is a
+// curated subset of the languages that appear in plan artifacts (TS/JS,
+// Python, Bash, JSON, YAML, Markdown, XML/HTML, CSS, diff) — using the
+// full highlight.js registry would balloon the bundle by ~150KB.
+function MarkdownView({ markdown }: { markdown: string }) {
+  return (
+    <div className="plan-markdown">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[[rehypeHighlight, { languages: { bash, css, diff, javascript, json, markdown: markdownLang, python, typescript, xml, yaml } }]]}
+        components={{
+          a: ({ href, children, ...props }) => {
+            const safe = safeArtifactHref(href ?? "");
+            return safe
+              ? <a href={safe} target="_blank" rel="noopener noreferrer" {...props}>{children}</a>
+              : <span>{children}</span>;
+          },
+        }}
+      >
+        {markdown}
+      </ReactMarkdown>
+    </div>
+  );
 }
 
-function MarkdownView({ markdown }: { markdown: string }) {
-  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
-  const nodes: ReactNode[] = [];
-  let i = 0;
-  const paragraph = (start: number) => {
-    const acc: string[] = [];
-    while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s|[-*]\s+|\d+\.\s+|>\s?|```|\|)/.test(lines[i].trim())) acc.push(lines[i++].trim());
-    nodes.push(<p key={`p-${start}`}>{inlineMarkdown(acc.join(" "))}</p>);
-  };
-  while (i < lines.length) {
-    const line = lines[i];
-    const trimmed = line.trim();
-    const key = `${i}-${trimmed.slice(0, 12)}`;
-    if (!trimmed) { i++; continue; }
-    if (trimmed.startsWith("```")) {
-      const lang = trimmed.slice(3).trim();
-      const code: string[] = [];
-      i++;
-      while (i < lines.length && !lines[i].trim().startsWith("```")) code.push(lines[i++]);
-      if (i < lines.length) i++;
-      nodes.push(<pre key={key}><code data-lang={lang || undefined}>{code.join("\n")}</code></pre>);
-      continue;
-    }
-    const heading = /^(#{1,6})\s+(.*)$/.exec(trimmed);
-    if (heading) {
-      const level = heading[1].length;
-      const children = inlineMarkdown(heading[2]);
-      nodes.push(level === 1 ? <h1 key={key}>{children}</h1> : level === 2 ? <h2 key={key}>{children}</h2> : <h3 key={key}>{children}</h3>);
-      i++;
-      continue;
-    }
-    if (/^[-*]\s+/.test(trimmed)) {
-      const items: ReactNode[] = [];
-      while (i < lines.length && /^[-*]\s+/.test(lines[i].trim())) {
-        items.push(<li key={i}>{inlineMarkdown(lines[i].trim().replace(/^[-*]\s+/, ""))}</li>);
-        i++;
-      }
-      nodes.push(<ul key={key}>{items}</ul>);
-      continue;
-    }
-    if (/^\d+\.\s+/.test(trimmed)) {
-      const items: ReactNode[] = [];
-      while (i < lines.length && /^\d+\.\s+/.test(lines[i].trim())) {
-        items.push(<li key={i}>{inlineMarkdown(lines[i].trim().replace(/^\d+\.\s+/, ""))}</li>);
-        i++;
-      }
-      nodes.push(<ol key={key}>{items}</ol>);
-      continue;
-    }
-    if (trimmed.startsWith(">")) {
-      const quote: string[] = [];
-      while (i < lines.length && lines[i].trim().startsWith(">")) quote.push(lines[i++].trim().replace(/^>\s?/, ""));
-      nodes.push(<blockquote key={key}>{inlineMarkdown(quote.join(" "))}</blockquote>);
-      continue;
-    }
-    if (trimmed.startsWith("|") && trimmed.endsWith("|")) {
-      const rows: string[][] = [];
-      while (i < lines.length && lines[i].trim().startsWith("|") && lines[i].trim().endsWith("|")) {
-        const cells = lines[i].trim().slice(1, -1).split("|").map((c) => c.trim());
-        if (!cells.every((c) => /^:?-{3,}:?$/.test(c))) rows.push(cells);
-        i++;
-      }
-      const [head, ...body] = rows;
-      nodes.push(<table key={key}><thead><tr>{(head || []).map((c, n) => <th key={n}>{inlineMarkdown(c)}</th>)}</tr></thead><tbody>{body.map((r, n) => <tr key={n}>{r.map((c, x) => <td key={x}>{inlineMarkdown(c)}</td>)}</tr>)}</tbody></table>);
-      continue;
-    }
-    paragraph(i);
-  }
-  return <div className="plan-markdown">{nodes}</div>;
+// Render an artifact's raw markdown in a fullscreen modal. Reuses MarkdownView
+// (the same renderer the inline approved-artifact panel uses), so the preview
+// is consistent with what the reviewer sees after approving. State and fetch
+// lifecycle live in the parent Plans component — this modal only renders what
+// it is given and reports close intent.
+function MarkdownPreviewModal(props: {
+  open: boolean;
+  artifactPath: string;
+  changeId: string;
+  status: "loading" | "ready" | "missing" | "error";
+  markdown: string | null;
+  errorMessage?: string | null;
+  onClose: () => void;
+}) {
+  const { open, onClose, artifactPath, changeId, status, markdown, errorMessage } = props;
+  const trapRef = useFocusTrap<HTMLDivElement>(open);
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+  if (!open) return null;
+  const titleId = `preview-title-${changeId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+  return createPortal(
+    <div className="modal-backdrop-fullscreen" onClick={onClose}>
+      <div
+        ref={trapRef}
+        className="modal-panel-fullscreen"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-line flex-none">
+          <div className="min-w-0">
+            <b id={titleId} className="text-[13px] text-ink">Markdown preview</b>
+            <span className="ml-2 mono text-ink-dim text-[12px]" title={artifactPath}>{artifactPath}</span>
+          </div>
+          <button
+            type="button"
+            className="plan-review-btn"
+            onClick={onClose}
+            aria-label="Close markdown preview"
+            title="Close (Esc)"
+          >
+            ✕ Close
+          </button>
+        </div>
+        <div className="modal-body markdown-preview-body">
+          {status === "loading" ? (
+            <div className="empty">Loading markdown…</div>
+          ) : status === "missing" ? (
+            <div className="empty">This artifact is not yet authored on disk.</div>
+          ) : status === "error" ? (
+            <div className="empty" role="alert">{errorMessage || "Unable to load artifact."}</div>
+          ) : markdown === null || markdown === "" ? (
+            <div className="empty">Artifact is empty.</div>
+          ) : (
+            <MarkdownView markdown={markdown} />
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
 }
 
 export default function Plans(props: { search: string }) {
@@ -212,6 +243,14 @@ export default function Plans(props: { search: string }) {
   const [reviewFrameReady, setReviewFrameReady] = useState(false);
   const reviewFrameRef = useRef<HTMLIFrameElement | null>(null);
   const fullscreenRef = useFocusTrap<HTMLDivElement>(fullscreen);
+  // Markdown preview modal. The preview opens lazily — the markdown is fetched
+  // only when the user clicks the button, not on every rid switch — and is
+  // cancelled if the modal closes or the artifact changes mid-fetch.
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewMarkdown, setPreviewMarkdown] = useState<string | null>(null);
+  const [previewStatus, setPreviewStatus] = useState<"loading" | "ready" | "missing" | "error">("loading");
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const previewAbort = useRef<AbortController | null>(null);
 
   // Esc exits the fullscreen review.
   useEffect(() => {
@@ -345,6 +384,54 @@ export default function Plans(props: { search: string }) {
     return () => { cancelled = true; };
   }, [artifactPath, cwd, detail, reviewFinal, rid]);
 
+  // Fetch the artifact markdown when the preview modal opens. Lazy — the
+  // button click is what triggers the request, not every rid switch — and
+  // aborted on close, artifact change, or unmount so a stale fetch cannot
+  // overwrite a fresher one. fetchPlanFile distinguishes missing (content ===
+  // null + error) from a genuinely empty artifact (content === ""), so the
+  // modal can surface both states cleanly.
+  //
+  // The deps intentionally reference `detail?.changeId` instead of `detail`.
+  // The polling effect for awaiting-human-review replaces `detail` with a
+  // fresh object reference every 3s; including `detail` here would re-trigger
+  // this effect on every poll, flipping the modal back to "Loading…" each
+  // time. `changeId` is the only string we actually read from it, so a stable
+  // identity is enough.
+  useEffect(() => {
+    previewAbort.current?.abort();
+    if (!previewOpen || !detail || !rid || !cwd) {
+      setPreviewMarkdown(null);
+      setPreviewStatus("loading");
+      setPreviewError(null);
+      return;
+    }
+    const controller = new AbortController();
+    previewAbort.current = controller;
+    setPreviewStatus("loading");
+    setPreviewError(null);
+    void fetchPlanFile(detail.changeId, artifactPath, cwd).then((file) => {
+      if (controller.signal.aborted) return;
+      if (file.error || file.content === null || file.content === undefined) {
+        setPreviewStatus("missing");
+        setPreviewMarkdown(null);
+        return;
+      }
+      setPreviewMarkdown(file.content);
+      setPreviewStatus("ready");
+    }).catch((error: unknown) => {
+      if (controller.signal.aborted) return;
+      setPreviewStatus("error");
+      setPreviewError(error instanceof Error ? error.message : "Unable to load artifact.");
+    });
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewOpen, artifactPath, cwd, rid, detail?.changeId]);
+
+  const closePreview = useCallback(() => {
+    previewAbort.current?.abort();
+    setPreviewOpen(false);
+  }, []);
+
   // The embedded review UI cannot notify this React tree after approve/deny
   // because it is a vendored iframe. Poll while the selected artifact is awaiting
   // human approval, then swap to read-only markdown only once it is approved.
@@ -468,7 +555,20 @@ export default function Plans(props: { search: string }) {
                       )}
                     </div>
                     <div className="plan-review-actions">
-                      {!reviewFinal && <a className="plan-review-btn" href={reviewSrc} target="_blank" rel="noreferrer" title="Open in a new tab">↗ New tab</a>}
+                      {/* Preview is redundant when the inline approved-artifact
+                          panel already renders MarkdownView. Hide it once the
+                          artifact is final (humanVerdict === "green"). */}
+                      {!reviewFinal && (
+                        <button
+                          type="button"
+                          className="plan-review-btn"
+                          title="Preview the rendered markdown for this artifact"
+                          onClick={() => setPreviewOpen(true)}
+                        >
+                          👁 Preview
+                        </button>
+                      )}
+                      {!reviewFinal && <a className="plan-review-btn" href={reviewSrc} target="_blank" rel="noreferrer" title="Open in a new tab">↗ New Tab</a>}
                       <button type="button" className="plan-review-btn" title={fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"} onClick={() => setFullscreen((v) => !v)}>
                         {fullscreen ? "✕ Close" : "⤢ Fullscreen"}
                       </button>
@@ -501,6 +601,15 @@ export default function Plans(props: { search: string }) {
           </>
         )}
       </div>
+      <MarkdownPreviewModal
+        open={previewOpen}
+        artifactPath={artifactPath}
+        changeId={detail?.changeId ?? ""}
+        status={previewStatus}
+        markdown={previewMarkdown}
+        errorMessage={previewError}
+        onClose={closePreview}
+      />
     </div>
   );
 }
