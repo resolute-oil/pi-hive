@@ -11,10 +11,10 @@
     "review.html": {
       "path": "review.html.gz",
       "contentType": "text/html; charset=utf-8",
-      "bytes": 1781,
-      "compressedBytes": 735,
-      "sourceSha256": "a821eb48a2e0c563f0f57bde80b594e01c5067e3ee44cb5be003ee985a10f319",
-      "sha256": "3a9f5f6b7980fb3c130c51840989da2797d0b3e8c8bd0783a7a3153c73c9cea7"
+      "bytes": 1754,
+      "compressedBytes": 728,
+      "sourceSha256": "12141affc2c47bb4939851b4c947a9e1d04192006f6e86abc68ec420f827494a",
+      "sha256": "3d9f56e1b53cf9bf4209aae66d2a8fed3f18d264aed89888b8bfe1ddf5829c55"
     },
     "review.css": {
       "path": "review.css.gz",
@@ -27,10 +27,10 @@
     "review.js": {
       "path": "review.js.gz",
       "contentType": "text/javascript; charset=utf-8",
-      "bytes": 8392,
-      "compressedBytes": 2685,
-      "sourceSha256": "d6ab5bd678e516a7a073814fa008b77d202e34914ce0390b4318ae4efb770cb1",
-      "sha256": "1b12b8d9502e89d1402e1f46359616a55635751d1033df25f6977817d953b305"
+      "bytes": 8575,
+      "compressedBytes": 2780,
+      "sourceSha256": "250066f87a3ca469c7329327b60e1759b6c332fe1a55298c170d4640e4625ae3",
+      "sha256": "88b5c904cc2a7da60387d252fc69a46f4065c61b7baf97b229b1a6b5579b1aee"
     }
   }
 }
