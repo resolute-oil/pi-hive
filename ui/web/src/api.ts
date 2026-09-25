@@ -379,7 +379,11 @@ export interface PlanDetail {
   nextReady: string | null;
   files: string[];
   validation: { passed: boolean; failed: number; issues: Array<{ level: string; path: string; message: string }> };
-  readyToExecute: boolean;
+  artifactsReady: boolean;
+  // True only when every artifact is approved AND validation passes. The
+  // green "ready to execute" pill is gated on this; `artifactsReady` alone
+  // means "artifacts are ready, awaiting human approval".
+  executionReady: boolean;
   taskProgress: Array<{ taskId: string; text: string; completed: boolean; actor?: string; evidence?: string; completedAt?: string }>;
   verdicts: PlanVerdict[];
 }

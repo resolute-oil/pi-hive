@@ -425,7 +425,14 @@ export default function Plans(props: { search: string }) {
                 ) : (
                   <span className="plan-validation progress">in progress</span>
                 )}
-                {detail.readyToExecute && <span className="plan-ready">ready to execute</span>}
+                {detail.artifactsReady && (
+                  <span
+                    className={`plan-ready ${detail.executionReady ? "ready" : "pending"}`}
+                    title={detail.executionReady ? "All artifacts approved — the gate is open for coder/tester dispatch." : "Artifacts are ready, but human approval is still pending."}
+                  >
+                    ready to execute
+                  </span>
+                )}
                 {detail.taskProgress.length > 0 && (
                   <span className="plan-tasks">
                     {detail.taskProgress.filter((task) => task.completed).length}/{detail.taskProgress.length} execution tasks recorded
