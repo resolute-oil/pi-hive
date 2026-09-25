@@ -1,5 +1,35 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import ReactMarkdown from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
+import bashMod from "highlight.js/lib/languages/bash";
+import cssMod from "highlight.js/lib/languages/css";
+import diffMod from "highlight.js/lib/languages/diff";
+import javascriptMod from "highlight.js/lib/languages/javascript";
+import jsonMod from "highlight.js/lib/languages/json";
+import markdownMod from "highlight.js/lib/languages/markdown";
+import pythonMod from "highlight.js/lib/languages/python";
+import typescriptMod from "highlight.js/lib/languages/typescript";
+import xmlMod from "highlight.js/lib/languages/xml";
+import yamlMod from "highlight.js/lib/languages/yaml";
+import remarkGfm from "remark-gfm";
+
+// highlight.js ships each language as CommonJS (`module.exports = fn`). ESM
+// default imports return the namespace object (`{ default: fn }`) instead of
+// the function, which lowlight's `registerLanguage` rejects at module-load
+// time with "languageDefinition is not a function". Unwrap to the function
+// once at import time so the languages object can hand functions straight to
+// rehype-highlight.
+const bash = (bashMod as { default?: unknown }).default ?? bashMod;
+const css = (cssMod as { default?: unknown }).default ?? cssMod;
+const diff = (diffMod as { default?: unknown }).default ?? diffMod;
+const javascript = (javascriptMod as { default?: unknown }).default ?? javascriptMod;
+const json = (jsonMod as { default?: unknown }).default ?? jsonMod;
+const markdownLang = (markdownMod as { default?: unknown }).default ?? markdownMod;
+const python = (pythonMod as { default?: unknown }).default ?? pythonMod;
+const typescript = (typescriptMod as { default?: unknown }).default ?? typescriptMod;
+const xml = (xmlMod as { default?: unknown }).default ?? xmlMod;
+const yaml = (yamlMod as { default?: unknown }).default ?? yamlMod;
 import {
   bootCwd, createReviewSession, fetchPlanDetail, fetchPlanFile, fetchPlans,
   type ArtifactReview, type ArtifactState, type PlanDetail, type PlanSummary,
@@ -75,103 +105,34 @@ function ArtifactChip({
   );
 }
 
-function inlineMarkdown(text: string): ReactNode[] {
-  const parts: ReactNode[] = [];
-  const re = /(\[[^\]]+\]\([^)]+\)|`[^`]+`|\*\*[^*]+\*\*)/g;
-  let last = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) {
-    if (m.index > last) parts.push(text.slice(last, m.index));
-    const token = m[0];
-    const key = `${m.index}-${token}`;
-    if (token.startsWith("`")) parts.push(<code key={key}>{token.slice(1, -1)}</code>);
-    else if (token.startsWith("**")) parts.push(<strong key={key}>{token.slice(2, -2)}</strong>);
-    else {
-      const close = token.indexOf("](");
-      const label = token.slice(1, close);
-      const href = token.slice(close + 2, -1);
-      // Artifact Markdown is untrusted. React escapes text/HTML; additionally
-      // refuse executable or local-action URL schemes in rendered links.
-      const safeHref = safeArtifactHref(href);
-      parts.push(safeHref
-        ? <a key={key} href={safeHref} target="_blank" rel="noopener noreferrer">{label}</a>
-        : <span key={key}>{label}</span>);
-    }
-    last = m.index + token.length;
-  }
-  if (last < text.length) parts.push(text.slice(last));
-  return parts;
-}
-
+// Render artifact markdown through react-markdown with GitHub-Flavored
+// Markdown and highlight.js for code-block coloring. react-markdown emits
+// React elements (never dangerouslySetInnerHTML), so untrusted text is
+// escaped by React. Links still pass through safeArtifactHref to drop
+// javascript:, data:, and other executable schemes — same defense the
+// regex-based renderer used. The rehype-highlight language list is a
+// curated subset of the languages that appear in plan artifacts (TS/JS,
+// Python, Bash, JSON, YAML, Markdown, XML/HTML, CSS, diff) — using the
+// full highlight.js registry would balloon the bundle by ~150KB.
 function MarkdownView({ markdown }: { markdown: string }) {
-  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
-  const nodes: ReactNode[] = [];
-  let i = 0;
-  const paragraph = (start: number) => {
-    const acc: string[] = [];
-    while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s|[-*]\s+|\d+\.\s+|>\s?|```|\|)/.test(lines[i].trim())) acc.push(lines[i++].trim());
-    nodes.push(<p key={`p-${start}`}>{inlineMarkdown(acc.join(" "))}</p>);
-  };
-  while (i < lines.length) {
-    const line = lines[i];
-    const trimmed = line.trim();
-    const key = `${i}-${trimmed.slice(0, 12)}`;
-    if (!trimmed) { i++; continue; }
-    if (trimmed.startsWith("```")) {
-      const lang = trimmed.slice(3).trim();
-      const code: string[] = [];
-      i++;
-      while (i < lines.length && !lines[i].trim().startsWith("```")) code.push(lines[i++]);
-      if (i < lines.length) i++;
-      nodes.push(<pre key={key}><code data-lang={lang || undefined}>{code.join("\n")}</code></pre>);
-      continue;
-    }
-    const heading = /^(#{1,6})\s+(.*)$/.exec(trimmed);
-    if (heading) {
-      const level = heading[1].length;
-      const children = inlineMarkdown(heading[2]);
-      nodes.push(level === 1 ? <h1 key={key}>{children}</h1> : level === 2 ? <h2 key={key}>{children}</h2> : <h3 key={key}>{children}</h3>);
-      i++;
-      continue;
-    }
-    if (/^[-*]\s+/.test(trimmed)) {
-      const items: ReactNode[] = [];
-      while (i < lines.length && /^[-*]\s+/.test(lines[i].trim())) {
-        items.push(<li key={i}>{inlineMarkdown(lines[i].trim().replace(/^[-*]\s+/, ""))}</li>);
-        i++;
-      }
-      nodes.push(<ul key={key}>{items}</ul>);
-      continue;
-    }
-    if (/^\d+\.\s+/.test(trimmed)) {
-      const items: ReactNode[] = [];
-      while (i < lines.length && /^\d+\.\s+/.test(lines[i].trim())) {
-        items.push(<li key={i}>{inlineMarkdown(lines[i].trim().replace(/^\d+\.\s+/, ""))}</li>);
-        i++;
-      }
-      nodes.push(<ol key={key}>{items}</ol>);
-      continue;
-    }
-    if (trimmed.startsWith(">")) {
-      const quote: string[] = [];
-      while (i < lines.length && lines[i].trim().startsWith(">")) quote.push(lines[i++].trim().replace(/^>\s?/, ""));
-      nodes.push(<blockquote key={key}>{inlineMarkdown(quote.join(" "))}</blockquote>);
-      continue;
-    }
-    if (trimmed.startsWith("|") && trimmed.endsWith("|")) {
-      const rows: string[][] = [];
-      while (i < lines.length && lines[i].trim().startsWith("|") && lines[i].trim().endsWith("|")) {
-        const cells = lines[i].trim().slice(1, -1).split("|").map((c) => c.trim());
-        if (!cells.every((c) => /^:?-{3,}:?$/.test(c))) rows.push(cells);
-        i++;
-      }
-      const [head, ...body] = rows;
-      nodes.push(<table key={key}><thead><tr>{(head || []).map((c, n) => <th key={n}>{inlineMarkdown(c)}</th>)}</tr></thead><tbody>{body.map((r, n) => <tr key={n}>{r.map((c, x) => <td key={x}>{inlineMarkdown(c)}</td>)}</tr>)}</tbody></table>);
-      continue;
-    }
-    paragraph(i);
-  }
-  return <div className="plan-markdown">{nodes}</div>;
+  return (
+    <div className="plan-markdown">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[[rehypeHighlight, { languages: { bash, css, diff, javascript, json, markdown: markdownLang, python, typescript, xml, yaml } }]]}
+        components={{
+          a: ({ href, children, ...props }) => {
+            const safe = safeArtifactHref(href ?? "");
+            return safe
+              ? <a href={safe} target="_blank" rel="noopener noreferrer" {...props}>{children}</a>
+              : <span>{children}</span>;
+          },
+        }}
+      >
+        {markdown}
+      </ReactMarkdown>
+    </div>
+  );
 }
 
 // Render an artifact's raw markdown in a fullscreen modal. Reuses MarkdownView
