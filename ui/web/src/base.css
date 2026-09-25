@@ -572,6 +572,10 @@
   .plan-validation.fail { @apply text-crit; background: var(--crit-soft); }
   .plan-validation.progress { @apply text-warn bg-warn-soft; }
   .plan-ready { @apply text-[11px] font-bold uppercase tracking-[.4px] px-2 py-0.5 rounded-full text-ok bg-ok-soft; }
+  /* Pending-approval state: artifacts are ready and validation passes, but a
+     human hasn't signed off on every artifact yet. Stay neutral (gray) so
+     the green pill only appears at the truly execution-ready gate. */
+  .plan-ready.pending { @apply text-muted bg-chip; }
   .plan-artifacts { @apply flex items-center gap-1.5 mt-3.5 flex-wrap; }
   .plan-artifact { @apply flex items-center gap-1.5 text-[11.5px] px-2.5 py-1 rounded-lg border border-border bg-chip text-fg2 cursor-pointer transition-all duration-[.12s]; font: inherit; }
   .plan-artifact:hover { @apply bg-hover text-fg; }
