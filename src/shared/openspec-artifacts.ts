@@ -23,7 +23,7 @@ export const OPENSPEC_ARTIFACTS = [
   },
   {
     id: "specs",
-    displayLabel: "Specification deltas",
+    displayLabel: "Specification Deltas",
     outputPath: "specs/**/*.md",
     dependencies: ["proposal"],
     plannerStage: "specs",

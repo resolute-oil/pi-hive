@@ -19,10 +19,10 @@
     "review.css": {
       "path": "review.css.gz",
       "contentType": "text/css; charset=utf-8",
-      "bytes": 4192,
-      "compressedBytes": 1486,
-      "sourceSha256": "0770266d7d43b70f2adf91e7d3cfc0c861a0959faf42012e26b8e94a7652a086",
-      "sha256": "01bcf5bd614caf5d4ebfc98c1893751ec3a41af6111308ec9b1543a95de4071b"
+      "bytes": 4236,
+      "compressedBytes": 1500,
+      "sourceSha256": "e49b89aad6924cf17395262873b078832f1826b32c5379503c82f0f1e8ba2246",
+      "sha256": "fcb852ab12f049d9b87832b8f6c48a2473cf7051594752ce23ec6be308f69d4e"
     },
     "review.js": {
       "path": "review.js.gz",
