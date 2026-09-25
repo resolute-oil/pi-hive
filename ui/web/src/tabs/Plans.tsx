@@ -429,6 +429,13 @@ export default function Plans(props: { search: string }) {
   // overwrite a fresher one. fetchPlanFile distinguishes missing (content ===
   // null + error) from a genuinely empty artifact (content === ""), so the
   // modal can surface both states cleanly.
+  //
+  // The deps intentionally reference `detail?.changeId` instead of `detail`.
+  // The polling effect for awaiting-human-review replaces `detail` with a
+  // fresh object reference every 3s; including `detail` here would re-trigger
+  // this effect on every poll, flipping the modal back to "Loading…" each
+  // time. `changeId` is the only string we actually read from it, so a stable
+  // identity is enough.
   useEffect(() => {
     previewAbort.current?.abort();
     if (!previewOpen || !detail || !rid || !cwd) {
@@ -456,7 +463,8 @@ export default function Plans(props: { search: string }) {
       setPreviewError(error instanceof Error ? error.message : "Unable to load artifact.");
     });
     return () => controller.abort();
-  }, [previewOpen, artifactPath, cwd, detail, rid]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewOpen, artifactPath, cwd, rid, detail?.changeId]);
 
   const closePreview = useCallback(() => {
     previewAbort.current?.abort();
@@ -587,14 +595,19 @@ export default function Plans(props: { search: string }) {
                     </div>
                     <div className="plan-review-actions">
                       {!reviewFinal && <a className="plan-review-btn" href={reviewSrc} target="_blank" rel="noreferrer" title="Open in a new tab">↗ New tab</a>}
-                      <button
-                        type="button"
-                        className="plan-review-btn"
-                        title="Preview the rendered markdown for this artifact"
-                        onClick={() => setPreviewOpen(true)}
-                      >
-                        👁 Preview Markdown
-                      </button>
+                      {/* Preview is redundant when the inline approved-artifact
+                          panel already renders MarkdownView. Hide it once the
+                          artifact is final (humanVerdict === "green"). */}
+                      {!reviewFinal && (
+                        <button
+                          type="button"
+                          className="plan-review-btn"
+                          title="Preview the rendered markdown for this artifact"
+                          onClick={() => setPreviewOpen(true)}
+                        >
+                          👁 Preview Markdown
+                        </button>
+                      )}
                       <button type="button" className="plan-review-btn" title={fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"} onClick={() => setFullscreen((v) => !v)}>
                         {fullscreen ? "✕ Close" : "⤢ Fullscreen"}
                       </button>

@@ -142,4 +142,31 @@ describe("Plans preview markdown button", () => {
     const dialog = await screen.findByRole("dialog", { name: /Markdown preview/i });
     await waitFor(() => expect(dialog.textContent).toContain("not yet authored"));
   });
+
+  it("hides the preview button when the artifact is already approved", async () => {
+    const user = userEvent.setup();
+    // The inline approved-artifact panel also reads the file, so the fetch
+    // has to resolve (with any markdown) — otherwise the readOnlyMarkdown
+    // effect throws before the bar renders.
+    mocks.fetchPlanFile.mockResolvedValue({ content: SAMPLE_MARKDOWN, size: SAMPLE_MARKDOWN.length });
+    mocks.fetchPlanDetail.mockResolvedValue({
+      changeId: "demo-change",
+      files: ["proposal.md", "design.md"],
+      artifacts: [
+        { id: "proposal", status: "done", displayLabel: "Proposal", outputPath: "proposal.md" },
+        { id: "design", status: "ready", displayLabel: "Design", outputPath: "design.md" },
+      ],
+      artifactReview: [{ id: "proposal", humanVerdict: "green", humanReviewReady: true }],
+      validation: { passed: true, failed: 0, issues: [] },
+      taskProgress: [],
+      readyToExecute: true,
+    });
+    render(<Plans search="" />);
+    await user.click(await screen.findByRole("button", { name: DEMO_ROW }));
+    // The approved inline panel renders the markdown already; the modal
+    // would be redundant. The Preview Markdown button should be gone.
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Preview Markdown/i })).toBeNull());
+    // Fullscreen remains available in all review states.
+    expect(screen.getByRole("button", { name: /Fullscreen/i })).toBeInTheDocument();
+  });
 });
