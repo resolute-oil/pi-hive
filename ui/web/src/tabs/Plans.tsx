@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import {
   bootCwd, createReviewSession, fetchPlanDetail, fetchPlanFile, fetchPlans,
   type ArtifactReview, type ArtifactState, type PlanDetail, type PlanSummary,
@@ -173,6 +174,75 @@ function MarkdownView({ markdown }: { markdown: string }) {
   return <div className="plan-markdown">{nodes}</div>;
 }
 
+// Render an artifact's raw markdown in a fullscreen modal. Reuses MarkdownView
+// (the same renderer the inline approved-artifact panel uses), so the preview
+// is consistent with what the reviewer sees after approving. State and fetch
+// lifecycle live in the parent Plans component — this modal only renders what
+// it is given and reports close intent.
+function MarkdownPreviewModal(props: {
+  open: boolean;
+  artifactPath: string;
+  changeId: string;
+  status: "loading" | "ready" | "missing" | "error";
+  markdown: string | null;
+  errorMessage?: string | null;
+  onClose: () => void;
+}) {
+  const { open, onClose, artifactPath, changeId, status, markdown, errorMessage } = props;
+  const trapRef = useFocusTrap<HTMLDivElement>(open);
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+  if (!open) return null;
+  const titleId = `preview-title-${changeId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+  return createPortal(
+    <div className="modal-backdrop-fullscreen" onClick={onClose}>
+      <div
+        ref={trapRef}
+        className="modal-panel-fullscreen"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-line flex-none">
+          <div className="min-w-0">
+            <b id={titleId} className="text-[13px] text-ink">Markdown preview</b>
+            <span className="ml-2 mono text-ink-dim text-[12px]" title={artifactPath}>{artifactPath}</span>
+          </div>
+          <button
+            type="button"
+            className="plan-review-btn"
+            onClick={onClose}
+            aria-label="Close markdown preview"
+            title="Close (Esc)"
+          >
+            ✕ Close
+          </button>
+        </div>
+        <div className="modal-body markdown-preview-body">
+          {status === "loading" ? (
+            <div className="empty">Loading markdown…</div>
+          ) : status === "missing" ? (
+            <div className="empty">This artifact is not yet authored on disk.</div>
+          ) : status === "error" ? (
+            <div className="empty" role="alert">{errorMessage || "Unable to load artifact."}</div>
+          ) : markdown === null || markdown === "" ? (
+            <div className="empty">Artifact is empty.</div>
+          ) : (
+            <MarkdownView markdown={markdown} />
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
 export default function Plans(props: { search: string }) {
   // The plan store is a per-project OpenSpec tree. Prefer the cwd of the session
   // in scope, but the dashboard is GLOBAL and its "current session" may belong to
@@ -212,6 +282,14 @@ export default function Plans(props: { search: string }) {
   const [reviewFrameReady, setReviewFrameReady] = useState(false);
   const reviewFrameRef = useRef<HTMLIFrameElement | null>(null);
   const fullscreenRef = useFocusTrap<HTMLDivElement>(fullscreen);
+  // Markdown preview modal. The preview opens lazily — the markdown is fetched
+  // only when the user clicks the button, not on every rid switch — and is
+  // cancelled if the modal closes or the artifact changes mid-fetch.
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewMarkdown, setPreviewMarkdown] = useState<string | null>(null);
+  const [previewStatus, setPreviewStatus] = useState<"loading" | "ready" | "missing" | "error">("loading");
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const previewAbort = useRef<AbortController | null>(null);
 
   // Esc exits the fullscreen review.
   useEffect(() => {
@@ -345,6 +423,46 @@ export default function Plans(props: { search: string }) {
     return () => { cancelled = true; };
   }, [artifactPath, cwd, detail, reviewFinal, rid]);
 
+  // Fetch the artifact markdown when the preview modal opens. Lazy — the
+  // button click is what triggers the request, not every rid switch — and
+  // aborted on close, artifact change, or unmount so a stale fetch cannot
+  // overwrite a fresher one. fetchPlanFile distinguishes missing (content ===
+  // null + error) from a genuinely empty artifact (content === ""), so the
+  // modal can surface both states cleanly.
+  useEffect(() => {
+    previewAbort.current?.abort();
+    if (!previewOpen || !detail || !rid || !cwd) {
+      setPreviewMarkdown(null);
+      setPreviewStatus("loading");
+      setPreviewError(null);
+      return;
+    }
+    const controller = new AbortController();
+    previewAbort.current = controller;
+    setPreviewStatus("loading");
+    setPreviewError(null);
+    void fetchPlanFile(detail.changeId, artifactPath, cwd).then((file) => {
+      if (controller.signal.aborted) return;
+      if (file.error || file.content === null || file.content === undefined) {
+        setPreviewStatus("missing");
+        setPreviewMarkdown(null);
+        return;
+      }
+      setPreviewMarkdown(file.content);
+      setPreviewStatus("ready");
+    }).catch((error: unknown) => {
+      if (controller.signal.aborted) return;
+      setPreviewStatus("error");
+      setPreviewError(error instanceof Error ? error.message : "Unable to load artifact.");
+    });
+    return () => controller.abort();
+  }, [previewOpen, artifactPath, cwd, detail, rid]);
+
+  const closePreview = useCallback(() => {
+    previewAbort.current?.abort();
+    setPreviewOpen(false);
+  }, []);
+
   // The embedded review UI cannot notify this React tree after approve/deny
   // because it is a vendored iframe. Poll while the selected artifact is awaiting
   // human approval, then swap to read-only markdown only once it is approved.
@@ -469,6 +587,14 @@ export default function Plans(props: { search: string }) {
                     </div>
                     <div className="plan-review-actions">
                       {!reviewFinal && <a className="plan-review-btn" href={reviewSrc} target="_blank" rel="noreferrer" title="Open in a new tab">↗ New tab</a>}
+                      <button
+                        type="button"
+                        className="plan-review-btn"
+                        title="Preview the rendered markdown for this artifact"
+                        onClick={() => setPreviewOpen(true)}
+                      >
+                        👁 Preview Markdown
+                      </button>
                       <button type="button" className="plan-review-btn" title={fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"} onClick={() => setFullscreen((v) => !v)}>
                         {fullscreen ? "✕ Close" : "⤢ Fullscreen"}
                       </button>
@@ -501,6 +627,15 @@ export default function Plans(props: { search: string }) {
           </>
         )}
       </div>
+      <MarkdownPreviewModal
+        open={previewOpen}
+        artifactPath={artifactPath}
+        changeId={detail?.changeId ?? ""}
+        status={previewStatus}
+        markdown={previewMarkdown}
+        errorMessage={previewError}
+        onClose={closePreview}
+      />
     </div>
   );
 }
