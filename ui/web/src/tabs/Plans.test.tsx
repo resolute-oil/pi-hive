@@ -107,7 +107,7 @@ describe("Plans preview markdown button", () => {
     const user = userEvent.setup();
     render(<Plans search="" />);
     await user.click(await screen.findByRole("button", { name: DEMO_ROW }));
-    expect(await screen.findByRole("button", { name: /Preview Markdown/i })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /Preview/i })).toBeInTheDocument();
   });
 
   it("opens the modal with the rendered markdown when the preview button is clicked", async () => {
@@ -115,7 +115,7 @@ describe("Plans preview markdown button", () => {
     mocks.fetchPlanFile.mockResolvedValue({ content: SAMPLE_MARKDOWN, size: SAMPLE_MARKDOWN.length });
     render(<Plans search="" />);
     await user.click(await screen.findByRole("button", { name: DEMO_ROW }));
-    await user.click(await screen.findByRole("button", { name: /Preview Markdown/i }));
+    await user.click(await screen.findByRole("button", { name: /Preview/i }));
     const dialog = await screen.findByRole("dialog", { name: /Markdown preview/i });
     await waitFor(() => expect(mocks.fetchPlanFile).toHaveBeenCalledWith("demo-change", "proposal.md", "/test/project"));
     await waitFor(() => expect(dialog.querySelector("h1")?.textContent).toBe("Demo change"));
@@ -127,7 +127,7 @@ describe("Plans preview markdown button", () => {
     mocks.fetchPlanFile.mockResolvedValue({ content: SAMPLE_MARKDOWN, size: SAMPLE_MARKDOWN.length });
     render(<Plans search="" />);
     await user.click(await screen.findByRole("button", { name: DEMO_ROW }));
-    await user.click(await screen.findByRole("button", { name: /Preview Markdown/i }));
+    await user.click(await screen.findByRole("button", { name: /Preview/i }));
     await screen.findByRole("dialog", { name: /Markdown preview/i });
     await user.click(screen.getByRole("button", { name: /Close markdown preview/i }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: /Markdown preview/i })).toBeNull());
@@ -138,7 +138,7 @@ describe("Plans preview markdown button", () => {
     mocks.fetchPlanFile.mockResolvedValue({ content: null, error: true });
     render(<Plans search="" />);
     await user.click(await screen.findByRole("button", { name: DEMO_ROW }));
-    await user.click(await screen.findByRole("button", { name: /Preview Markdown/i }));
+    await user.click(await screen.findByRole("button", { name: /Preview/i }));
     const dialog = await screen.findByRole("dialog", { name: /Markdown preview/i });
     await waitFor(() => expect(dialog.textContent).toContain("not yet authored"));
   });
@@ -164,8 +164,8 @@ describe("Plans preview markdown button", () => {
     render(<Plans search="" />);
     await user.click(await screen.findByRole("button", { name: DEMO_ROW }));
     // The approved inline panel renders the markdown already; the modal
-    // would be redundant. The Preview Markdown button should be gone.
-    await waitFor(() => expect(screen.queryByRole("button", { name: /Preview Markdown/i })).toBeNull());
+    // would be redundant. The Preview button should be gone.
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Preview/i })).toBeNull());
     // Fullscreen remains available in all review states.
     expect(screen.getByRole("button", { name: /Fullscreen/i })).toBeInTheDocument();
   });
