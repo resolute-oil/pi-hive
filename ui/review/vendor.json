@@ -9,7 +9,7 @@
   },
   "derivedSources": {
     "review.html": "a821eb48a2e0c563f0f57bde80b594e01c5067e3ee44cb5be003ee985a10f319",
-    "review.css": "0770266d7d43b70f2adf91e7d3cfc0c861a0959faf42012e26b8e94a7652a086",
+    "review.css": "e49b89aad6924cf17395262873b078832f1826b32c5379503c82f0f1e8ba2246",
     "review.js": "d6ab5bd678e516a7a073814fa008b77d202e34914ce0390b4318ae4efb770cb1"
   },
   "patches": [
@@ -22,6 +22,15 @@
       },
       "wire": "Dashboard passes ?theme=<dark|light> on the initial /pl-review/ URL via the server's POST /review-sessions body, and pushes {type: \"pi-hive-theme\", theme} postMessages to a mounted iframe on every theme toggle.",
       "reapply": "When bumping @plannotator/pi-extension to a newer version, reapply the theme patch against the new source and refresh the SHA256s in derivedSources. Review the diff for merge conflicts; the patch is small and isolated."
+    },
+    {
+      "purpose": "Recolor the .deny (Request changes) button from red to blue in both themes.",
+      "rationale": "The vendored Plannotator styles .deny with `color: var(--bad)` (a saturated red), which reads as a destructive action — \"Request changes\" is feedback signaling, not deletion. Red implied something would be lost. Blue is a deliberate-attention color that distinguishes the request-changes intent from approve (green) without alarming the reviewer.",
+      "files": {
+        "review.css": "Changed `.deny{color:var(--bad)}` to `.deny{color:#6ea8fe}` for dark mode and added `:root[data-theme=\"light\"] .deny{color:#2563eb}` for light mode. No background/border change — kept the secondary-button treatment."
+      },
+      "wire": "N/A — purely visual recolor of an existing button. The button still posts `type: \"plan_review_denied\"` to the dashboard on click, identical behavior to upstream.",
+      "reapply": "When bumping @plannotator/pi-extension to a newer version, check if the upstream `.deny` rule has changed (e.g., upstream might add a hover state). Reapply the per-theme color override if the structure still matches."
     }
   ]
 }
