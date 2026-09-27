@@ -72,6 +72,27 @@ test("workOf prefers lastWork and trims", () => {
   assert.equal(workOf(runtime({})), "");
 });
 
+// Regression: a multi-line work string would render as 2+ visual lines in
+// the TUI Text component (which splits on \n) and balloon the panel beyond
+// MAX_AGENTS_IN_PANEL. workOf must collapse all whitespace to single spaces
+// so each agent row is one line.
+test("workOf collapses newlines and runs of whitespace to a single line", () => {
+  assert.equal(
+    workOf(runtime({ task: "Phase B — TDD smoke\n\nWorktree: /tmp/foo\nBranch: feature/x" })),
+    "Phase B — TDD smoke Worktree: /tmp/foo Branch: feature/x",
+  );
+  assert.equal(
+    workOf(runtime({ lastWork: "tool: read\narg path: /tmp/file.txt" })),
+    "tool: read arg path: /tmp/file.txt",
+  );
+  assert.equal(workOf(runtime({ task: "single   spaced   task" })), "single spaced task");
+  // lastWork still wins over task when both are present.
+  assert.equal(
+    workOf(runtime({ lastWork: "running", task: "multi\nline\ntask" })),
+    "running",
+  );
+});
+
 test("renderAgentRow fits within the requested visible width", () => {
   const rt = runtime({ status: "running", elapsedMs: 52_000, toolCount: 13, lastWork: "Quick read-only inspection" });
   const line = renderAgentRow(rt, 100, theme());
