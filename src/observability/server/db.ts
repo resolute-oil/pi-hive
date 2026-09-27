@@ -1635,19 +1635,26 @@ export function latestVerdict(changeId: string, cwd?: string): PlanVerdictRow | 
   return row ? verdictRow(row) : null;
 }
 
-// Latest verdict the dashboard row pill should surface, hiding a human "ui"
-// green approval. Rationale: once a human approves green via the review UI,
-// older automated yellow/red concerns are superseded for gate purposes (see
-// currentHumanRecord's verdict check in openspec-approvals.ts), and surfacing
-// them on the row pill reads as a status warning when the gate is actually
-// open. If a later automated verdict (yellow/red) lands AFTER the human
-// approval, it is the latest row and falls through this filter — only verdicts
-// that are themselves human-green are hidden. Returns null only when the
-// latest row is a human "ui" green.
+// Latest verdict the dashboard row pill should surface, or null when the plan
+// has a human "ui" green approval on record. The pill is meant to surface
+// reviewer concerns; once a human has signed off on the change, there are no
+// concerns for the pill to surface — the human approval IS the resolution.
+// This is true even if a later automated yellow/red re-review lands AFTER the
+// human approval: the user has already acted on the plan, the gate is open,
+// and re-surfacing the re-review's verdict on the row reads as a status
+// warning on an approved-and-underway plan (which is what the smoke test for
+// `smoke-test-engineering-lead-agent-end-to-end` exposed after PR #47 left
+// the gate open across re-reviews). The full verdict history is still
+// available in the detail view via `listVerdicts`; the row pill is only for
+// surfacing unaddressed concerns.
+//
+// Returns null iff at least one `reviewer = "ui"` `verdict = "green"` row
+// exists for the change; otherwise returns the most recent verdict (could
+// be automated green, yellow, or red, or a non-`ui` reviewer's verdict).
 export function latestVerdictExcludingHumanGreen(changeId: string, cwd?: string): PlanVerdictRow | null {
-  const latest = latestVerdict(changeId, cwd);
-  if (latest && latest.reviewer === "ui" && latest.verdict === "green") return null;
-  return latest;
+  const all = listVerdicts(changeId, cwd);
+  if (all.some((v) => v.reviewer === "ui" && v.verdict === "green")) return null;
+  return all.length > 0 ? all[all.length - 1] : null;
 }
 
 export interface PlanApprovalRow {
