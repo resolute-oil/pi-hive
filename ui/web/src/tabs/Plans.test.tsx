@@ -216,12 +216,46 @@ describe("Plans URL sync (?selected=<change-id>)", () => {
     expect(window.location.search).toContain("selected=demo-change");
   });
 
-  it("preselects the plan named in the URL on mount", async () => {
+  it("preselects the plan named in the URL on mount and fetches its detail", async () => {
+    // Regression for the smoke-test symptom: visiting `/plans?selected=X`
+    // and reloading left the detail panel stuck at "Loading OpenSpec
+    // change…" because useUrlPlanSelection initialized `selected` from the
+    // URL but no fetch was triggered on mount. The fix is a useEffect that
+    // calls selectPlan whenever `selected` is non-null — verified here by
+    // asserting that fetchPlanDetail was called AND the artifact panel
+    // renders content (the artifact display labels, not just the row being
+    // highlighted).
     window.history.replaceState(null, "", "/plans?selected=demo-change");
     render(<Plans search="" />);
     const row = await screen.findByRole("button", { name: DEMO_ROW });
-    // The selected row carries aria-pressed="true" (see plan-row render).
     expect(row.getAttribute("aria-pressed")).toBe("true");
+    await waitFor(() => expect(mocks.fetchPlanDetail).toHaveBeenCalledWith("demo-change", "/test/project", expect.anything()));
+    // The fixture has proposal (done) and design (ready) as artifacts.
+    // Proposal renders as an authored-artifact chip; design renders as the
+    // "up next" hint. Both are signals that the detail panel resolved —
+    // before the fix, neither rendered because detail stayed null and the
+    // panel showed "Loading OpenSpec change…".
+    await screen.findByText("Proposal");
+    await screen.findByText(/up next: Design/);
+    expect(screen.queryByText(/Loading OpenSpec change/i)).toBeNull();
+  });
+
+  it("fetches the detail after popstate changes the URL to a new ?selected", async () => {
+    // The back/forward path: useUrlPlanSelection's popstate listener updates
+    // `selected` from the URL, and the new useEffect on `selected` triggers
+    // the fetch. Fixture has only one plan, so we simulate a "back to no
+    // selection" then "forward to a selection" by manipulating the URL and
+    // dispatching popstate. The detail fetch must fire on the forward step.
+    window.history.replaceState(null, "", "/plans");
+    render(<Plans search="" />);
+    expect(mocks.fetchPlanDetail).not.toHaveBeenCalled();
+    // Forward to ?selected=demo-change via simulated popstate.
+    window.history.replaceState(null, "", "/plans?selected=demo-change");
+    act(() => {
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await waitFor(() => expect(mocks.fetchPlanDetail).toHaveBeenCalledWith("demo-change", "/test/project", expect.anything()));
+    await screen.findByText("Proposal");
   });
 
   it("restores prior selection when the user navigates back via popstate", async () => {
