@@ -36,14 +36,18 @@ test("plan_verdicts persists red/yellow/green and latestVerdict returns the newe
   expect(c2?.blockers).toEqual(["authz"]);
 });
 
-test("latestVerdictExcludingHumanGreen skips human 'ui' green verdicts; later automated verdicts still surface", () => {
-  // The row-pill filter (see plan-routes.ts:listPlans). When a human approves
-  // green via the dashboard, the row pill should hide the older automated
-  // concerns — but a LATER automated yellow/red (re-review after approval)
-  // must still come through, because ORDER BY created_at DESC + the filter
-  // combine to skip only verdicts that are themselves (ui, green).
+test("latestVerdictExcludingHumanGreen hides the pill whenever any human 'ui' green exists", () => {
+  // The row-pill filter (see plan-routes.ts:listPlans). Once a human has
+  // approved green for the change, the pill has no unaddressed concerns to
+  // surface — even if a LATER automated yellow/red re-review lands, the
+  // human approval is the resolution. This was the bug exposed after PR
+  // #47: the smoke test's `smoke-test-engineering-lead-agent-end-to-end`
+  // change was approved, an automated re-review returned yellow afterwards,
+  // and the row pill kept showing YELLOW on a plan that was approved and
+  // actively executing. The user explicitly does not want that word on the
+  // row when the plan is approved.
 
-  // Case 1: only automated verdicts — pill surfaces latest.
+  // Case 1: no human approval, only automated verdicts — pill surfaces latest.
   db.insertPlanVerdict({ id: "n1", changeId: "no-human", reviewer: "Plan Reviewer", verdict: "yellow", summary: "concerns", createdAt: "2026-08-01T10:00:00.000Z" });
   db.insertPlanVerdict({ id: "n2", changeId: "no-human", reviewer: "Plan Reviewer", verdict: "red", summary: "blocking", createdAt: "2026-08-01T11:00:00.000Z" });
   expect(db.latestVerdictExcludingHumanGreen("no-human")?.verdict).toBe("red");
@@ -54,17 +58,26 @@ test("latestVerdictExcludingHumanGreen skips human 'ui' green verdicts; later au
   db.insertPlanVerdict({ id: "h2", changeId: "human-approved", reviewer: "ui", verdict: "green", summary: "looks good", createdAt: "2026-08-02T11:00:00.000Z" });
   expect(db.latestVerdictExcludingHumanGreen("human-approved")).toBeNull();
 
-  // Case 3: human green, then LATER automated yellow re-review — pill surfaces yellow.
+  // Case 3: human green, then LATER automated yellow re-review — pill STILL
+  // hides. The user approved; later automated concerns are visible in the
+  // detail view (listVerdicts) but not surfaced on the row.
   db.insertPlanVerdict({ id: "h3", changeId: "human-then-auto", reviewer: "ui", verdict: "green", summary: "first approval", createdAt: "2026-08-03T10:00:00.000Z" });
   db.insertPlanVerdict({ id: "h4", changeId: "human-then-auto", reviewer: "Plan Reviewer", verdict: "yellow", summary: "post-approval concern", createdAt: "2026-08-03T11:00:00.000Z" });
-  expect(db.latestVerdictExcludingHumanGreen("human-then-auto")?.verdict).toBe("yellow");
-  expect(db.latestVerdictExcludingHumanGreen("human-then-auto")?.summary).toBe("post-approval concern");
+  expect(db.latestVerdictExcludingHumanGreen("human-then-auto")).toBeNull();
 
-  // Case 4: raw latestVerdict is unchanged (still surfaces the latest row
+  // Case 4: human red also doesn't suppress — only human GREEN is a
+  // resolution. A human red means the artifact is denied; the pill should
+  // surface that as a blocker.
+  db.insertPlanVerdict({ id: "r1", changeId: "human-red", reviewer: "Plan Reviewer", verdict: "yellow", summary: "concerns", createdAt: "2026-08-04T10:00:00.000Z" });
+  db.insertPlanVerdict({ id: "r2", changeId: "human-red", reviewer: "ui", verdict: "red", summary: "denied", createdAt: "2026-08-04T11:00:00.000Z" });
+  expect(db.latestVerdictExcludingHumanGreen("human-red")?.verdict).toBe("red");
+
+  // Case 5: raw latestVerdict is unchanged (still surfaces the latest row
   // regardless of reviewer — used elsewhere; the row pill is the only caller
   // that wants the filtered view).
   expect(db.latestVerdict("human-approved")?.verdict).toBe("green");
   expect(db.latestVerdict("human-then-auto")?.verdict).toBe("yellow");
+  expect(db.latestVerdict("human-red")?.verdict).toBe("red");
 });
 
 test("insertPlanVerdict is idempotent on the same id (replay-safe)", () => {
