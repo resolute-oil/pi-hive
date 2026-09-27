@@ -226,7 +226,17 @@ function currentHumanRecord(cwd: string, name: string, id: ArtifactId, seen = ne
   if (record.verdict === "red") return record;
   const automated = currentAutomatedRecord(cwd, name, id);
   if (!automated || (automated.verdict !== "green" && automated.verdict !== "yellow")) return null;
-  if (record.automatedReviewHash !== recordDigest(automated)) return null;
+  // The human approval is gated only on the CURRENT automated verdict (green
+  // or yellow above) and the artifact hash (line above). A benign reviewer
+  // re-review that overwrites automated-review.json with new bytes — same
+  // verdict, different actor/timestamp — must not invalidate the human
+  // approval. The previous digest-equality check here was redundant with the
+  // verdict check and was the source of the smoke-test gate-close bug: any
+  // re-review wrote a new automated-review.json, the digest changed, the
+  // human's stored automatedReviewHash no longer matched, and the entire
+  // execution gate closed mid-execution. The recorded automatedReviewHash is
+  // still written at approval time and validated by validRecordShape (so the
+  // audit trail is intact), but the gate no longer depends on it matching.
   for (const upstream of UPSTREAM[id]) {
     if (currentHumanRecord(cwd, name, upstream, new Set(seen))?.verdict !== "green") return null;
   }

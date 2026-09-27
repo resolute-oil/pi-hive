@@ -187,6 +187,46 @@ test("editing approved bytes invalidates that artifact and downstream approvals"
   assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), false);
 });
 
+// Regression for the smoke-test gate-close bug: a reviewer re-review that
+// overwrites automated-review.json with new bytes (same verdict, different
+// actor/timestamp) must not invalidate the human approval. The previous
+// digest-equality check in currentHumanRecord closed the entire execution
+// gate on the first re-review after approval. The fix is that the human
+// approval is gated only on the artifact hash and the current automated
+// verdict — the recorded automatedReviewHash is preserved as audit trail
+// but no longer required to match the current digest.
+test("benign reviewer re-review keeps the human approval and execution gate open", () => {
+  const cwd = scratch();
+  const dir = changeDir(cwd);
+  writeFileSync(join(dir, "proposal.md"), "# p\n");
+  writeFileSync(join(dir, "design.md"), "# d\n");
+  mkdirSync(join(dir, "specs", "auth"), { recursive: true });
+  writeFileSync(join(dir, "specs", "auth", "spec.md"), "# s\n");
+  writeFileSync(join(dir, "tasks.md"), "# tasks\n- [ ] one\n");
+  for (const artifact of openspec.ARTIFACT_ORDER) clearAndApprove(cwd, "add-auth", artifact);
+  assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), true);
+
+  // Reviewer re-reviews proposal (e.g. during a follow-up sweep or because a
+  // sibling task surfaced a concern). Same verdict, new bytes (different
+  // actor/timestamp). Pre-fix this closed the gate; post-fix it must not.
+  openspec.setAgentReviewVerdict(cwd, "add-auth", "proposal", "green", "Second-Reviewer");
+  assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), true);
+  assert.equal(openspec.artifactVerdict(cwd, "add-auth", "proposal"), "green");
+
+  // Verdict flipped to yellow — still valid for the gate (yellow is accepted
+  // for the automated record by currentHumanRecord). The dashboard will
+  // surface the yellow color on the plan; the gate stays open.
+  openspec.setAgentReviewVerdict(cwd, "add-auth", "proposal", "yellow", "Third-Reviewer");
+  assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), true);
+  assert.equal(openspec.artifactVerdict(cwd, "add-auth", "proposal"), "green");
+
+  // Verdict flipped to red — now the gate correctly closes. The verdict
+  // check (not the digest check) is what catches this case.
+  openspec.setAgentReviewVerdict(cwd, "add-auth", "proposal", "red", "Fourth-Reviewer");
+  assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), false);
+  assert.equal(openspec.artifactVerdict(cwd, "add-auth", "proposal"), null);
+});
+
 test("plan advances through automated review and human approval before execution", () => {
   const cwd = scratch();
   const dir = changeDir(cwd);
