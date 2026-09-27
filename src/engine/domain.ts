@@ -33,12 +33,22 @@ export function canDelegateTo(state: HiveState, callerName: string, targetName: 
   // applies to the delegated worker session regardless of who delegated to
   // it; the widening is a permission, not a sandbox.
   //
-  // Option B opt-out: `isReadOnly === false` blocks the widening so the
-  // caller can force tree-match-only delegation. Use this when the caller
-  // KNOWS the delegation is for a write-capable target and wants to keep
-  // the delegation in the tree (e.g. orchestrator explicitly routing a
-  // worktree-class task to operations instead of a coder). Default
-  // (isReadOnly undefined or true) preserves the PR #10 widening behavior.
+  // Per-caller opt-out (delegateStrict): a caller that explicitly opts out
+  // skips the widening branch entirely — only direct reports are reachable,
+  // regardless of `isReadOnly`. The denial message names the flag and the
+  // allowed list so the operator can tell at a glance which caller opted
+  // out. This is the per-lead escape hatch from the smoke-test incident:
+  // Engineering Lead sets delegateStrict: true to stop dispatching to
+  // Tester / Reviewer directly (bypassing Validation Lead), while leaving
+  // the orchestrator's widening behavior intact.
+  if (caller.config.delegateStrict === true) {
+    return { ok: false, reason: `${caller.config.name} has delegateStrict: true; can only delegate to: ${allowed?.join(", ") || "none"}.` };
+  }
+  //
+  // Per-delegation opt-out (isReadOnly === false): blocks the widening for
+  // a single delegation when the caller KNOWS the target is write-capable
+  // and wants to keep the delegation in the tree. Default (isReadOnly
+  // undefined or true) preserves the PR #10 widening behavior.
   if (target && ["coder", "tester", "reviewer", "planner"].includes(target.config.agentType || "")) {
     if (isReadOnly === false) {
       return { ok: false, reason: `${caller.config.name} refused to widen to typed specialist "${target.config.name}" because isReadOnly=false (write-class delegation restricted to direct reports).` };
