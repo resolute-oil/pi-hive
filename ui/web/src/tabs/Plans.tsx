@@ -336,6 +336,24 @@ export default function Plans(props: { search: string }) {
   }, [loadPlans]);
   useEffect(() => () => detailAbort.current?.abort(), []);
 
+  // Trigger the detail fetch whenever `selected` becomes non-null. This is
+  // the URL-sync mount path: when the page reloads with `?selected=<id>` in
+  // the URL, useUrlPlanSelection initializes `selected` from the search
+  // string, and we need to actually load the detail — the click handler is
+  // the only other path that calls selectPlan, so without this effect the
+  // detail panel sits at "Loading OpenSpec change…" forever. The same path
+  // fires on popstate (back/forward navigation) because the hook updates
+  // `selected` from the URL when popstate fires. The redundant call when a
+  // user clicks a plan (the click already invoked selectPlan, then the
+  // state change re-invokes it via this effect) is harmless — selectPlan
+  // aborts its in-flight request on entry, so the second call cancels the
+  // first and starts fresh. Net cost: one wasted network round-trip per
+  // user click.
+  useEffect(() => {
+    if (!selected) return;
+    void selectPlan(selected);
+  }, [selected, selectPlan]);
+
   const filtered = useMemo(() => {
     const q = props.search.toLowerCase();
     return plans.filter((p) => !q || p.changeId.toLowerCase().includes(q));
