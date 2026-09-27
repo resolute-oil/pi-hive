@@ -116,6 +116,15 @@ export interface AgentConfig {
   // Planner-only: which planning gate artifacts this planner may write.
   // Omitted = all four gates. Ignored for non-planners.
   stages?: PlanStage[];
+  // When true, this caller skips the typed-specialist widening branch in
+  // `canDelegateTo` (src/engine/domain.ts) entirely: it can only delegate
+  // to its direct reports (`allowedAgents`). Default false preserves the
+  // PR #10 widening so the orchestrator can still route read-only
+  // inspections directly to idle specialists. This is a per-caller
+  // opt-out — a lead like Engineering Lead can set this to stop it from
+  // dispatching to Tester or Reviewer directly (bypassing the Validation
+  // Lead peer) while leaving the orchestrator's widening behavior intact.
+  delegateStrict?: boolean;
   // Optional network capability for bash commands. Disabled by default. This
   // does not grant access to pi-hive's authenticated local dashboard API.
   network?: boolean;

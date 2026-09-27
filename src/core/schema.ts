@@ -77,6 +77,7 @@ function validateAgent(agent: AgentConfig, label: string, seen: Map<string, stri
   if (agent.color !== undefined && !/^#[0-9a-fA-F]{6}$/.test(String(agent.color))) throw new Error(`${label}.color must be #rrggbb when provided.`);
   if (agent.routingTags !== undefined && !Array.isArray(agent.routingTags)) throw new Error(`${label}.routingTags must be a list.`);
   if (agent.responsibilities !== undefined && !Array.isArray(agent.responsibilities)) throw new Error(`${label}.responsibilities must be a list.`);
+  if (agent.delegateStrict !== undefined && typeof agent.delegateStrict !== "boolean") throw new Error(`${label}.delegateStrict must be a boolean when provided.`);
   validateKnowledgeRefs(agent.context, `${label}.context`);
   validateKnowledgeRefs(agent.skills, `${label}.skills`);
   validateDomains(agent.domain, `${label}.domain`);

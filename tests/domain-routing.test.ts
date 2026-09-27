@@ -423,3 +423,120 @@ test("canDelegateTo: lead-typed targets stay tree-bound regardless of isReadOnly
     assert.equal(canDelegateTo(state, "Orchestrator", "Sub-Lead", true).ok, false);
   });
 });
+
+// ── delegateStrict opt-out (per-caller widening bypass) ─────────────────────
+// The widening branch lets a caller route to any typed specialist in
+// {coder, tester, reviewer, planner}, bypassing the tree. A caller that sets
+// `delegate-strict: true` (AgentConfig.delegateStrict) opts out of that
+// widening entirely — it can only delegate to its direct reports
+// (allowedAgents). This is the per-lead escape hatch from the smoke-test
+// incident where Engineering Lead was dispatching to Tester / Reviewer
+// directly, bypassing Validation Lead.
+
+test("canDelegateTo: delegateStrict=true blocks widening for the lead even with default isReadOnly", () => {
+  // Engineering Lead has delegateStrict: true. The widening branch must
+  // NOT fire — the lead can only reach its direct reports (the coders
+  // listed in allowedAgents). Tester / Reviewer are typed specialists but
+  // stay tree-bound when the caller has opted out.
+  const state = stateWith([
+    runtime("Orchestrator", { role: "orchestrator", allowedAgents: ["Engineering Lead"] }),
+    runtime("Engineering Lead", { role: "lead", agentType: "lead", groupName: "Engineering", allowedAgents: ["Backend Coder", "Frontend Coder", "Engine Coder"], delegateStrict: true }),
+    runtime("Backend Coder", { role: "member", agentType: "coder", groupName: "Engineering" }),
+    runtime("Frontend Coder", { role: "member", agentType: "coder", groupName: "Engineering" }),
+    runtime("Engine Coder", { role: "member", agentType: "coder", groupName: "Engineering" }),
+    runtime("QA Tester", { role: "member", agentType: "tester", groupName: "Validation" }),
+    runtime("Spec Reviewer", { role: "member", agentType: "reviewer", groupName: "Validation" }),
+  ]);
+  runAsAgent("Engineering Lead", () => {
+    // Direct reports still work.
+    assert.deepEqual(canDelegateTo(state, "Engineering Lead", "Backend Coder"), { ok: true });
+    assert.deepEqual(canDelegateTo(state, "Engineering Lead", "Frontend Coder"), { ok: true });
+    // Typed specialists are NOT reachable — widening is opted out, regardless
+    // of isReadOnly value (default, true, or false).
+    for (const isReadOnly of [undefined, true, false] as const) {
+      const testerResult = canDelegateTo(state, "Engineering Lead", "QA Tester", isReadOnly);
+      assert.equal(testerResult.ok, false, `delegateStrict should block Tester with isReadOnly=${isReadOnly}`);
+      const reviewerResult = canDelegateTo(state, "Engineering Lead", "Spec Reviewer", isReadOnly);
+      assert.equal(reviewerResult.ok, false, `delegateStrict should block Reviewer with isReadOnly=${isReadOnly}`);
+    }
+  });
+});
+
+test("canDelegateTo: delegateStrict denial message names the caller, flag, and allowed list", () => {
+  // The smoke-test operator relies on this message to know which lead opted
+  // out — the message names `delegateStrict: true` and the allowed list.
+  const state = stateWith([
+    runtime("Orchestrator", { role: "orchestrator", allowedAgents: ["Engineering Lead"] }),
+    runtime("Engineering Lead", { role: "lead", agentType: "lead", groupName: "Engineering", allowedAgents: ["Backend Coder", "Frontend Coder", "Engine Coder"], delegateStrict: true }),
+    runtime("Backend Coder", { role: "member", agentType: "coder", groupName: "Engineering" }),
+    runtime("Frontend Coder", { role: "member", agentType: "coder", groupName: "Engineering" }),
+    runtime("Engine Coder", { role: "member", agentType: "coder", groupName: "Engineering" }),
+    runtime("QA Tester", { role: "member", agentType: "tester", groupName: "Validation" }),
+  ]);
+  runAsAgent("Engineering Lead", () => {
+    const result = canDelegateTo(state, "Engineering Lead", "QA Tester");
+    assert.equal(result.ok, false);
+    assert.match(result.reason ?? "", /Engineering Lead/);
+    assert.match(result.reason ?? "", /delegateStrict: true/);
+    assert.match(result.reason ?? "", /Backend Coder/);
+    assert.match(result.reason ?? "", /Frontend Coder/);
+    assert.match(result.reason ?? "", /Engine Coder/);
+  });
+});
+
+test("canDelegateTo: a lead without delegateStrict behaves as today (widening still applies)", () => {
+  // Regression guard: the flag is opt-in. A lead that doesn't set it
+  // continues to widen to typed specialists the way it did before this
+  // change. The smoke-test incident was specifically about opting in.
+  const state = stateWith([
+    runtime("Orchestrator", { role: "orchestrator", allowedAgents: ["Engineering Lead"] }),
+    runtime("Engineering Lead", { role: "lead", agentType: "lead", groupName: "Engineering" }), // no delegateStrict
+    runtime("QA Tester", { role: "member", agentType: "tester", groupName: "Validation" }),
+    runtime("Spec Reviewer", { role: "member", agentType: "reviewer", groupName: "Validation" }),
+  ]);
+  runAsAgent("Engineering Lead", () => {
+    // Widening still works — same as the pre-feature behavior.
+    assert.deepEqual(canDelegateTo(state, "Engineering Lead", "QA Tester"), { ok: true });
+    assert.deepEqual(canDelegateTo(state, "Engineering Lead", "Spec Reviewer"), { ok: true });
+  });
+});
+
+test("canDelegateTo: a non-lead caller (orchestrator) without delegateStrict is unaffected", () => {
+  // The orchestrator's widening behavior is preserved unless the
+  // orchestrator itself opts in. This is the safe default — existing
+  // orchestrators that don't set the flag continue to widen exactly as
+  // before. The flag is per-caller; opting in is opt-in.
+  const state = stateWith([
+    runtime("Orchestrator", { role: "orchestrator", allowedAgents: ["Engineering Lead"] }), // no delegateStrict
+    runtime("Engineering Lead", { role: "lead", agentType: "lead", groupName: "Engineering" }),
+    runtime("Frontend Coder", { role: "member", agentType: "coder", groupName: "Engineering" }),
+    runtime("QA Tester", { role: "member", agentType: "tester", groupName: "Validation" }),
+  ]);
+  runAsAgent("Orchestrator", () => {
+    // Same widening behavior as before this change.
+    assert.deepEqual(canDelegateTo(state, "Orchestrator", "Frontend Coder"), { ok: true });
+    assert.deepEqual(canDelegateTo(state, "Orchestrator", "QA Tester"), { ok: true });
+  });
+});
+
+test("canDelegateTo: orchestrator with delegateStrict=true loses widening", () => {
+  // The flag is per-caller, not per-role. An orchestrator can opt in too
+  // — useful when the operator wants every delegation to go through the
+  // tree (e.g. for a tightly controlled release branch). After opting in,
+  // only allowedAgents are reachable.
+  const state = stateWith([
+    runtime("Orchestrator", { role: "orchestrator", allowedAgents: ["Engineering Lead"], delegateStrict: true }),
+    runtime("Engineering Lead", { role: "lead", agentType: "lead", groupName: "Engineering" }),
+    runtime("Frontend Coder", { role: "member", agentType: "coder", groupName: "Engineering" }),
+    runtime("QA Tester", { role: "member", agentType: "tester", groupName: "Validation" }),
+  ]);
+  runAsAgent("Orchestrator", () => {
+    // Direct report still works.
+    assert.deepEqual(canDelegateTo(state, "Orchestrator", "Engineering Lead"), { ok: true });
+    // Widening is now opted out.
+    const result = canDelegateTo(state, "Orchestrator", "Frontend Coder");
+    assert.equal(result.ok, false);
+    assert.match(result.reason ?? "", /Orchestrator/);
+    assert.match(result.reason ?? "", /delegateStrict: true/);
+  });
+});

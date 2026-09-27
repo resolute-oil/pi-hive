@@ -14,6 +14,20 @@ export function normalizeAgentType(value: any): AgentType | string | undefined {
   return (AGENT_TYPES as readonly string[]).includes(text) ? (text as AgentType) : text;
 }
 
+// Parse the `delegate-strict` opt-out. Treats the YAML boolean coercion
+// cases — `true`, `"true"`, `1`, `yes` — as true; anything else as false.
+// `undefined`/`null` stay `undefined` so "absent" is distinguishable from
+// "explicit false" in the gate's audit log. Schema validation rejects
+// non-boolean types up front; this helper trusts the input shape.
+export function normalizeDelegateStrict(value: any): boolean | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "boolean") return value;
+  const text = String(value).trim().toLowerCase();
+  if (text === "true" || text === "1" || text === "yes") return true;
+  if (text === "false" || text === "0" || text === "no" || text === "") return false;
+  return Boolean(value);
+}
+
 // Parse the planner stages list. Members are lowercased; validation decides
 // whether each is a legal gate. Returns undefined when absent so "omitted"
 // (= all gates) stays distinguishable from an explicit empty list.
