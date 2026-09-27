@@ -51,6 +51,38 @@ const STATUS_LABEL: Record<string, string> = {
   complete: "complete",
 };
 
+// URL-driven plan selection. The Plans tab's selected change is reflected in
+// the query string (`/plans?selected=<change-id>`) so a hard refresh or a
+// shared link lands on the same plan. pushState is used (not replaceState)
+// so the browser back/forward buttons navigate between selections, and a
+// popstate listener updates local state when the URL changes externally.
+// The router already handles tab/scope via pathname; this hook stays
+// pathname-orthogonal and only touches the search string.
+function useUrlPlanSelection(): [string | null, (next: string | null) => void] {
+  const readUrl = useCallback((): string | null => {
+    if (typeof window === "undefined") return null;
+    return new URLSearchParams(window.location.search).get("selected");
+  }, []);
+  const [selected, setSelectedState] = useState<string | null>(() => readUrl());
+  const setSelected = useCallback((next: string | null) => {
+    setSelectedState(next);
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (next) url.searchParams.set("selected", next);
+    else url.searchParams.delete("selected");
+    // pushState (not replaceState) so back/forward navigate between selections.
+    if (url.toString() !== window.location.href) {
+      window.history.pushState({}, "", url.toString());
+    }
+  }, []);
+  useEffect(() => {
+    const onPop = () => setSelectedState(readUrl());
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [readUrl]);
+  return [selected, setSelected];
+}
+
 function StatusBadge({ status }: { status: PlanSummary["status"] }) {
   return <span className={`plan-status plan-status-${status}`}>{STATUS_LABEL[status] || status}</span>;
 }
@@ -228,7 +260,9 @@ export default function Plans(props: { search: string }) {
   const [plans, setPlans] = useState<PlanSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
+  // Selection state is URL-driven so a hard refresh or shared link lands on
+  // the same plan. See useUrlPlanSelection above for the wiring.
+  const [selected, setSelected] = useUrlPlanSelection();
   const [detail, setDetail] = useState<PlanDetail | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const detailAbort = useRef<AbortController | null>(null);
@@ -293,7 +327,7 @@ export default function Plans(props: { search: string }) {
     } catch (error: any) {
       if (!controller.signal.aborted) setDetailError(error?.message || "Unable to load OpenSpec change.");
     }
-  }, [cwd]);
+  }, [cwd, setSelected]);
 
   useEffect(() => {
     const controller = new AbortController();
