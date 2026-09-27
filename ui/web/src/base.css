@@ -558,7 +558,14 @@
   .plan-row-meta { @apply flex items-center gap-1.5 flex-wrap; }
   .plan-status { @apply text-[10px] font-bold uppercase tracking-[.4px] px-2 py-0.5 rounded-full bg-chip text-fg2; }
   .plan-status-complete { @apply text-ok bg-ok-soft; }
-  .plan-status-in-progress { @apply text-warn bg-warn-soft; }
+  /* "In progress" is an active-execution signal (the OpenSpec CLI sees tasks
+     with at least one unchecked box), not a warning. Use the project's
+     `run` token — same hue used for streaming sessions and the timeline
+     `tl-type` — so this pill reads as "actively executing" instead of
+     competing with the warn-toned validation/verdict pills for attention.
+     The actual gate ("ready to execute") stays green; the verdict pill,
+     if surfaced, keeps its own red/yellow/green semantics. */
+  .plan-status-in-progress { @apply text-run bg-run-soft; }
   .verdict-pill { @apply text-[10px] font-bold uppercase tracking-[.4px] px-2 py-0.5 rounded-full; }
   .verdict-green { @apply text-ok bg-ok-soft; }
   .verdict-yellow { @apply text-warn bg-warn-soft; }
