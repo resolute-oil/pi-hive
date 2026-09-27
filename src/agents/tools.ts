@@ -223,10 +223,23 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       };
     },
     renderCall(args: unknown, theme: Theme) {
-      const agent = (args as any).agent || "?";
-      const task = String((args as any).task || "");
+      const a = (args as any) || {};
+      const agent = a.agent || "?";
+      const task = String(a.task || "");
+      // Surface any flag the caller explicitly set, using `hasOwnProperty` so
+      // explicit `false` values still render. The defaults are `fresh: false`
+      // (resume) and `isReadOnly: true` (typed-specialist widening allowed),
+      // but rendering both shapes — `fresh=false`, `isReadOnly=false` — keeps
+      // the call line unambiguous and prevents the orchestrator from claiming
+      // a flag was passed when only the words "fresh config" appeared in the
+      // task body. The bracketed suffix is dim-styled so it stays secondary
+      // to the agent name on the same line.
+      const flagParts: string[] = [];
+      if (Object.prototype.hasOwnProperty.call(a, "fresh")) flagParts.push(`fresh=${a.fresh}`);
+      if (Object.prototype.hasOwnProperty.call(a, "isReadOnly")) flagParts.push(`isReadOnly=${a.isReadOnly}`);
       const header = theme.fg("toolTitle", theme.bold("delegate_agent ")) +
-        agentColored(agent, theme);
+        agentColored(agent, theme) +
+        (flagParts.length ? theme.fg("dim", ` [${flagParts.join(", ")}]`) : "");
       // Show the full prompt across multiple rows (one per newline-separated
       // line) so multi-line prompts are readable. Per-line truncation to
       // terminal width is mandatory — pi's TUI throws uncaughtException when
