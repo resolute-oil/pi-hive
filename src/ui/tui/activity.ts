@@ -57,7 +57,18 @@ function metaOf(runtime: AgentRuntime): string {
 }
 
 function workOf(runtime: AgentRuntime): string {
-  return (runtime.lastWork || runtime.task || "").trim();
+  // Collapse to a single line. The TUI Text component splits on \n
+  // (wrapTextWithAnsi in @earendil-works/pi-tui) so a multi-line work string
+  // (most commonly a multi-line `task` body when an agent is queued and
+  // hasn't streamed yet, or a multi-line `lastWork` if a streaming source
+  // ever produced one) would render as 2+ visual lines per row and balloon
+  // the panel beyond MAX_AGENTS_IN_PANEL — the cap is on runtime count, not
+  // visual line count. Newlines become single spaces, and runs of multiple
+  // spaces collapse to one so the truncated head+work separator doesn't end
+  // up doubled. A trailing ellipsis on the truncated work is added by
+  // renderAgentRow's truncateToWidth, not here.
+  const raw = (runtime.lastWork || runtime.task || "").replace(/\s+/g, " ").trim();
+  return raw;
 }
 
 // Render one agent row. `width` is the full panel width — no custom border,
