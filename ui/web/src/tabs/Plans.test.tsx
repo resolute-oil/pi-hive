@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -195,5 +195,51 @@ describe("Plans row StatusBadge color code", () => {
     expect(body).toMatch(/bg-run-soft/);
     expect(body).not.toMatch(/text-warn/);
     expect(body).not.toMatch(/bg-warn-soft/);
+  });
+});
+
+describe("Plans URL sync (?selected=<change-id>)", () => {
+  // The selected plan is reflected in the URL so a hard refresh or a shared
+  // link lands on the same plan. pushState is used on selection so the back
+  // and forward buttons navigate between selections; a popstate listener
+  // updates local state when the URL changes externally.
+  beforeEach(() => {
+    // Reset to a clean `/plans` URL before each test. pushState, not direct
+    // assignment, because jsdom's window.location is read-only.
+    window.history.replaceState(null, "", "/plans");
+  });
+
+  it("URL reflects the selected change id when a plan row is clicked", async () => {
+    const user = userEvent.setup();
+    render(<Plans search="" />);
+    await user.click(await screen.findByRole("button", { name: DEMO_ROW }));
+    expect(window.location.search).toContain("selected=demo-change");
+  });
+
+  it("preselects the plan named in the URL on mount", async () => {
+    window.history.replaceState(null, "", "/plans?selected=demo-change");
+    render(<Plans search="" />);
+    const row = await screen.findByRole("button", { name: DEMO_ROW });
+    // The selected row carries aria-pressed="true" (see plan-row render).
+    expect(row.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("restores prior selection when the user navigates back via popstate", async () => {
+    const user = userEvent.setup();
+    render(<Plans search="" />);
+    // First click selects "demo-change" (pushState "?selected=demo-change").
+    await user.click(await screen.findByRole("button", { name: DEMO_ROW }));
+    expect(window.location.search).toContain("selected=demo-change");
+    // The fixture has only one plan, so simulate a back-navigation by
+    // manually popping state to a URL with no `selected` and dispatching
+    // popstate — the hook should reset selection.
+    window.history.replaceState(null, "", "/plans");
+    act(() => {
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await waitFor(() => {
+      const row = screen.getByRole("button", { name: DEMO_ROW });
+      expect(row.getAttribute("aria-pressed")).toBe("false");
+    });
   });
 });
