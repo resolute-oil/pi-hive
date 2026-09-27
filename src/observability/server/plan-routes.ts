@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, readdir } from "node:fs/promises";
 import { join, relative } from "node:path";
 import * as openspec from "../../engine/openspec";
-import { latestVerdict, listVerdicts } from "./db";
+import { latestVerdict, latestVerdictExcludingHumanGreen, listVerdicts } from "./db";
 
 // OpenSpec-backed read routes for the dashboard. CLI-backed reads are async,
 // content-versioned, and shared across identical concurrent requests so they
@@ -121,7 +121,12 @@ export async function listPlans(cwd: string, options: PlanRouteOptions = {}): Pr
     completedTasks: change.completedTasks,
     totalTasks: change.totalTasks,
     lastModified: change.lastModified,
-    latestVerdict: latestVerdict(change.name, cwd),
+    // The row pill renders VerdictPill when this is non-null. Hide the pill
+    // once a human has approved green — older automated concerns shouldn't
+    // read as a status warning when the gate is open. See
+    // latestVerdictExcludingHumanGreen in db.ts for the semantics; if a later
+    // automated yellow/red lands, ORDER BY created_at DESC will surface it.
+    latestVerdict: latestVerdictExcludingHumanGreen(change.name, cwd),
   }));
 }
 

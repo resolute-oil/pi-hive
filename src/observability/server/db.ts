@@ -1635,6 +1635,21 @@ export function latestVerdict(changeId: string, cwd?: string): PlanVerdictRow | 
   return row ? verdictRow(row) : null;
 }
 
+// Latest verdict the dashboard row pill should surface, hiding a human "ui"
+// green approval. Rationale: once a human approves green via the review UI,
+// older automated yellow/red concerns are superseded for gate purposes (see
+// currentHumanRecord's verdict check in openspec-approvals.ts), and surfacing
+// them on the row pill reads as a status warning when the gate is actually
+// open. If a later automated verdict (yellow/red) lands AFTER the human
+// approval, it is the latest row and falls through this filter — only verdicts
+// that are themselves human-green are hidden. Returns null only when the
+// latest row is a human "ui" green.
+export function latestVerdictExcludingHumanGreen(changeId: string, cwd?: string): PlanVerdictRow | null {
+  const latest = latestVerdict(changeId, cwd);
+  if (latest && latest.reviewer === "ui" && latest.verdict === "green") return null;
+  return latest;
+}
+
 export interface PlanApprovalRow {
   id: string;
   changeId: string;

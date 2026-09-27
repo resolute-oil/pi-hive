@@ -1,5 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { store } from "../store";
 
@@ -168,5 +170,30 @@ describe("Plans preview markdown button", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: /Preview/i })).toBeNull());
     // Fullscreen remains available in all review states.
     expect(screen.getByRole("button", { name: /Fullscreen/i })).toBeInTheDocument();
+  });
+});
+
+describe("Plans row StatusBadge color code", () => {
+  // The row StatusBadge reports the OpenSpec CLI's task-execution state
+  // (`status: "in-progress" | "complete" | "no-tasks"`). "In progress" is an
+  // active-execution signal — workers are reporting `markExecutionTaskComplete`,
+  // the gate may be open, there's nothing to warn about — so the pill must
+  // NOT share the dashboard's `text-warn bg-warn-soft` color (which is used
+  // for failing validation and yellow reviewer verdicts). It should use the
+  // project's `run` semantic (same tone as streaming sessions / `tl-type`).
+  //
+  // jsdom doesn't compute Tailwind classes, so the regression is pinned at
+  // the source-CSS level: read base.css and assert that the
+  // `.plan-status-in-progress` rule applies the run-toned utilities and does
+  // not apply the warn-toned ones.
+  it(".plan-status-in-progress uses the run token, not the warn token", () => {
+    const css = readFileSync(join(__dirname, "..", "base.css"), "utf8");
+    const rule = css.match(/\.plan-status-in-progress\s*\{[^}]*\}/);
+    expect(rule, "expected a .plan-status-in-progress rule in base.css").not.toBeNull();
+    const body = rule![0];
+    expect(body).toMatch(/text-run/);
+    expect(body).toMatch(/bg-run-soft/);
+    expect(body).not.toMatch(/text-warn/);
+    expect(body).not.toMatch(/bg-warn-soft/);
   });
 });
