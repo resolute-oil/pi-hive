@@ -2,6 +2,7 @@ import { lstatSync, statSync } from "node:fs";
 import * as path from "node:path";
 import { hasForeignAbsoluteSyntax, resolveCanonicalPath, resolveProjectPath } from "./safe-path";
 import { slug } from "./format";
+import { validateAgentBudgets, validateBudgets } from "./schema";
 
 export const CONFIG_LIMITS = {
   configBytes: 512 * 1024,
@@ -41,38 +42,6 @@ function positiveInteger(value: unknown, label: string, max: number): void {
   }
 }
 
-function positiveNumber(value: unknown, label: string, max: number): void {
-  if (value === undefined) return;
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > max) {
-    throw new Error(`${label} must be a positive number no greater than ${max}.`);
-  }
-}
-
-const TOKEN_BUDGET_SCOPES = ["input_output", "all"] as const;
-type TokenBudgetScope = typeof TOKEN_BUDGET_SCOPES[number];
-
-function stringEnum<T extends string>(value: unknown, label: string, allowed: readonly T[]): void {
-  if (value === undefined) return;
-  if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) {
-    throw new Error(`${label} must be one of ${allowed.join(", ")} when provided; got ${JSON.stringify(value)}.`);
-  }
-}
-
-const GOVERNANCE_KEYS = ["timeoutMs", "maxDelegationDepth", "maxRuns", "tokenBudget", "tokenBudgetScope", "costBudgetUsd", "distillerRuns"] as const;
-
-function governance(value: unknown, label: string): void {
-  if (value === undefined) return;
-  object(value, label);
-  keys(value, GOVERNANCE_KEYS, label);
-  positiveInteger(value.timeoutMs, `${label}.timeoutMs`, 7 * 24 * 60 * 60 * 1000);
-  positiveInteger(value.maxDelegationDepth, `${label}.maxDelegationDepth`, 128);
-  positiveInteger(value.maxRuns, `${label}.maxRuns`, 1_000_000);
-  positiveInteger(value.tokenBudget, `${label}.tokenBudget`, Number.MAX_SAFE_INTEGER);
-  stringEnum<TokenBudgetScope>(value.tokenBudgetScope, `${label}.tokenBudgetScope`, TOKEN_BUDGET_SCOPES);
-  positiveNumber(value.costBudgetUsd, `${label}.costBudgetUsd`, 1_000_000_000);
-  positiveInteger(value.distillerRuns, `${label}.distillerRuns`, 1_000_000);
-}
-
 function stringList(value: unknown, label: string): void {
   if (value === undefined) return;
   if (!Array.isArray(value)) throw new Error(`${label} must be a list of strings.`);
@@ -105,7 +74,7 @@ const DOMAIN_KEYS = ["path", "read", "upsert", "delete", "include", "exclude", "
 const AGENT_KEYS = [
   "name", "slug", "path", "color", "model", "tools", "thinking", "consultWhen",
   "routingTags", "responsibilities", "context", "skills", "domain", "members", "children",
-  "allowedAgents", "agentType", "stages", "network", "commit", "allowOutsideProject", "governance",
+  "allowedAgents", "agentType", "stages", "network", "commit", "allowOutsideProject", "budgets",
 ] as const;
 
 interface ValidationTotals {
@@ -159,7 +128,10 @@ function agent(cwd: string, value: unknown, label: string, depth: number, totals
   string(value.name, `${label}.name`);
   string(value.path, `${label}.path`);
   optionalBoolean(value.allowOutsideProject, `${label}.allowOutsideProject`);
-  governance(value.governance, `${label}.governance`);
+  // Wave 1B hard cutover: per-agent `governance:` is gone; the new frontmatter
+  // shape is `budgets:` (C1). The actual frontmatter parser still has to
+  // accept the new key — see src/agents/frontmatter.ts.
+  validateAgentBudgets(value.budgets, `${label}.budgets`);
   const prompt = configuredPath(cwd, value.path, `${label}.path`, value.allowOutsideProject === true, { mustExistMarkdown: true });
   addFileBytes(prompt, totals);
   const key = slug(String(value.slug || value.name));
@@ -203,19 +175,14 @@ export function validateRawConfig(cwd: string, raw: string, parsed: unknown): vo
   const settings = parsed.settings;
   if (settings !== undefined) {
     object(settings, "settings");
-    keys(settings, ["subagentOutputLimit", "defaultTools", "maxParallel", "queueSize", "workerBudgets", "teamBudgets", "secretPaths", "distiller", "telemetry"], "settings");
+    // Wave 1B hard cutover (G-16): the legacy `workerBudgets` / `teamBudgets`
+    // keys are gone. The new single root key is `budgets:` (per-worker +
+    // per-team). See src/core/schema.ts for the typebox shape.
+    keys(settings, ["subagentOutputLimit", "defaultTools", "maxParallel", "queueSize", "budgets", "secretPaths", "distiller", "telemetry"], "settings");
     positiveInteger(settings.subagentOutputLimit, "settings.subagentOutputLimit", CONFIG_LIMITS.subagentOutputLimit);
     positiveInteger(settings.maxParallel, "settings.maxParallel", CONFIG_LIMITS.maxParallel);
     positiveInteger(settings.queueSize, "settings.queueSize", 100_000);
-    governance(settings.workerBudgets, "settings.workerBudgets");
-    if (settings.teamBudgets !== undefined) {
-      object(settings.teamBudgets, "settings.teamBudgets");
-      keys(settings.teamBudgets, ["maxRuns", "tokenBudget", "tokenBudgetScope", "costBudgetUsd"], "settings.teamBudgets");
-      positiveInteger(settings.teamBudgets.maxRuns, "settings.teamBudgets.maxRuns", 1_000_000);
-      positiveInteger(settings.teamBudgets.tokenBudget, "settings.teamBudgets.tokenBudget", Number.MAX_SAFE_INTEGER);
-      stringEnum<TokenBudgetScope>(settings.teamBudgets.tokenBudgetScope, "settings.teamBudgets.tokenBudgetScope", TOKEN_BUDGET_SCOPES);
-      positiveNumber(settings.teamBudgets.costBudgetUsd, "settings.teamBudgets.costBudgetUsd", 1_000_000_000);
-    }
+    validateBudgets(settings.budgets, "settings.budgets");
     if (settings.defaultTools !== undefined) string(settings.defaultTools, "settings.defaultTools");
     stringList(settings.secretPaths, "settings.secretPaths");
     if (settings.distiller !== undefined) {
