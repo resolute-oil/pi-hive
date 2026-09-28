@@ -16,7 +16,7 @@ import {
   extractUsage,
 } from "../core/utils";
 import { logRecord } from "./state";
-import { currentAgentName, currentChangeId, currentDelegationDepth, reloadAgentConfig, runAsAgent, runAtDelegationDepth, runWithChange } from "./session";
+import { currentAgentName, currentChangeId, currentDelegationDepth, loadAgentRuntime, reloadAgentConfig, runAsAgent, runAtDelegationDepth, runWithChange } from "./session";
 import { canDelegateTo } from "./domain";
 import { buildWorkerPrompt } from "./prompts";
 import { emitHiveEvent, runtimeSummary, writeHiveStateSnapshot } from "./observability";
@@ -66,6 +66,33 @@ function archivePriorRun(sessionFile: string) {
   for (const f of existing) { const m = f.match(re); if (m) max = Math.max(max, Number(m[1])); }
   const archive = join(dir, `${base}.run-${max + 1}.jsonl`);
   renameSync(sessionFile, archive);
+}
+
+// Reset a worker's runtime counters when a fresh=true respawn starts a new
+// session against it. Archives the prior transcript (so the dashboard still
+// shows every run) and zeros both the per-session SDK counters AND the
+// cumulative governance counters. Without the governance reset, the prior
+// session's exhausted total survives in runtime.governanceTokens and
+// checkDispatchBudgets at dispatch.ts:~213 immediately blocks the new
+// dispatch even though the SDK session is clean — the orchestrator's
+// fresh=true respawn would silently no-op.
+//
+// Exported so the budget-strategy regression tests can verify the governance
+// counters reset without standing up the full dispatchAgent call graph.
+// Mirrors the inline reset that dispatchAgent uses; both call this helper.
+export function freshResetRuntime(runtime: AgentRuntime): void {
+  if (!existsSync(runtime.sessionFile)) return;
+  try {
+    archivePriorRun(runtime.sessionFile);
+    runtime.inputTokens = 0;
+    runtime.outputTokens = 0;
+    runtime.cacheReadTokens = 0;
+    runtime.cacheWriteTokens = 0;
+    runtime.reasoningTokens = 0;
+    runtime.costUsd = 0;
+    runtime.governanceTokens = 0;
+    runtime.governanceCostUsd = 0;
+  } catch { /* noop */ }
 }
 
 // Session factory seam (L1): defaults to the real createAgentSession, but a test
@@ -262,10 +289,15 @@ export async function dispatchAgent(
   // is used below to decide which input to pass to session.prompt(): the full
   // assembled worker context (new/fresh) or the lean task alone (resume).
   const sessionFileExisted = existsSync(runtime.sessionFile);
-  // Governance accounting is monotonic even when fresh=true archives the SDK
-  // transcript and resets its session-lifetime counters. The budget tracks
-  // either input+output only or the full token total, depending on the
-  // configured scope; default "all" preserves the legacy behavior.
+  // Governance counters reset alongside the per-session SDK counters when
+  // fresh=true archives the SDK transcript. Without resetting
+  // governanceTokens / governanceCostUsd, the cumulative budget counter from
+  // the prior run would make checkDispatchBudgets immediately block the new
+  // dispatch — fresh=true is the worker-respawn mechanism the orchestrator
+  // uses to recover from budget exhaustion, so the budget resets with the
+  // session. The budget tracks either input+output only or the full token
+  // total, depending on the configured scope; default "all" preserves the
+  // legacy behavior.
   const tokenBudgetScope = effectiveWorkerGovernance(state, runtime).tokenBudgetScope ?? "all";
   runtime.governanceTokens ??= tokenBudgetScope === "input_output"
     ? runtime.inputTokens + runtime.outputTokens
@@ -283,16 +315,8 @@ export async function dispatchAgent(
   // silently clamp to 0 (the fresh-archive under-count). Reset the lifetime
   // counters to 0 here so the baselines captured below are 0 and the per-run delta
   // equals the fresh session's real usage.
-  if (fresh && existsSync(runtime.sessionFile)) {
-    try {
-      archivePriorRun(runtime.sessionFile);
-      runtime.inputTokens = 0;
-      runtime.outputTokens = 0;
-      runtime.cacheReadTokens = 0;
-      runtime.cacheWriteTokens = 0;
-      runtime.reasoningTokens = 0;
-      runtime.costUsd = 0;
-    } catch { /* noop */ }
+  if (fresh) {
+    freshResetRuntime(runtime);
   }
 
   // Resolve the model FIRST, before mutating any per-run state. This is the
@@ -984,10 +1008,16 @@ export async function respawnWorkerSession(
   // running the heavy session-create path. Mirrors the createSession
   // default-param pattern on dispatchAgent itself.
   dispatch: typeof dispatchAgent = dispatchAgent,
+  // Mirror of the dispatch seam for the runtime-factory step. The real
+  // factory (loadAgentRuntime) reads the agent's prompt file from disk; tests
+  // pass a mock that returns a hand-built AgentRuntime so the test fixture
+  // doesn't need a real .md file at the runtime path.
+  loadRuntime: typeof loadAgentRuntime = loadAgentRuntime,
 ): Promise<OperatorCommandResult> {
   const lookup = findWorkerRuntime(state, agentName);
   if (!lookup.ok) return { ok: false, reason: lookup.reason, action: "respawn" };
   const { runtime } = lookup;
+  if (!state.config) return { ok: false, reason: "hive is not initialized", action: "respawn" };
   const taskToUse = newTask?.trim() || runtime.task;
   const oldEffective = workerConsumedTokens(runtime);
   const oldAgentName = runtime.config.name;
@@ -1018,10 +1048,16 @@ export async function respawnWorkerSession(
   if (!ctx) {
     return { ok: false, reason: `Respawn of "${agentName}" requires an ExtensionContext.`, agent: oldAgentName, action: "respawn" };
   }
-  // Destroy the old runtime so teamUsage stops counting it. The fresh=true
-  // archive path inside dispatchAgent handles session archival; we just need
-  // to remove the runtime entry.
+  // Destroy the old runtime so teamUsage stops counting it, then immediately
+  // recreate it via the same factory activateTeamRuntimes uses. Without the
+  // recreate step, dispatchAgent's resolveRuntime returns undefined (the entry
+  // is gone) and the dispatch returns "Unknown agent" — the operator respawn
+  // would silently no-op. The fresh=true dispatch below resets the cumulative
+  // governance counters on the new runtime (see dispatchAgent fresh block),
+  // so the worker gets a fresh budget along with the fresh transcript.
   state.runtimes.delete(agentName);
+  const recreated = loadRuntime(state, ctx, state.config, runtime.config);
+  state.runtimes.set(agentSlug(runtime.config), recreated);
   publishRuntimeUpdate(state);
   writeHiveStateSnapshot(state);
   // Fire-and-forget the new dispatch. The caller awaits operator notification;

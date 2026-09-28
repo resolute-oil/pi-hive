@@ -11,6 +11,9 @@
 // tested through dispatch.ts directly with stubbed sessions.
 
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { AgentRuntime, HiveState } from "../src/core/types.ts";
 import { budgetRemaining, workerConsumedTokens } from "../src/engine/governance.ts";
@@ -24,7 +27,7 @@ import {
   triggerSummarizeProgress,
   validateProgressNotes,
 } from "../src/engine/budget-strategy.ts";
-import { endWorkerSession, compactWorkerSession, respawnWorkerSession } from "../src/engine/dispatch.ts";
+import { endWorkerSession, compactWorkerSession, freshResetRuntime, respawnWorkerSession } from "../src/engine/dispatch.ts";
 import { validateHiveConfigShape } from "../src/core/schema.ts";
 import { buildSummarizeProgressTool } from "../src/agents/tools/summarize-progress.ts";
 
@@ -310,7 +313,7 @@ test("compaction_end without tokensBefore/estimatedTokensAfter is a no-op (v2 te
 // Respawn operator command.
 // ---------------------------------------------------------------------------
 
-test("respawnWorkerSession on a finished worker: old runtime gone, dispatch invoked with fresh=true (v2 test #7)", async () => {
+test("respawnWorkerSession on a finished worker: old runtime replaced, dispatch invoked with fresh=true (v2 test #7)", async () => {
   const finished = runtime("finished", {
     status: "done", task: "old-task", inputTokens: 50_000, outputTokens: 30_000, effectiveTokens: 80_000,
   });
@@ -323,8 +326,23 @@ test("respawnWorkerSession on a finished worker: old runtime gone, dispatch invo
     captured.push({ agent, task, fresh });
     return { output: "mock", exitCode: 0, elapsed: 0 };
   };
-  const result = await respawnWorkerSession(hive, "finished", "operator wants a fresh attempt", undefined, stubCtx, mockDispatch);
-  assert.equal(hive.runtimes.has("finished"), false, "old runtime must be removed from state.runtimes when ctx is present");
+  // Mock loadRuntime so the test doesn't need a real agent prompt file at
+  // the runtime path. Returns a fresh AgentRuntime with the agent's config
+  // preserved but counters zeroed — same shape loadAgentRuntime returns for
+  // a brand-new run. This is what lets the subsequent dispatch's
+  // resolveRuntime find the entry in state.runtimes (the original was just
+  // deleted).
+  const mockLoadRuntime: typeof import("../src/engine/session.ts").loadAgentRuntime = (_state, _ctx, _cfg, agent) => {
+    return runtime(agent.name, { status: "idle", config: agent });
+  };
+  const result = await respawnWorkerSession(hive, "finished", "operator wants a fresh attempt", undefined, stubCtx, mockDispatch, mockLoadRuntime);
+  // Old runtime is gone; a new runtime entry sits in its place so the
+  // subsequent dispatch's resolveRuntime lookup finds something.
+  const recreated = hive.runtimes.get("finished");
+  assert.ok(recreated, "new runtime must exist in state.runtimes after respawn (operator respawn would silently no-op without this recreate step)");
+  assert.notEqual(recreated, finished, "the recreated runtime must be a fresh AgentRuntime, not the original reference");
+  assert.equal(recreated!.inputTokens, 0, "recreated runtime starts with zeroed SDK counters");
+  assert.equal(recreated!.governanceTokens, undefined, "recreated runtime has no governance counters yet (set on first dispatch)");
   assert.equal(result.action, "respawn");
   assert.equal(captured.length, 1, "dispatch must be invoked exactly once");
   assert.equal(captured[0].agent, "finished");
@@ -361,7 +379,10 @@ test("respawnWorkerSession without newTask re-dispatches with the original runti
     captured.push({ task });
     return { output: "mock", exitCode: 0, elapsed: 0 };
   };
-  await respawnWorkerSession(hive, "worker", "respawn", undefined, stubCtx, mockDispatch);
+  const mockLoadRuntime: typeof import("../src/engine/session.ts").loadAgentRuntime = (_state, _ctx, _cfg, agent) => {
+    return runtime(agent.name, { status: "idle", config: agent });
+  };
+  await respawnWorkerSession(hive, "worker", "respawn", undefined, stubCtx, mockDispatch, mockLoadRuntime);
   assert.equal(captured.length, 1);
   assert.equal(captured[0].task, "original-task", "no newTask \u2192 original runtime.task is reused");
 });
@@ -375,7 +396,10 @@ test("respawnWorkerSession with newTask re-dispatches with the new task (v2 test
     captured.push({ task });
     return { output: "mock", exitCode: 0, elapsed: 0 };
   };
-  await respawnWorkerSession(hive, "worker", "respawn", "redirect to a different task", stubCtx, mockDispatch);
+  const mockLoadRuntime: typeof import("../src/engine/session.ts").loadAgentRuntime = (_state, _ctx, _cfg, agent) => {
+    return runtime(agent.name, { status: "idle", config: agent });
+  };
+  await respawnWorkerSession(hive, "worker", "respawn", "redirect to a different task", stubCtx, mockDispatch, mockLoadRuntime);
   assert.equal(captured.length, 1);
   assert.equal(captured[0].task, "redirect to a different task", "newTask overrides runtime.task");
 });
@@ -385,6 +409,64 @@ test("respawnWorkerSession on unknown agent returns ok: false with a clear reaso
   const result = await respawnWorkerSession(hive, "ghost", "respawn");
   assert.equal(result.ok, false);
   assert.ok((result.reason || "").includes("Unknown agent"));
+});
+
+// ---------------------------------------------------------------------------
+// freshResetRuntime regression — fresh=true must reset the cumulative
+// governance counters alongside the per-session SDK counters, otherwise
+// checkDispatchBudgets immediately blocks the new dispatch even though the
+// SDK session is clean. Discovered while testing PR #54 (the
+// fresh-budget-not-reset bug): orchestrator calls delegate_agent with
+// fresh=true to recover from budget exhaustion; pre-fix, the prior session's
+// exhausted total survived in runtime.governanceTokens and the new dispatch
+// was blocked before it could even start.
+// ---------------------------------------------------------------------------
+
+test("freshResetRuntime resets governance counters alongside SDK counters when a prior session file exists", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "hive-fresh-test-"));
+  try {
+    const sessionFile = join(tmp, "worker.jsonl");
+    writeFileSync(sessionFile, ""); // existsSync must return true for the helper to run
+    const rt = runtime("worker", {
+      inputTokens: 3500,
+      outputTokens: 500,
+      cacheReadTokens: 200,
+      cacheWriteTokens: 100,
+      reasoningTokens: 50,
+      costUsd: 0.05,
+      // The pre-fix bug: governance counters survived across fresh=true and
+      // checkDispatchBudgets saw the prior session's exhausted total.
+      governanceTokens: 3500,
+      governanceCostUsd: 0.05,
+      sessionFile,
+    });
+    freshResetRuntime(rt);
+    assert.equal(rt.inputTokens, 0, "SDK input tokens reset");
+    assert.equal(rt.outputTokens, 0, "SDK output tokens reset");
+    assert.equal(rt.cacheReadTokens, 0, "SDK cache read tokens reset");
+    assert.equal(rt.cacheWriteTokens, 0, "SDK cache write tokens reset");
+    assert.equal(rt.reasoningTokens, 0, "SDK reasoning tokens reset");
+    assert.equal(rt.costUsd, 0, "SDK cost reset");
+    assert.equal(rt.governanceTokens, 0, "governance tokens reset (the fix)");
+    assert.equal(rt.governanceCostUsd, 0, "governance cost reset (the fix)");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("freshResetRuntime is a no-op when no prior session file exists", () => {
+  // First-ever dispatch with fresh=true: the session file does not exist
+  // yet, so the helper returns early without mutating counters. The
+  // subsequent `??=` initialization at dispatch.ts:~270 still produces the
+  // correct (zeroed) initial governance values.
+  const rt = runtime("worker", {
+    inputTokens: 100,
+    governanceTokens: 100,
+    sessionFile: "/nonexistent-path-that-does-not-exist-anywhere.jsonl",
+  });
+  freshResetRuntime(rt);
+  assert.equal(rt.inputTokens, 100, "SDK counters not touched when no prior session");
+  assert.equal(rt.governanceTokens, 100, "governance counters not touched when no prior session");
 });
 
 // ---------------------------------------------------------------------------
