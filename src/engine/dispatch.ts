@@ -1048,16 +1048,22 @@ export async function respawnWorkerSession(
   if (!ctx) {
     return { ok: false, reason: `Respawn of "${agentName}" requires an ExtensionContext.`, agent: oldAgentName, action: "respawn" };
   }
-  // Destroy the old runtime so teamUsage stops counting it, then immediately
-  // recreate it via the same factory activateTeamRuntimes uses. Without the
-  // recreate step, dispatchAgent's resolveRuntime returns undefined (the entry
-  // is gone) and the dispatch returns "Unknown agent" — the operator respawn
-  // would silently no-op. The fresh=true dispatch below resets the cumulative
-  // governance counters on the new runtime (see dispatchAgent fresh block),
-  // so the worker gets a fresh budget along with the fresh transcript.
-  state.runtimes.delete(agentName);
+  // Replace the old runtime entry with a fresh one via the same factory
+  // activateTeamRuntimes uses. Without the recreate step, dispatchAgent's
+  // resolveRuntime returns undefined (the entry is gone) and the dispatch
+  // returns "Unknown agent" — the operator respawn would silently no-op.
+  // The fresh=true dispatch below then resets the cumulative governance
+  // counters on the new runtime (see freshResetRuntime), so the worker gets
+  // a fresh budget along with the fresh transcript.
+  //
+  // Both delete and set use the canonical runtime key (agentSlug), not the
+  // raw agentName parameter — state.runtimes is keyed by agentSlug via
+  // runtimeKey() in agent-lookup.ts, and Map.delete/set are case-sensitive,
+  // so a mixed-case agentName would otherwise orphan the old entry.
+  const runtimeKey = agentSlug(runtime.config);
+  state.runtimes.delete(runtimeKey);
   const recreated = loadRuntime(state, ctx, state.config, runtime.config);
-  state.runtimes.set(agentSlug(runtime.config), recreated);
+  state.runtimes.set(runtimeKey, recreated);
   publishRuntimeUpdate(state);
   writeHiveStateSnapshot(state);
   // Fire-and-forget the new dispatch. The caller awaits operator notification;

@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AgentRuntime, HiveState } from "../src/core/types.ts";
+import { agentSlug } from "../src/core/agent-tree.ts";
 import { budgetRemaining, workerConsumedTokens } from "../src/engine/governance.ts";
 import {
   applyBudgetStrategy,
@@ -50,7 +51,7 @@ function state(runtimes: AgentRuntime[], settings: Record<string, unknown> = {},
       sharedContext: [],
       ...shared,
     } as any,
-    runtimes: new Map(runtimes.map((entry) => [entry.config.name, entry])),
+    runtimes: new Map(runtimes.map((entry) => [agentSlug(entry.config), entry])),
     activeRuns: 0,
     workerQueue: [],
     nextQueueId: 0,
@@ -58,6 +59,14 @@ function state(runtimes: AgentRuntime[], settings: Record<string, unknown> = {},
     budgetWarnings: new Set<string>(),
   } as any;
 }
+
+// Mock loadAgentRuntime that returns a fresh AgentRuntime with the agent's
+// config preserved but counters zeroed — same shape loadAgentRuntime returns
+// for a brand-new run. Used by the respawn tests so they don't need a real
+// agent prompt file at the runtime path.
+const mockLoadRuntime: typeof import("../src/engine/session.ts").loadAgentRuntime = (_state, _ctx, _cfg, agent) => {
+  return runtime(agent.name, { status: "idle", config: agent });
+};
 
 // ---------------------------------------------------------------------------
 // Strategies: hint emission, interventionAvailable flag, settings resolution.
@@ -332,9 +341,6 @@ test("respawnWorkerSession on a finished worker: old runtime replaced, dispatch 
   // a brand-new run. This is what lets the subsequent dispatch's
   // resolveRuntime find the entry in state.runtimes (the original was just
   // deleted).
-  const mockLoadRuntime: typeof import("../src/engine/session.ts").loadAgentRuntime = (_state, _ctx, _cfg, agent) => {
-    return runtime(agent.name, { status: "idle", config: agent });
-  };
   const result = await respawnWorkerSession(hive, "finished", "operator wants a fresh attempt", undefined, stubCtx, mockDispatch, mockLoadRuntime);
   // Old runtime is gone; a new runtime entry sits in its place so the
   // subsequent dispatch's resolveRuntime lookup finds something.
@@ -379,9 +385,6 @@ test("respawnWorkerSession without newTask re-dispatches with the original runti
     captured.push({ task });
     return { output: "mock", exitCode: 0, elapsed: 0 };
   };
-  const mockLoadRuntime: typeof import("../src/engine/session.ts").loadAgentRuntime = (_state, _ctx, _cfg, agent) => {
-    return runtime(agent.name, { status: "idle", config: agent });
-  };
   await respawnWorkerSession(hive, "worker", "respawn", undefined, stubCtx, mockDispatch, mockLoadRuntime);
   assert.equal(captured.length, 1);
   assert.equal(captured[0].task, "original-task", "no newTask \u2192 original runtime.task is reused");
@@ -395,9 +398,6 @@ test("respawnWorkerSession with newTask re-dispatches with the new task (v2 test
   const mockDispatch: typeof import("../src/engine/dispatch.ts").dispatchAgent = async (_state, _agent, task) => {
     captured.push({ task });
     return { output: "mock", exitCode: 0, elapsed: 0 };
-  };
-  const mockLoadRuntime: typeof import("../src/engine/session.ts").loadAgentRuntime = (_state, _ctx, _cfg, agent) => {
-    return runtime(agent.name, { status: "idle", config: agent });
   };
   await respawnWorkerSession(hive, "worker", "respawn", "redirect to a different task", stubCtx, mockDispatch, mockLoadRuntime);
   assert.equal(captured.length, 1);
