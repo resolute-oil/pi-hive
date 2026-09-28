@@ -1,5 +1,5 @@
 /**
- * Wave 0 contract stubs — `WorkerBudgetStrategy` resolver.
+ * Wave 1 — `WorkerBudgetStrategy` resolver (C5 placeholder).
  *
  * Source of truth: docs/reviews/28-09-2026-budget-review/04-refactor-plan.md
  *   §2.13 C5 (structured strategies) — PLACEHOLDER ONLY; deferred to v3 unless
@@ -7,7 +7,15 @@
  *          collapsed into a stub that returns `undefined` until the structured
  *          strategy config is implemented.
  *
- * Bodies throw — Wave 1 fills them in.
+ * Design notes:
+ * - The `WorkerBudgetStrategy` type carries `readonly _placeholder: never`, so
+ *   no value can satisfy it at runtime — the resolver MUST return `undefined`.
+ * - The cooperative tool `summarize_progress` falls back to its default
+ *   `compact` behavior when no strategy is configured. See T5.7 (Wave 1
+ *   Agent 1D) for the wiring.
+ * - `resolveWorkerBudgetPolicy` is intentionally NOT in this module: it lives
+ *   in `worker-tools.ts` because it needs the resolved `AgentConfig` for the
+ *   target agent (a Wave 2 concern, T2.2).
  */
 
 import type { HiveState } from "../../core/types";
@@ -16,16 +24,15 @@ import type { WorkerBudgetStrategy } from "./types";
 /**
  * Resolve the effective `WorkerBudgetStrategy` for an agent.
  *
- * C5 placeholder: returns `undefined` (no structured strategy; the cooperative
- * tool `summarize_progress` will fall back to its default `compact` behavior).
- * `// TODO C5: deferred to v3 unless user overrides` applies to this entire
- * module — keep it minimal.
+ * C5 placeholder: always returns `undefined`. The structured strategy config
+ * (on-approaching-limit.action, on-exhaustion.action, summary.max-tokens,
+ * etc.) is deferred to v3 unless a user-supplied override lands first.
  */
 export function resolveWorkerBudgetStrategy(
   _state: HiveState,
   _agentName: string,
 ): WorkerBudgetStrategy | undefined {
-  throw new Error("not implemented");
+  return undefined;
 }
 
 /**
@@ -36,7 +43,7 @@ export function resolveWorkerBudgetStrategy(
 export function strategyRequestsWrapUp(
   _strategy: WorkerBudgetStrategy | undefined,
 ): boolean {
-  throw new Error("not implemented");
+  return false;
 }
 
 /**
@@ -46,5 +53,5 @@ export function strategyRequestsWrapUp(
 export function strategyRequestsCompactOnExhaustion(
   _strategy: WorkerBudgetStrategy | undefined,
 ): boolean {
-  throw new Error("not implemented");
+  return false;
 }
