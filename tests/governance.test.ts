@@ -37,7 +37,7 @@ test("worker governance is unlimited when omitted and supports per-agent overrid
   assert.ok(Object.values(budgetRemaining(hive, worker).worker).every((value) => value === undefined));
   assert.ok(Object.values(budgetRemaining(hive, worker).team).every((value) => value === undefined));
 
-  hive.config!.settings.worker = { maxRuns: 5, timeoutMs: 1000 };
+  hive.config!.settings.workerBudgets = { maxRuns: 5, timeoutMs: 1000 };
   worker.config.governance = { maxRuns: 2 };
   assert.deepEqual(effectiveWorkerGovernance(hive, worker), { maxRuns: 2, timeoutMs: 1000 });
 });
@@ -46,7 +46,7 @@ test("worker and team budgets block independently and report remaining values", 
   const first = runtime("first", { runCount: 2, inputTokens: 60, outputTokens: 40, costUsd: 1.5 });
   const second = runtime("second", { runCount: 1, inputTokens: 25, costUsd: 0.5 });
   const hive = state([first, second], {
-    worker: { maxRuns: 2, tokenBudget: 100, costBudgetUsd: 2, maxDelegationDepth: 3, distillerRuns: 1 },
+    workerBudgets: { maxRuns: 2, tokenBudget: 100, costBudgetUsd: 2, maxDelegationDepth: 3, distillerRuns: 1 },
     teamBudgets: { maxRuns: 4, tokenBudget: 200, costBudgetUsd: 3 },
   });
   assert.equal(checkDispatchBudgets(hive, first, 1)?.scope, "worker");
@@ -63,7 +63,7 @@ test("worker and team budgets block independently and report remaining values", 
 
 test("monotonic governance usage prevents fresh transcript resets from bypassing budgets", () => {
   const worker = runtime("worker", { inputTokens: 5, governanceTokens: 100, costUsd: 0.1, governanceCostUsd: 4 });
-  const hive = state([worker], { worker: { tokenBudget: 100, costBudgetUsd: 10 } });
+  const hive = state([worker], { workerBudgets: { tokenBudget: 100, costBudgetUsd: 10 } });
   assert.equal(checkDispatchBudgets(hive, worker, 1)?.resource, "tokens");
   assert.equal(budgetRemaining(hive, worker).worker.costUsd, 6);
 });
@@ -120,7 +120,7 @@ test("tokenBudgetScope: input_output excludes cache reads/writes/reasoning from 
     cacheWriteTokens: 50_000,
     reasoningTokens: 200_000,
   });
-  const hive = state([worker], { worker: { tokenBudget: 200_000, tokenBudgetScope: "input_output" } });
+  const hive = state([worker], { workerBudgets: { tokenBudget: 200_000, tokenBudgetScope: "input_output" } });
   // input + output = 150k, under the 200k cap → no block.
   assert.equal(checkDispatchBudgets(hive, worker, 1), undefined);
   assert.equal(budgetRemaining(hive, worker).worker.tokens, 50_000);
@@ -133,7 +133,7 @@ test("tokenBudgetScope: all (default) keeps the cumulative-of-everything account
     cacheReadTokens: 900_000,
   });
   // No scope set → defaults to "all". Cache reads count toward the cap.
-  const hive = state([worker], { worker: { tokenBudget: 1_000_000 } });
+  const hive = state([worker], { workerBudgets: { tokenBudget: 1_000_000 } });
   assert.equal(checkDispatchBudgets(hive, worker, 1)?.resource, "tokens");
   assert.equal(budgetRemaining(hive, worker).worker.tokens, 0);
 });
@@ -146,7 +146,7 @@ test("tokenBudgetScope on teamBudgets is independent of the worker scope", () =>
   });
   // Worker uses "input_output" (cache ignored). Team uses "all" (cache counts).
   const hive = state([worker], {
-    worker: { tokenBudget: 200_000, tokenBudgetScope: "input_output" },
+    workerBudgets: { tokenBudget: 200_000, tokenBudgetScope: "input_output" },
     teamBudgets: { tokenBudget: 1_000_000, tokenBudgetScope: "all" },
   });
   // checkDispatchBudgets returns the FIRST blocking condition; with the team
@@ -162,6 +162,6 @@ test("tokenBudgetScope defaults to 'all' when omitted (backward compatibility)",
   // 1.1M which should block under the legacy "all" accounting.
   const worker = runtime("worker", { inputTokens: 200_000, outputTokens: 200_000, cacheReadTokens: 700_000 });
   // No scope set → defaults to "all". Cache reads count toward the cap.
-  const hive = state([worker], { worker: { tokenBudget: 1_000_000 } });
+  const hive = state([worker], { workerBudgets: { tokenBudget: 1_000_000 } });
   assert.equal(checkDispatchBudgets(hive, worker, 1)?.resource, "tokens");
 });

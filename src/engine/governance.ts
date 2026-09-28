@@ -16,7 +16,7 @@ export interface GovernanceBlock {
 export type TokenScope = "input_output" | "all";
 
 export function effectiveWorkerGovernance(state: HiveState, runtime: AgentRuntime): WorkerGovernance {
-  return { ...(state.config?.settings.worker || {}), ...(runtime.config.governance || {}) };
+  return { ...(state.config?.settings.workerBudgets || {}), ...(runtime.config.governance || {}) };
 }
 
 // Token totals depend on the configured scope. "all" keeps the legacy

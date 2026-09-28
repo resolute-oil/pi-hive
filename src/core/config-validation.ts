@@ -203,11 +203,11 @@ export function validateRawConfig(cwd: string, raw: string, parsed: unknown): vo
   const settings = parsed.settings;
   if (settings !== undefined) {
     object(settings, "settings");
-    keys(settings, ["subagentOutputLimit", "defaultTools", "maxParallel", "queueSize", "worker", "teamBudgets", "secretPaths", "distiller", "telemetry"], "settings");
+    keys(settings, ["subagentOutputLimit", "defaultTools", "maxParallel", "queueSize", "workerBudgets", "teamBudgets", "secretPaths", "distiller", "telemetry"], "settings");
     positiveInteger(settings.subagentOutputLimit, "settings.subagentOutputLimit", CONFIG_LIMITS.subagentOutputLimit);
     positiveInteger(settings.maxParallel, "settings.maxParallel", CONFIG_LIMITS.maxParallel);
     positiveInteger(settings.queueSize, "settings.queueSize", 100_000);
-    governance(settings.worker, "settings.worker");
+    governance(settings.workerBudgets, "settings.workerBudgets");
     if (settings.teamBudgets !== undefined) {
       object(settings.teamBudgets, "settings.teamBudgets");
       keys(settings.teamBudgets, ["maxRuns", "tokenBudget", "tokenBudgetScope", "costBudgetUsd"], "settings.teamBudgets");
