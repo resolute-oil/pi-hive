@@ -162,6 +162,7 @@ Commands:
 - `/hive:execute <change-id>` — validates that the change exists, has `tasks.md`, and the tasks gate is approved, then switches to hive mode and drives execution.
 - `/hive:plan [change-id]` — list plan changes or select/show one.
 - `/hive:doctor` — run read-only diagnostics for opt-in config, loaded agents, dashboard assets, Bun availability, SDD state, and telemetry paths.
+- `/hive:version` — show the running pi-hive source version (git SHA + branch + dirty status) so you can verify the server picked up the latest commits after a restart.
 - `/hive:observe` — restart/open the local browser dashboard for global hive telemetry (`http://127.0.0.1:43191` by default).
 - `/hive:observe-stop` — stop the telemetry dashboard on the configured port.
 - `/hive:observe-prune <days>` — delete global dashboard rows older than the retention window through the authenticated daemon API. This does not delete project source JSONL logs.

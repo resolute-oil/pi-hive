@@ -31,16 +31,27 @@ function runtimeTokens(runtime: AgentRuntime, scope: TokenScope = "all"): number
 }
 
 export function workerConsumedTokens(runtime: AgentRuntime, scope: TokenScope = "all"): number {
-  // Budget-strategy feature (see tmp/budget-strategy-plan.md, point 1):
-  // effectiveTokens is the live "what this worker contributes to the team
-  // token budget RIGHT NOW" value, debited at compaction_end and refreshed
-  // from runtime.contextTokens at message_end. It supersedes the historical
-  // while-running delta branch — the previous logic of
-  // `governanceTokens + (runtimeTokens(now) - runtimeTokens(runStart))` is
-  // gone because effectiveTokens is always authoritative. governanceTokens
-  // still wins for the freeze-after-run case (overwritten at agent_end, never
-  // shrinks; the budget sees the authoritative final number even if a
-  // compaction_end event was missed).
+  // Mid-run: return the LIVE cumulative consumption from runtime.* tokens,
+  // which the message_end handler updates incrementally after every model
+  // response. Without this branch, the ?? chain below would freeze at
+  // governanceTokens=0 (or the prior session's value) throughout the run,
+  // because governanceTokens is only written at agent_end. That would
+  // make the mid-run budget check in dispatch.ts:~660 a no-op — the
+  // worker overran 3500 tokens by 26x during testing before this fix
+  // landed.
+  //
+  // This is symmetric with workerConsumedCost (which already does the
+  // right thing mid-run: prior + (costUsd - runStartCostUsd)). The token
+  // path just needed the same treatment.
+  if (runtime.status === "running") {
+    return runtimeTokens(runtime, scope);
+  }
+  // Post-run / dispatch-time: governanceTokens is the authoritative frozen
+  // value (overwritten at agent_end, never shrinks; the budget sees the
+  // final number even if a compaction_end event was missed). The chain
+  // falls through to effectiveTokens then runtimeTokens as safety nets in
+  // case the run ended without writing governanceTokens (rare — e.g. the
+  // process crashed mid-run before agent_end fired).
   return runtime.governanceTokens ?? runtime.effectiveTokens ?? runtimeTokens(runtime, scope);
 }
 

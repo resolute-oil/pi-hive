@@ -454,19 +454,78 @@ test("freshResetRuntime resets governance counters alongside SDK counters when a
   }
 });
 
-test("freshResetRuntime is a no-op when no prior session file exists", () => {
-  // First-ever dispatch with fresh=true: the session file does not exist
-  // yet, so the helper returns early without mutating counters. The
-  // subsequent `??=` initialization at dispatch.ts:~270 still produces the
-  // correct (zeroed) initial governance values.
+test("freshResetRuntime resets counters even when no prior session file exists (archive is best-effort)", () => {
+  // The fresh counter reset is the contract — archive is a side effect.
+  // If the session file is missing (first-ever dispatch, transient
+  // filesystem hiccup, etc.), the reset still runs. Otherwise a fresh=true
+  // on a worker whose file was never written would silently skip the
+  // budget reset, which is the exact failure mode fresh=true exists to fix.
   const rt = runtime("worker", {
-    inputTokens: 100,
-    governanceTokens: 100,
+    inputTokens: 100, outputTokens: 50, cacheReadTokens: 20, cacheWriteTokens: 10, reasoningTokens: 5,
+    costUsd: 0.05, governanceTokens: 100, governanceCostUsd: 0.05, effectiveTokens: 80,
     sessionFile: "/nonexistent-path-that-does-not-exist-anywhere.jsonl",
   });
   freshResetRuntime(rt);
-  assert.equal(rt.inputTokens, 100, "SDK counters not touched when no prior session");
-  assert.equal(rt.governanceTokens, 100, "governance counters not touched when no prior session");
+  assert.equal(rt.inputTokens, 0, "SDK input tokens reset even without prior session file");
+  assert.equal(rt.outputTokens, 0, "SDK output tokens reset even without prior session file");
+  assert.equal(rt.cacheReadTokens, 0, "SDK cache read tokens reset even without prior session file");
+  assert.equal(rt.cacheWriteTokens, 0, "SDK cache write tokens reset even without prior session file");
+  assert.equal(rt.reasoningTokens, 0, "SDK reasoning tokens reset even without prior session file");
+  assert.equal(rt.costUsd, 0, "SDK cost reset even without prior session file");
+  assert.equal(rt.governanceTokens, 0, "governance tokens reset even without prior session file");
+  assert.equal(rt.governanceCostUsd, 0, "governance cost reset even without prior session file");
+  assert.equal(rt.effectiveTokens, 0, "effective tokens reset even without prior session file");
+});
+
+// ---------------------------------------------------------------------------
+// workerConsumedTokens mid-run vs post-run: the live mid-run branch is what
+// makes the in-flight budget check (dispatch.ts:~660) actually see this
+// run's consumption. Without it, governanceTokens dominates the ?? chain
+// at 0 mid-run (it's only written at agent_end), and the worker overruns
+// the cap silently. This is the Engineering Lead overblew 3500 by 26x
+// regression — a guard against the live branch ever being dropped.
+// ---------------------------------------------------------------------------
+
+test("workerConsumedTokens returns the live runtime.* sum when runtime.status === 'running' (mid-run)", () => {
+  const rt = runtime("worker", {
+    status: "running",
+    inputTokens: 2000,
+    outputTokens: 1500,
+    cacheReadTokens: 500,
+    cacheWriteTokens: 100,
+    reasoningTokens: 50,
+    // governanceTokens is the FROZEN prior-session value, deliberately
+    // much smaller than the live runtime.* sum so the test proves the
+    // live path wins (not governanceTokens).
+    governanceTokens: 100,
+  });
+  assert.equal(
+    workerConsumedTokens(rt, "all"),
+    2000 + 1500 + 500 + 100 + 50,
+    "mid-run returns live runtime.* sum, not the frozen governanceTokens",
+  );
+  assert.equal(
+    workerConsumedTokens(rt, "input_output"),
+    2000 + 1500,
+    "mid-run honors the scope argument",
+  );
+});
+
+test("workerConsumedTokens returns the frozen governanceTokens when runtime.status !== 'running' (post-run / dispatch-time)", () => {
+  const rt = runtime("worker", {
+    status: "idle",
+    inputTokens: 2000,
+    outputTokens: 1500,
+    // governanceTokens is the post-run authoritative value. dispatch-time
+    // budget checks see this — they answer "can this worker run again?"
+    // not "is the current run over budget?", so the live value is wrong.
+    governanceTokens: 8000,
+  });
+  assert.equal(
+    workerConsumedTokens(rt, "all"),
+    8000,
+    "post-run returns the frozen governanceTokens, not the live runtime.* sum",
+  );
 });
 
 // ---------------------------------------------------------------------------

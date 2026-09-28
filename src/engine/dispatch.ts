@@ -73,26 +73,40 @@ function archivePriorRun(sessionFile: string) {
 // shows every run) and zeros both the per-session SDK counters AND the
 // cumulative governance counters. Without the governance reset, the prior
 // session's exhausted total survives in runtime.governanceTokens and
-// checkDispatchBudgets at dispatch.ts:~213 immediately blocks the new
+// checkDispatchBudgets at dispatch.ts:~252 immediately blocks the new
 // dispatch even though the SDK session is clean — the orchestrator's
 // fresh=true respawn would silently no-op.
 //
+// Archive is best-effort: if the session file is missing or the rename
+// fails (permission, cross-device, etc.), the counter reset still runs.
+// fresh=true's contract is "give the worker a fresh budget", and the
+// archive is just a side effect to preserve the prior transcript for the
+// dashboard. Counting on archive success to gate the reset would mean a
+// transient filesystem hiccup silently breaks respawn — and a worker
+// whose session file was never written (first-ever dispatch with
+// fresh=true) would skip the reset entirely.
+//
 // Exported so the budget-strategy regression tests can verify the governance
 // counters reset without standing up the full dispatchAgent call graph.
-// Mirrors the inline reset that dispatchAgent uses; both call this helper.
 export function freshResetRuntime(runtime: AgentRuntime): void {
-  if (!existsSync(runtime.sessionFile)) return;
-  try {
-    archivePriorRun(runtime.sessionFile);
-    runtime.inputTokens = 0;
-    runtime.outputTokens = 0;
-    runtime.cacheReadTokens = 0;
-    runtime.cacheWriteTokens = 0;
-    runtime.reasoningTokens = 0;
-    runtime.costUsd = 0;
-    runtime.governanceTokens = 0;
-    runtime.governanceCostUsd = 0;
-  } catch { /* noop */ }
+  if (existsSync(runtime.sessionFile)) {
+    try { archivePriorRun(runtime.sessionFile); } catch { /* archive is best-effort */ }
+  }
+  runtime.inputTokens = 0;
+  runtime.outputTokens = 0;
+  runtime.cacheReadTokens = 0;
+  runtime.cacheWriteTokens = 0;
+  runtime.reasoningTokens = 0;
+  runtime.costUsd = 0;
+  runtime.governanceTokens = 0;
+  runtime.governanceCostUsd = 0;
+  // effectiveTokens is the "live" counter (per the comment in governance.ts,
+  // refreshed from contextTokens at message_end). The ?? chain in
+  // workerConsumedTokens prefers governanceTokens first, but zeroing
+  // effectiveTokens is defense-in-depth: any future change to the chain,
+  // or any caller that reads effectiveTokens directly, won't see stale
+  // numbers from the prior session after a fresh=true respawn.
+  runtime.effectiveTokens = 0;
 }
 
 // Session factory seam (L1): defaults to the real createAgentSession, but a test
@@ -205,6 +219,15 @@ export async function dispatchAgent(
   // (and the frozen config is still valid; the user can restart the session).
   if (fresh) {
     reloadAgentConfig(state, ctx, runtime);
+    // fresh=true must zero the worker's accumulated budget counters BEFORE
+    // any guard checks (mode, plan, canDelegateTo, checkDispatchBudgets).
+    // Otherwise an already-exhausted worker can't be respawned: the budget
+    // check at dispatch.ts:~252 would see the prior session's totals and
+    // return "Delegation blocked: ... token budget exhausted" before this
+    // point, so the new dispatch never starts. This was the original
+    // "fresh=true didn't reset the budget" bug — the reset was applied
+    // downstream of the budget check.
+    freshResetRuntime(runtime);
   }
   // Plan mode delegates to planners, leads, AND reviewers (Phase 5.1 decision):
   // reviewers give plan-phase feedback but stay read-only on files via the type
@@ -308,16 +331,14 @@ export async function dispatchAgent(
   // token/cost still count), ARCHIVE it to a numbered run file so the dashboard
   // can show every run. The live sessionFile always holds the current run.
   //
-  // Archiving means end-of-run getSessionStats() covers ONLY the fresh session
-  // (the prior transcript is no longer attached), so runtime.* will be overwritten
-  // with just-this-run totals — but the run-start baselines below would still hold
-  // the prior lifetime aggregates, making `runOnly − priorLifetime` go negative and
-  // silently clamp to 0 (the fresh-archive under-count). Reset the lifetime
-  // counters to 0 here so the baselines captured below are 0 and the per-run delta
-  // equals the fresh session's real usage.
-  if (fresh) {
-    freshResetRuntime(runtime);
-  }
+  // The fresh counter reset is handled above (right after reloadAgentConfig)
+  // so the budget check at dispatch.ts:~252 sees the zeroed values and lets
+  // the respawn through. Archiving itself happens inside freshResetRuntime
+  // (best-effort) — see its comment.
+  //
+  // The run-start baselines captured below are 0 because freshResetRuntime
+  // already zeroed runtime.* counters, so the per-run delta equals the
+  // fresh session's real usage.
 
   // Resolve the model FIRST, before mutating any per-run state. This is the
   // J4/Decision-5 reorder (the session is the only authoritative source of
