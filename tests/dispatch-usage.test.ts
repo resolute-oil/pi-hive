@@ -288,7 +288,7 @@ test("dispatchAgent enforces optional timeout and nested delegation depth", asyn
   worker.config.governance = { timeoutMs: 10, maxDelegationDepth: 1 };
   const state = {
     pi: {},
-    config: { orchestrator: { name: "Orchestrator", path: "o.md" }, agents: [worker.config], sharedContext: [], settings: { subagentOutputLimit: 100, defaultTools: "read", worker: {}, distiller: { enabled: false, model: "", conversationLines: 10 } } },
+    config: { orchestrator: { name: "Orchestrator", path: "o.md" }, agents: [worker.config], sharedContext: [], settings: { subagentOutputLimit: 100, defaultTools: "read", workerBudgets: {}, distiller: { enabled: false, model: "", conversationLines: 10 } } },
     session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: join(dir, "e.jsonl") },
     runtimes: new Map([["builder", worker]]), widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [], sddStatus: null, obsSeq: 0,
   } as any;

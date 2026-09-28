@@ -97,7 +97,7 @@ test("worker governance is opt-in with settings defaults and per-agent overrides
   const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
   let yaml = readFileSync(cfgPath, "utf8").replace(
     "  max-parallel: 2",
-    "  max-parallel: 2\n  queue-size: 4\n  worker:\n    timeout-ms: 5000\n    max-runs: 3\n  team-budgets:\n    token-budget: 100000\n    cost-budget-usd: 12.5",
+    "  max-parallel: 2\n  queue-size: 4\n  worker-budgets:\n    timeout-ms: 5000\n    max-runs: 3\n  team-budgets:\n    token-budget: 100000\n    cost-budget-usd: 12.5",
   );
   yaml = yaml.replace(
     "    - name: Frontend Dev\n      path: .pi/hive/agents/frontend.md",
@@ -106,7 +106,7 @@ test("worker governance is opt-in with settings defaults and per-agent overrides
   writeFileSync(cfgPath, yaml);
   const config = loadConfig(cwd);
   assert.equal(config.settings.queueSize, 4);
-  assert.deepEqual(config.settings.worker, { timeoutMs: 5000, maxRuns: 3 });
+  assert.deepEqual(config.settings.workerBudgets, { timeoutMs: 5000, maxRuns: 3 });
   assert.deepEqual(config.settings.teamBudgets, { tokenBudget: 100000, costBudgetUsd: 12.5 });
   assert.deepEqual(config.hive?.agents[0].governance, { maxRuns: 1, maxDelegationDepth: 2 });
 });
@@ -498,15 +498,15 @@ test("loadConfig rejects unknown settings and nested keys with path-aware errors
   assert.throws(() => loadConfig(cwd3), /hive\.agents\[0\]\.mysteryCapability is not a recognized configuration key/);
 });
 
-test("loadConfig accepts tokenBudgetScope on settings.worker, settings.teamBudgets, and per-agent governance", () => {
+test("loadConfig accepts tokenBudgetScope on settings.workerBudgets, settings.teamBudgets, and per-agent governance", () => {
   const cwd = fixtureProject();
   const file = join(cwd, ".pi", "hive", "hive-config.yaml");
   const base = readFileSync(file, "utf8");
-  // worker + teamBudgets both accept the kebab-case form documented in HANDOFF.md.
+  // worker-budgets + teamBudgets both accept the kebab-case form documented in HANDOFF.md.
   writeFileSync(file, base
-    .replace("  default-tools: read, grep", `  worker:\n    token-budget: 200000\n    token-budget-scope: input_output\n  team-budgets:\n    token-budget: 1000000\n    token-budget-scope: all\n  default-tools: read, grep`));
+    .replace("  default-tools: read, grep", `  worker-budgets:\n    token-budget: 200000\n    token-budget-scope: input_output\n  team-budgets:\n    token-budget: 1000000\n    token-budget-scope: all\n  default-tools: read, grep`));
   const cfg = loadConfig(cwd);
-  assert.equal(cfg.settings.worker?.tokenBudgetScope, "input_output");
+  assert.equal(cfg.settings.workerBudgets?.tokenBudgetScope, "input_output");
   assert.equal(cfg.settings.teamBudgets?.tokenBudgetScope, "all");
 
   // Per-agent governance block shares the same allowlist via the governance() helper.
@@ -521,20 +521,20 @@ test("loadConfig rejects unknown tokenBudgetScope values with a clear error", ()
   // Worker block — typo silently defaulting to "all" would defeat the user's intent,
   // so the raw-config layer fails loud instead of relying on governance.ts's ?? "all".
   for (const [badValue, expectedLabel] of [
-    ["inpt_output", "settings.worker.tokenBudgetScope"],
-    ["cache_only", "settings.worker.tokenBudgetScope"],
+    ["inpt_output", "settings.workerBudgets.tokenBudgetScope"],
+    ["cache_only", "settings.workerBudgets.tokenBudgetScope"],
   ] as const) {
     const cwd = fixtureProject();
     const file = join(cwd, ".pi", "hive", "hive-config.yaml");
-    writeFileSync(file, readFileSync(file, "utf8").replace("  default-tools: read, grep", `  worker:\n    token-budget: 200000\n    token-budget-scope: ${badValue}\n  default-tools: read, grep`));
+    writeFileSync(file, readFileSync(file, "utf8").replace("  default-tools: read, grep", `  worker-budgets:\n    token-budget: 200000\n    token-budget-scope: ${badValue}\n  default-tools: read, grep`));
     assert.throws(() => loadConfig(cwd), new RegExp(`${expectedLabel} must be one of input_output, all`), `value ${badValue}`);
   }
 
   // Non-string value (e.g. an unquoted number from a YAML typo) is also rejected.
   const cwdNumber = fixtureProject();
   const fileNumber = join(cwdNumber, ".pi", "hive", "hive-config.yaml");
-  writeFileSync(fileNumber, readFileSync(fileNumber, "utf8").replace("  default-tools: read, grep", "  worker:\n    token-budget: 200000\n    token-budget-scope: 7\n  default-tools: read, grep"));
-  assert.throws(() => loadConfig(cwdNumber), /settings\.worker\.tokenBudgetScope must be one of input_output, all/);
+  writeFileSync(fileNumber, readFileSync(fileNumber, "utf8").replace("  default-tools: read, grep", "  worker-budgets:\n    token-budget: 200000\n    token-budget-scope: 7\n  default-tools: read, grep"));
+  assert.throws(() => loadConfig(cwdNumber), /settings\.workerBudgets\.tokenBudgetScope must be one of input_output, all/);
 
   // teamBudgets uses an inline allowlist, separate from GOVERNANCE_KEYS.
   const cwdTeam = fixtureProject();

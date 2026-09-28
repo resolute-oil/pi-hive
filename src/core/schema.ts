@@ -140,7 +140,7 @@ export function validateHiveConfigShape(config: HiveConfig): void {
     assertNumber(config.settings.subagentOutputLimit, "settings.subagentOutputLimit");
     assertNumber(config.settings.maxParallel, "settings.maxParallel");
     assertNumber(config.settings.queueSize, "settings.queueSize");
-    validateGovernance(config.settings.worker, "settings.worker");
+    validateGovernance(config.settings.workerBudgets, "settings.workerBudgets");
     if (config.settings.teamBudgets) {
       assertObject(config.settings.teamBudgets, "settings.teamBudgets");
       assertNumber(config.settings.teamBudgets.maxRuns, "settings.teamBudgets.maxRuns");
