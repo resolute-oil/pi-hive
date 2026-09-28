@@ -373,6 +373,61 @@ test("dispatchAgent totals equal getSessionStats exactly — no message_end/agen
   assert.equal(worker.costUsd, 0.072);
 });
 
+// Bug 1 regression: fresh=true must zero the cumulative budget counter
+// BEFORE checkDispatchBudgets runs. Pre-fix (commit 081380a), the reset
+// was at dispatch.ts:~318, downstream of the budget check at line ~252,
+// so an already-exhausted worker couldn't be respawned via fresh=true
+// — the check fired first and returned "Delegation blocked: ... token
+// budget exhausted" before the reset ever ran. The fix (commit 3be33f6)
+// moved the reset up to line ~206, right after reloadAgentConfig. This
+// test pins that ordering: if a future refactor moves freshResetRuntime
+// back downstream of checkDispatchBudgets, this test will fail.
+test("dispatchAgent with fresh=true zeros governance counters before checkDispatchBudgets runs (Bug 1 regression)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-fresh-budget-"));
+  const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
+  // Simulate a worker whose prior run exhausted its budget.
+  // governanceTokens is the post-run authoritative value (set at
+  // agent_end) and equals the cap — without the fresh reset, the very
+  // next dispatch's checkDispatchBudgets would see this and return
+  // blocked before freshResetRuntime could run.
+  worker.governanceTokens = 1000;
+  const state: HiveState = {
+    pi: {} as any,
+    config: {
+      orchestrator: { name: "Orchestrator", path: "o.md" },
+      agents: [worker.config],
+      sharedContext: [],
+      settings: {
+        subagentOutputLimit: 100, defaultTools: "read", maxParallel: 2,
+        workerBudgets: { tokenBudget: 1000 },
+        distiller: { enabled: false, model: "", conversationLines: 10 },
+      },
+    } as any,
+    session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: join(dir, "e.jsonl") },
+    runtimes: new Map([["builder", worker]]),
+    widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
+    sddStatus: null, obsSeq: 0,
+  } as any;
+  const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", modelId: "model" }) } } as any;
+
+  const stats = { input: 200, output: 50, cacheRead: 10, cacheWrite: 5, cost: 0.02 };
+  const create: CreateAgentSession = (async () => ({ session: scriptedSession({ turns: [{ input: 200, output: 50, cacheWrite: 5, cost: 0.02 }], stats }) })) as any;
+
+  const result = await dispatchAgent(state, "Builder", "fresh respawn", ctx, true, create);
+
+  assert.doesNotMatch(
+    result.output,
+    /token budget exhausted/,
+    "fresh=true must reset the budget counter before checkDispatchBudgets runs — pre-fix this returned 'Delegation blocked: ... token budget exhausted' before the reset ever executed",
+  );
+  assert.equal(result.exitCode, 0, "fresh=true dispatch should succeed when budget is exhausted");
+  // The fresh session's stats overwrite the post-reset zeroed SDK counters.
+  assert.equal(worker.inputTokens, 200, "fresh session's stats overwrote the reset SDK counters");
+  // governanceTokens accumulates only the fresh run (the prior 1000 is gone).
+  // The fresh run used 200+50+10+5 = 265 tokens (default "all" scope).
+  assert.equal(worker.governanceTokens, 265, "governanceTokens reflects only the fresh run, not the prior 1000");
+});
+
 // Decision 1: delegation_end must carry PER-RUN deltas + delegationsSchema=1.
 // getSessionStats() returns session-LIFETIME aggregates, so a re-run agent's
 // runtime holds cumulative totals; the emitted delta must subtract the run-start

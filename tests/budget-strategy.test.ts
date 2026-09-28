@@ -501,12 +501,12 @@ test("workerConsumedTokens returns the live runtime.* sum when runtime.status ==
   });
   assert.equal(
     workerConsumedTokens(rt, "all"),
-    2000 + 1500 + 500 + 100 + 50,
+    4150, // 2000 input + 1500 output + 500 cacheRead + 100 cacheWrite + 50 reasoning
     "mid-run returns live runtime.* sum, not the frozen governanceTokens",
   );
   assert.equal(
     workerConsumedTokens(rt, "input_output"),
-    2000 + 1500,
+    3500, // 2000 input + 1500 output (scope-restricted)
     "mid-run honors the scope argument",
   );
 });

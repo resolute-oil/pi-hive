@@ -648,12 +648,17 @@ export async function dispatchAgent(
         if (norm) diagnostics.push(...norm);
       }
       if (message?.stopReason) lastStopReason = String(message.stopReason);
-      // Budget-strategy live refresh: if the SDK reports a smaller context
-      // load than the effectiveTokens snapshot, take the smaller value so
-      // the team total tracks the actual current context (not the cumulative
-      // session lifetime that grows monotonically). null post-compact until
-      // the next LLM response — leave effectiveTokens alone in that case so
-      // the post-compaction_end debit isn't clobbered by a null token read.
+      // Budget-strategy live refresh: take the smaller of the SDK-reported
+      // context load and the current effectiveTokens snapshot, so the team
+      // total tracks the actual current context (not the cumulative session
+      // lifetime that grows monotonically). null post-compact — leave
+      // effectiveTokens alone so the compaction_end debit isn't clobbered.
+      //
+      // Intentionally inert for the first message of a fresh=true respawn:
+      // freshResetRuntime zeros effectiveTokens to 0 (a number, not
+      // undefined), so neither disjunct fires (contextTokens < 0 is always
+      // false). compaction_end overwrites effectiveTokens regardless, so
+      // the team total stays correct after compaction.
       if (typeof runtime.contextTokens === "number" && (runtime.effectiveTokens === undefined || runtime.contextTokens < runtime.effectiveTokens)) {
         runtime.effectiveTokens = runtime.contextTokens;
       }
