@@ -19,6 +19,17 @@ Use the `Agent` and `SubagentWorkflow` tools from the globally-installed `@tinti
 
 **Do not use the `subagent` tool or any skill-driven subagent from `compound-engineering-pi`.** That tool spawns skill-based subagents and is not the right delegation mechanism here. The `Agent` tool from `@tintinweb/pi-subagents` is the only subagent-spawning tool you should reach for in this project. If a request looks like it needs `subagent` (skill-driven fan-out), route it through `Agent` or `SubagentWorkflow` instead.
 
+## User prompts with `ask_user`
+
+Use the `ask_user` tool to gate high-stakes or ambiguous decisions before continuing. Full decision-handshake protocol: read `/Users/cgrant/.pi/agent/npm/node_modules/pi-ask-user/skills/ask-user/references/ask-user-skill-extension-spec.md` before asking. The spec is authoritative; the summary below covers the common case.
+
+- **Trigger.** Ask for architecture trade-offs, schema/migration paths, security/compliance posture, requirements ambiguity, or non-trivial scope cuts. Skip for pure refactors with identical behavior, formatting-only edits, or anything the user has already decided.
+- **Display mode.** Always pass `displayMode: "inline"` on every `ask_user` call. The pop-up overlay interrupts the conversation flow; this project's preference is inline. The default `displayMode` (when omitted) is the user's configured preference, which is overlay — so the parameter must be set explicitly. (The `ask_user_question` tool does not accept `displayMode` and is for legacy flows only — prefer `ask_user` for new work.)
+- **One question at a time.** Classify the boundary as `high_stakes` / `ambiguous` / `both` / `clear`; gather evidence with tools first; summarize 3–7 bullets of context; ask one focused question; restate the chosen option and proceed.
+- **Retry policy.** Max 2 `ask_user` calls per boundary. After the second, stop and report blocked for `high_stakes` decisions; for ambiguous-only, proceed only with explicit user delegation using the most reversible default.
+
+This rule is here because the inline-display preference and the one-question-at-a-time discipline have slipped in past sessions.
+
 ## Pi package rules
 
 - Package entrypoint is `index.ts` and must remain declared in `package.json` under `pi.extensions`.
