@@ -207,7 +207,7 @@ export function loadConfig(cwd: string): HiveConfig {
       defaultTools: settings.defaultTools ?? "read, grep, find, ls",
       maxParallel: settings.maxParallel,
       queueSize: settings.queueSize,
-      worker: settings.worker,
+      workerBudgets: settings.workerBudgets,
       teamBudgets: settings.teamBudgets,
       secretPaths: Array.isArray(settings.secretPaths) ? settings.secretPaths.map((entry: unknown) => String(entry).trim()).filter(Boolean) : [],
       telemetry: {

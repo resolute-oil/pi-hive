@@ -134,7 +134,7 @@ export interface AgentConfig {
   // config, NOT agent-type. There is no "commit ⇒ lead" enforcement — a small
   // project may deliberately let a leaf agent commit. Do not add a type gate here.
   commit?: string;
-  // Optional worker-governance overrides. Omitted fields inherit settings.worker;
+  // Optional worker-governance overrides. Omitted fields inherit settings.workerBudgets;
   // if neither level provides a value, that resource is intentionally unlimited.
   governance?: WorkerGovernance;
   // Derived grouping label: the name of the top-level agent (the orchestrator's
@@ -195,7 +195,7 @@ export interface HiveSettings {
   // hidden default. queueSize only activates fair waiting when maxParallel is hit.
   maxParallel?: number;
   queueSize?: number;
-  worker?: WorkerGovernance;
+  workerBudgets?: WorkerGovernance;
   teamBudgets?: TeamBudgets;
   telemetry?: TelemetrySettings;
   // Project-relative paths that no worker may read or mutate, even when a broad
