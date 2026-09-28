@@ -13,6 +13,7 @@ import {
 } from "../core/utils";
 import { routeAgents } from "../engine/routing";
 import { dispatchAgent } from "../engine/dispatch";
+import { buildSummarizeProgressTool } from "./tools/summarize-progress";
 import { scheduleMentalModelDistillation } from "../engine/distiller";
 import { renderHiveSddStatus, resolveHiveSddStatus } from "../engine/sdd";
 import { currentChangeId } from "../engine/session";
@@ -358,6 +359,12 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
   }),
 
   ];
+
+  // summarize_progress is universal for all callers (workers and orchestrator
+  // alike) — the strategy wiring + cap lives in budget-strategy.ts, and the
+  // tool is intentionally registered even when no budget strategy is active so
+  // a worker that later opts into one can call it without tool-rebuild.
+  baseTools.push(buildSummarizeProgressTool(state, callerName));
 
   // Type-scoped tools. These are granted by AGENT TYPE (not the tools list), so
   // they are appended here only for the eligible type and are kept through

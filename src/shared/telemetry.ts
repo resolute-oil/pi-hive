@@ -61,6 +61,15 @@ export type HiveTelemetryEventType =
   | "distill_end"
   | "budget_warning"
   | "budget_exhausted"
+  // Budget-strategy feature: emitted by compaction_end when the team total
+  // drops because a worker compacted its context (cause: "compaction") or was
+  // respawned by an operator (cause: "respawn"). Dashboard reads the savings
+  // field to surface "team budget freed by compact N tokens" in the UI.
+  | "team_budget_recalculated"
+  // Budget-strategy feature: emitted by the operator-intervention commands
+  // (endWorkerSession, compactWorkerSession, respawnWorkerSession) so the
+  // dashboard can pair the action with the runtime's final state.
+  | "session_ended_by_operator"
   | "queue_update"
   // Plan-store events. Emitted by the core (which cannot reach bun:sqlite) and
   // materialized into typed plan_* tables by the dashboard on ingest (§7.4).

@@ -27,7 +27,8 @@ import { ARTIFACT_ORDER, type ArtifactId } from "../shared/openspec-artifacts";
 import { agentRoster, resolveRuntime } from "./agent-lookup";
 import { addHiveActivity } from "../ui/tui/activity";
 import { resolveConfiguredPath } from "../core/safe-path";
-import { acquireWorkerSlot, budgetRemaining, checkDispatchBudgets, effectiveWorkerGovernance, releaseWorkerSlot } from "./governance";
+import { acquireWorkerSlot, budgetRemaining, checkDispatchBudgets, effectiveWorkerGovernance, releaseWorkerSlot, workerConsumedTokens } from "./governance";
+import { emitBudgetWarning } from "./budget-strategy";
 import { WorkerRunLifecycle } from "./worker-lifecycle";
 import { modelKey, resolveModel } from "./model-resolution";
 
@@ -550,6 +551,28 @@ export async function dispatchAgent(
         willRetry: (result.willRetry ?? event.willRetry) === true ? true : undefined,
         errorMessage: (result.errorMessage ?? event.errorMessage) ? truncateMiddle(String(result.errorMessage ?? event.errorMessage), 500) : undefined,
       }, runtime.config.name);
+      // Budget-strategy team recalc (point 1): a successful compact shrinks
+      // the worker's contribution to the team token budget by (tokensBefore
+      // - estimatedTokensAfter). The session's input/output/cache counters
+      // are session-lifetime aggregates and would still grow, so this is the
+      // ONLY mechanism that actually frees team budget across compacts.
+      // Compaction that didn't shrink (aborted, errored, or no result fields)
+      // is a no-op — we don't debit a non-event.
+      const tokensBefore = finiteOrUndef(result.tokensBefore ?? event.tokensBefore);
+      const estimatedTokensAfter = finiteOrUndef(result.estimatedTokensAfter ?? event.estimatedTokensAfter);
+      if (tokensBefore != null && estimatedTokensAfter != null && tokensBefore > estimatedTokensAfter) {
+        const savings = tokensBefore - estimatedTokensAfter;
+        const prior = workerConsumedTokens(runtime);
+        runtime.effectiveTokens = Math.max(0, prior - savings);
+        emitHiveEvent(state, "team_budget_recalculated", {
+          agent: runtime.config.name,
+          cause: "compaction",
+          tokensBefore,
+          tokensAfter: estimatedTokensAfter,
+          savings,
+          team: budgetRemaining(state, runtime).team,
+        }, runtime.config.name);
+      }
     } else if (event.type === "queue_update") {
       // Worker steering/follow-up queue depth (Phase 4). Bounded to counts — the
       // queued message bodies are not carried into telemetry.
@@ -580,6 +603,15 @@ export async function dispatchAgent(
         if (norm) diagnostics.push(...norm);
       }
       if (message?.stopReason) lastStopReason = String(message.stopReason);
+      // Budget-strategy live refresh: if the SDK reports a smaller context
+      // load than the effectiveTokens snapshot, take the smaller value so
+      // the team total tracks the actual current context (not the cumulative
+      // session lifetime that grows monotonically). null post-compact until
+      // the next LLM response — leave effectiveTokens alone in that case so
+      // the post-compaction_end debit isn't clobbered by a null token read.
+      if (typeof runtime.contextTokens === "number" && (runtime.effectiveTokens === undefined || runtime.contextTokens < runtime.effectiveTokens)) {
+        runtime.effectiveTokens = runtime.contextTokens;
+      }
       const usage = message?.usage;
       if (usage) {
         // Incremental accumulation for live display only. Authoritative totals
@@ -602,7 +634,11 @@ export async function dispatchAgent(
           const warnings = state.budgetWarnings ||= new Set<string>();
           if (warnings.has(warningKey)) return;
           warnings.add(warningKey);
-          emitHiveEvent(state, "budget_warning", { agent: runtime.config.name, scope, resource, remaining: left, limit }, runtime.config.name);
+          // Budget-strategy: emitBudgetWarning adds the interventionAvailable
+          // flag (only under the "default" strategy) and appends the prompt
+          // hint to runtime.systemPrompt so the next fresh-session prompt
+          // picks it up. The dedup key above still gates repeat emissions.
+          emitBudgetWarning(state, runtime, { scope, resource, remaining: left, limit });
         };
         warn(remaining.worker.tokens, governance.tokenBudget, "worker", "tokens");
         warn(remaining.worker.costUsd, governance.costBudgetUsd, "worker", "cost");
@@ -840,4 +876,158 @@ export async function dispatchAgent(
   writeHiveStateSnapshot(state);
   state.onRuntimeFinish?.(runtime, ctx);
   return { output, exitCode, elapsed: runtime.elapsedMs };
+}
+
+// ---------------------------------------------------------------------------
+// Operator intervention commands (budget-strategy, point 2+3).
+//
+// All three accept any strategy — the engine does NOT gate on strategy. The
+// dashboard UI is the only layer that filters by strategy via the
+// `interventionAvailable` flag on the budget_warning event. Documenting this
+// here so future dashboard work doesn't try to add strategy checks to the
+// dispatch commands themselves.
+//
+// The `compact` strategy is automatic and never exposes operator actions; the
+// `default` strategy exposes all three via the dashboard UI.
+// ---------------------------------------------------------------------------
+
+export type OperatorAction = "end" | "compact" | "respawn";
+
+export type OperatorCommandResult =
+  | { ok: true; action: OperatorAction; agent: string }
+  | { ok: false; action: OperatorAction; agent?: string; reason: string };
+
+function findWorkerRuntime(state: HiveState, agentName: string): { ok: true; runtime: AgentRuntime } | { ok: false; reason: string } {
+  if (!state.config) return { ok: false, reason: "hive is not initialized" };
+  const runtime = resolveRuntime(state, agentName);
+  if (!runtime) return { ok: false, reason: `Unknown agent "${agentName}". Available: ${agentRoster(state)}` };
+  if (runtime.config.role === "orchestrator") return { ok: false, reason: `Cannot apply operator actions to the orchestrator runtime.` };
+  return { ok: true, runtime };
+}
+
+// End — terminate the worker's run. Aborts via AgentSession.abort() (the
+// public API; cleaner than fishing the local runController out of
+// dispatchAgent's scope). progressNotes stay on the runtime for inspection.
+export async function endWorkerSession(state: HiveState, agentName: string, reason: string): Promise<OperatorCommandResult> {
+  const lookup = findWorkerRuntime(state, agentName);
+  if (!lookup.ok) return { ok: false, reason: lookup.reason, action: "end" };
+  const { runtime } = lookup;
+  const session = runtime.session;
+  if (session && typeof session.abort === "function") {
+    try { await session.abort(); } catch { /* best-effort — abort must not throw out of the operator path */ }
+  }
+  emitHiveEvent(state, "session_ended_by_operator", {
+    agent: runtime.config.name,
+    action: "end",
+    reason: truncateMiddle(String(reason ?? ""), 500),
+    progressNotes: runtime.progressNotes ? truncateMiddle(runtime.progressNotes, 500) : undefined,
+  }, runtime.config.name);
+  return { ok: true, agent: runtime.config.name, action: "end" };
+}
+
+// Compact — trigger /compact on the existing session. progressNotes (recorded
+// via summarize_progress) travel as customInstructions so the next prompt
+// carries the worker's wrap-up notes. Aborts the in-progress run so the next
+// turn starts from the rolled context.
+export async function compactWorkerSession(state: HiveState, agentName: string, reason: string): Promise<OperatorCommandResult> {
+  const lookup = findWorkerRuntime(state, agentName);
+  if (!lookup.ok) return { ok: false, reason: lookup.reason, action: "compact" };
+  const { runtime } = lookup;
+  const session = runtime.session;
+  const instructions = runtime.progressNotes || "";
+  if (!session || typeof session.compact !== "function") {
+    return { ok: false, reason: `Worker "${agentName}" has no live session.compact().`, agent: runtime.config.name, action: "compact" };
+  }
+  try {
+    if (typeof session.abort === "function") {
+      try { await session.abort(); } catch { /* see endWorkerSession */ }
+    }
+    await session.compact(instructions);
+  } catch (err) {
+    emitHiveEvent(state, "session_ended_by_operator", {
+      agent: runtime.config.name,
+      action: "compact_failed",
+      reason: truncateMiddle(String(reason ?? ""), 500),
+      error: err instanceof Error ? err.message : String(err),
+    }, runtime.config.name);
+    return { ok: false, reason: `Compact failed for "${agentName}": ${err instanceof Error ? err.message : String(err)}`, agent: runtime.config.name, action: "compact" };
+  }
+  emitHiveEvent(state, "session_ended_by_operator", {
+    agent: runtime.config.name,
+    action: "compact",
+    reason: truncateMiddle(String(reason ?? ""), 500),
+    progressNotes: runtime.progressNotes ? truncateMiddle(runtime.progressNotes, 500) : undefined,
+  }, runtime.config.name);
+  return { ok: true, agent: runtime.config.name, action: "compact" };
+}
+
+// Respawn — abort the old session, archive it via the existing fresh=true
+// archive path, remove the runtime from state.runtimes (this is what makes
+// the team total drop — the entry is no longer iterated by teamUsage),
+// emit team_budget_recalculated with cause "respawn", then create a new
+// runtime for the same agent and dispatch it with fresh=true.
+//
+// The caller (dashboard UI) supplies `newTask` if the operator wants to
+// redirect the worker's task; otherwise we reuse runtime.task. The
+// `caller` recorded as "operator" is set via runAsAgent("operator", ...) so
+// any nested delegate_agent inside the respawned worker inherits the
+// operator caller name (currentAgentName() resolves from the AsyncLocalStorage
+// scope in session.ts).
+export async function respawnWorkerSession(
+  state: HiveState,
+  agentName: string,
+  reason: string,
+  newTask?: string,
+  ctx?: ExtensionContext,
+  // Injection seam for tests. The real respawn dispatches a new agent
+  // fire-and-forget; tests pass a mock that captures the args without
+  // running the heavy session-create path. Mirrors the createSession
+  // default-param pattern on dispatchAgent itself.
+  dispatch: typeof dispatchAgent = dispatchAgent,
+): Promise<OperatorCommandResult> {
+  const lookup = findWorkerRuntime(state, agentName);
+  if (!lookup.ok) return { ok: false, reason: lookup.reason, action: "respawn" };
+  const { runtime } = lookup;
+  const taskToUse = newTask?.trim() || runtime.task;
+  const oldEffective = workerConsumedTokens(runtime);
+  const oldAgentName = runtime.config.name;
+  const session = runtime.session;
+  if (session && typeof session.abort === "function") {
+    try { await session.abort(); } catch { /* see endWorkerSession */ }
+  }
+  // Emit the recalc event BEFORE removing the runtime so budgetRemaining sees
+  // the pre-removal team total (the snapshot the dashboard cares about).
+  emitHiveEvent(state, "team_budget_recalculated", {
+    agent: oldAgentName,
+    cause: "respawn",
+    savings: oldEffective,
+    team: budgetRemaining(state, runtime).team,
+  }, oldAgentName);
+  emitHiveEvent(state, "session_ended_by_operator", {
+    agent: oldAgentName,
+    action: "respawn",
+    reason: truncateMiddle(String(reason ?? ""), 500),
+    progressNotes: runtime.progressNotes ? truncateMiddle(runtime.progressNotes, 500) : undefined,
+    savings: oldEffective,
+  }, oldAgentName);
+  // Verify we can dispatch the replacement BEFORE destroying the old runtime.
+  // If we delete first and ctx is missing (e.g. the dashboard lost its
+  // ExtensionContext between mint and click), the worker's state is gone
+  // and there's no recovery path. Surface the error with the old runtime
+  // still intact so the operator can retry.
+  if (!ctx) {
+    return { ok: false, reason: `Respawn of "${agentName}" requires an ExtensionContext.`, agent: oldAgentName, action: "respawn" };
+  }
+  // Destroy the old runtime so teamUsage stops counting it. The fresh=true
+  // archive path inside dispatchAgent handles session archival; we just need
+  // to remove the runtime entry.
+  state.runtimes.delete(agentName);
+  publishRuntimeUpdate(state);
+  writeHiveStateSnapshot(state);
+  // Fire-and-forget the new dispatch. The caller awaits operator notification;
+  // the respawned worker runs detached. Set the caller to "operator" so any
+  // nested delegate_agent inside the new run inherits operator-level audit
+  // (the AsyncLocalStorage scope in session.ts carries it).
+  void runAsAgent("operator", () => dispatch(state, agentName, taskToUse, ctx, true));
+  return { ok: true, agent: agentName, action: "respawn" };
 }

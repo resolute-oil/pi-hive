@@ -622,6 +622,8 @@ function materializeTypedEvent(event: HiveTelemetryEvent) {
     case "distill_end":
     case "budget_warning":
     case "budget_exhausted":
+    case "team_budget_recalculated":
+    case "session_ended_by_operator":
     case "queue_update":
     case "review_verdict":
     case "plan_approval":

@@ -30,10 +30,13 @@ function assertStringEnum(value: unknown, label: string, allowed: readonly strin
 function validateGovernance(value: unknown, label: string) {
   if (value === undefined) return;
   assertObject(value, label);
-  for (const key of ["timeoutMs", "maxDelegationDepth", "maxRuns", "tokenBudget", "costBudgetUsd", "distillerRuns"] as const) {
+  for (const key of ["timeoutMs", "maxDelegationDepth", "maxRuns", "tokenBudget", "costBudgetUsd", "distillerRuns", "progressSummaryTokenLimit"] as const) {
     assertNumber(value[key], `${label}.${key}`);
   }
   assertStringEnum(value.tokenBudgetScope, `${label}.tokenBudgetScope`, ["input_output", "all"]);
+  // Budget-strategy feature: only "default" and "compact" are accepted; any
+  // other value (including the legacy "respawn") hard-fails at config load.
+  assertStringEnum(value.budgetStrategy, `${label}.budgetStrategy`, ["default", "compact"]);
 }
 
 function validateKnowledgeRefs(value: unknown, label: string) {

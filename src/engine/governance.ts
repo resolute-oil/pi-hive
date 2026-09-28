@@ -30,20 +30,18 @@ function runtimeTokens(runtime: AgentRuntime, scope: TokenScope = "all"): number
     : base + runtime.cacheReadTokens + runtime.cacheWriteTokens + runtime.reasoningTokens;
 }
 
-function runtimeTokenBaseline(runtime: AgentRuntime, scope: TokenScope): number {
-  const base = (runtime.runStartInputTokens || 0) + (runtime.runStartOutputTokens || 0);
-  return scope === "input_output"
-    ? base
-    : base
-      + (runtime.runStartCacheReadTokens || 0)
-      + (runtime.runStartCacheWriteTokens || 0)
-      + (runtime.runStartReasoningTokens || 0);
-}
-
 export function workerConsumedTokens(runtime: AgentRuntime, scope: TokenScope = "all"): number {
-  const prior = runtime.governanceTokens ?? runtimeTokens(runtime, scope);
-  if (runtime.status !== "running" || runtime.governanceTokens === undefined) return prior;
-  return prior + Math.max(0, runtimeTokens(runtime, scope) - runtimeTokenBaseline(runtime, scope));
+  // Budget-strategy feature (see tmp/budget-strategy-plan.md, point 1):
+  // effectiveTokens is the live "what this worker contributes to the team
+  // token budget RIGHT NOW" value, debited at compaction_end and refreshed
+  // from runtime.contextTokens at message_end. It supersedes the historical
+  // while-running delta branch — the previous logic of
+  // `governanceTokens + (runtimeTokens(now) - runtimeTokens(runStart))` is
+  // gone because effectiveTokens is always authoritative. governanceTokens
+  // still wins for the freeze-after-run case (overwritten at agent_end, never
+  // shrinks; the budget sees the authoritative final number even if a
+  // compaction_end event was missed).
+  return runtime.governanceTokens ?? runtime.effectiveTokens ?? runtimeTokens(runtime, scope);
 }
 
 export function workerConsumedCost(runtime: AgentRuntime): number {

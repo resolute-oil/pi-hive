@@ -72,6 +72,16 @@ This rule is here because the inline-display preference and the one-question-at-
 
   Clean up with `git worktree remove .worktrees/<branch>` after the branch merges. This rule applies to every agent session that touches this repo, including the one writing this rule.
 
+- **Never `git worktree remove --force` a worktree with uncommitted changes.** `git worktree remove --force` deletes the working tree (the files on disk), not just the branch link. Any uncommitted work in the worktree — staged, unstaged, or untracked — is **destroyed silently and totally** the instant the command runs; git's object store only has committed content, so there is no recovery path. The conversation history is the only surviving copy. This applies even when the user explicitly asks for a fast APP_ROOT switch (the "checkout this branch so I can test" pattern documented in HANDOFF.md pitfall #19 — that recipe assumes the work is already committed).
+
+  **Mandatory precheck before `git worktree remove --force .worktrees/<branch>`:** run `cd .worktrees/<branch> && git status` first. If the output is anything other than `nothing to commit, working tree clean`, do ONE of the following, in order of preference:
+
+  1. **Commit** if the work is ready: `git -C .worktrees/<branch> add -A && git commit -m "..."`. The commit lives on the branch, which survives the worktree removal.
+  2. **Back up** if not ready: `git -C .worktrees/<branch> diff > /tmp/<branch>.diff && git -C .worktrees/<branch> ls-files --others --exclude-standard > /tmp/<branch>.untracked`. Both files together reproduce the uncommitted state; the diff captures tracked-file changes, the untracked list captures new files.
+  3. **Stash** as a last resort: `git -C .worktrees/<branch> stash push -u -m "<branch>-pre-remove"`. Stash survives worktree removal; recovery is `git stash pop` in the new checkout.
+
+  The precheck takes ~2 seconds (`cd .worktrees/<branch> && git log --oneline -3 && git status --short`). The recovery from a wrong call can take hours. **Do not skip the precheck even when the user is waiting.** A 2-second pause to verify a clean tree is acceptable; a multi-hour reconstruction after silent total work loss is not. See HANDOFF.md pitfall #29 for the full incident.
+
 - **`bash` and `edit` tool calls default to the main working tree.**
   Each `bash` invocation starts in `APP_ROOT` (the bare checkout on
   `main`); the cwd resets between calls, so prefix any in-worktree

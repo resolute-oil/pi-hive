@@ -51,6 +51,9 @@ function positiveNumber(value: unknown, label: string, max: number): void {
 const TOKEN_BUDGET_SCOPES = ["input_output", "all"] as const;
 type TokenBudgetScope = typeof TOKEN_BUDGET_SCOPES[number];
 
+const BUDGET_STRATEGIES = ["default", "compact"] as const;
+type BudgetStrategy = typeof BUDGET_STRATEGIES[number];
+
 function stringEnum<T extends string>(value: unknown, label: string, allowed: readonly T[]): void {
   if (value === undefined) return;
   if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) {
@@ -58,7 +61,7 @@ function stringEnum<T extends string>(value: unknown, label: string, allowed: re
   }
 }
 
-const GOVERNANCE_KEYS = ["timeoutMs", "maxDelegationDepth", "maxRuns", "tokenBudget", "tokenBudgetScope", "costBudgetUsd", "distillerRuns"] as const;
+const GOVERNANCE_KEYS = ["timeoutMs", "maxDelegationDepth", "maxRuns", "tokenBudget", "tokenBudgetScope", "costBudgetUsd", "distillerRuns", "budgetStrategy", "progressSummaryTokenLimit"] as const;
 
 function governance(value: unknown, label: string): void {
   if (value === undefined) return;
@@ -71,6 +74,10 @@ function governance(value: unknown, label: string): void {
   stringEnum<TokenBudgetScope>(value.tokenBudgetScope, `${label}.tokenBudgetScope`, TOKEN_BUDGET_SCOPES);
   positiveNumber(value.costBudgetUsd, `${label}.costBudgetUsd`, 1_000_000_000);
   positiveInteger(value.distillerRuns, `${label}.distillerRuns`, 1_000_000);
+  // Budget-strategy feature: only "default" and "compact" are accepted; any
+  // other value (including the legacy "respawn") hard-fails at config load.
+  stringEnum<BudgetStrategy>(value.budgetStrategy, `${label}.budgetStrategy`, BUDGET_STRATEGIES);
+  positiveInteger(value.progressSummaryTokenLimit, `${label}.progressSummaryTokenLimit`, 1_000_000);
 }
 
 function stringList(value: unknown, label: string): void {

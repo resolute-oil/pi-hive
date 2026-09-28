@@ -176,6 +176,17 @@ export interface WorkerGovernance {
   tokenBudgetScope?: "input_output" | "all";
   costBudgetUsd?: number;
   distillerRuns?: number;
+  // Budget-strategy feature (see tmp/budget-strategy-plan.md): how the worker
+  // is notified when its budget is approaching the limit, and what action
+  // (if any) is taken at 0%. Only "default" and "compact" are accepted;
+  // "respawn" was dropped from scope — see the plan's "Why respawn was
+  // dropped" section for context.
+  budgetStrategy?: "default" | "compact";
+  // Shared cap for `summarize_progress({ notes })` tool input. Default 2000
+  // tokens (resolved in the budget-strategy module). Over-cap notes are
+  // rejected at tool-call time so the worker can trim and retry, rather than
+  // silently truncating the wrap-up context the next prompt depends on.
+  progressSummaryTokenLimit?: number;
 }
 
 export interface TeamBudgets {
@@ -232,6 +243,15 @@ export interface AgentRuntime {
   status: AgentStatus;
   task: string;
   lastWork: string;
+  // Wrap-up notes recorded via the `summarize_progress` tool. Stays on the
+  // runtime until the worker session is destroyed or replaced. Used as the
+  // context handoff prepended to the next prompt by both:
+  //   - worker-driven `summarize_progress({ compact: true })` under the
+  //     `compact` strategy, and
+  //   - system force-compact at 0% under the `compact` strategy.
+  // Also visible to operator interventions (end / compact / respawn) so the
+  // operator sees what the worker recorded before the action is taken.
+  progressNotes?: string;
   toolCount: number;
   elapsedMs: number;
   inputTokens: number;
@@ -247,6 +267,14 @@ export interface AgentRuntime {
   // never reset on fresh=true, so a fresh transcript cannot bypass budgets.
   governanceTokens?: number;
   governanceCostUsd?: number;
+  // Current context load (budget-strategy plan, point 1): what this worker
+  // contributes to the team token budget RIGHT NOW. Defaults to
+  // runtimeTokens(runtime) when undefined. At compaction_end, debited by
+  // (tokensBefore - estimatedTokensAfter) — see dispatch.ts's compaction_end
+  // handler. Refreshed from runtime.contextTokens at message_end when the
+  // SDK reports a smaller value. Cost is NOT recalculated; only the tokens
+  // budget gets the savings credit.
+  effectiveTokens?: number;
   contextPct: number;
   // Raw context-window fill (Phase 4.7): the tokens/window behind contextPct.
   contextTokens?: number;
