@@ -115,3 +115,28 @@ test("team_status surfaces context fill and fresh/resume advice", async () => {
   assert.equal(res.details.agents[0].contextWindow, 200_000);
   assert.equal(res.details.agents[0].contextAdvice, "fresh-recommended");
 });
+
+// ── B4: team_status tokens field uses the full "all" sum, not the dead
+//     `tokenBudgetScope === "input_output"` branch. After F9 cutover
+//     (G-16) `effectiveWorkerGovernance(...)` returns `Object.freeze({})`,
+//     so the input_output-only branch was unreachable. The audit (HTML §5
+//     B4) recommends deleting it. This test pins the live (full-sum)
+//     behavior so the deletion doesn't accidentally regress.
+// ---------------------------------------------------------------------------
+
+test("team_status: tokens field is the full sum (input + output + cache + reasoning), not input_output-only (B4)", async () => {
+  const builder = runtime("Builder", { agentType: "coder" });
+  builder.inputTokens = 100;
+  builder.outputTokens = 200;
+  builder.cacheReadTokens = 300;
+  builder.cacheWriteTokens = 400;
+  builder.reasoningTokens = 500;
+  const state = stateWith([builder]);
+
+  const status = buildHiveTools(state, "Orchestrator").find((t) => t.name === "team_status")!;
+  const res = await (status.execute as any)("id", {});
+
+  // 100 + 200 + 300 + 400 + 500 = 1500. The dead input_output branch would
+  // have returned 300 (just input + output).
+  assert.equal(res.details.agents[0].tokens, 1500, "team_status tokens is the full all-scope sum");
+});

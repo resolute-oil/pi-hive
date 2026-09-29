@@ -27,7 +27,7 @@ import { emitHiveEvent } from "../engine/observability";
 import * as openspec from "../engine/openspec";
 import { agentRef, agentRoster, resolveRuntime } from "../engine/agent-lookup";
 import { agentSlug } from "../core/utils";
-import { budgetRemaining, effectiveWorkerGovernance } from "../engine/budget/display";
+import { budgetRemaining } from "../engine/budget/display";
 
 type ToolUpdate = AgentToolUpdateCallback<object>;
 // Replaced the local `ToolRenderOptions` shape with the SDK's
@@ -169,12 +169,12 @@ export function buildHiveTools(
         task: runtime.task,
         lastWork: runtime.lastWork,
         costUsd: runtime.costUsd,
-        // Show the same number the budget tracks. Under the default "all"
-        // scope this includes cache reads/writes and reasoning; under
-        // tokenBudgetScope: "input_output" it's the input/output total only.
-        tokens: effectiveWorkerGovernance(state, runtime).tokenBudgetScope === "input_output"
-          ? runtime.inputTokens + runtime.outputTokens
-          : runtime.inputTokens + runtime.outputTokens + runtime.cacheReadTokens + runtime.cacheWriteTokens + runtime.reasoningTokens,
+        // Show the same number the budget tracks. Post-F9 (G-16 cutover)
+        // the only scope is the full sum: input + output + cache reads/writes
+        // + reasoning. The legacy `tokenBudgetScope: "input_output"` branch
+        // was unreachable since `effectiveWorkerGovernance(...)` returns
+        // `Object.freeze({})` — see audit B4 (HTML §5).
+        tokens: runtime.inputTokens + runtime.outputTokens + runtime.cacheReadTokens + runtime.cacheWriteTokens + runtime.reasoningTokens,
         contextPct: runtime.contextPct,
         contextTokens: runtime.contextTokens,
         contextWindow: runtime.contextWindow,

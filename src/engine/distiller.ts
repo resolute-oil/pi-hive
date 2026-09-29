@@ -21,7 +21,6 @@ import { logRecord } from "./state";
 import { resolveConfiguredPath } from "../core/safe-path";
 import { agentMentalModelTarget, buildDistillerPrompt, extractTagged } from "./prompts";
 import { emitHiveEvent } from "./observability";
-import { effectiveWorkerGovernance } from "./budget/display";
 import { resolveModel } from "./model-resolution";
 
 export async function runDistillerProcess(state: HiveState, ctx: ExtensionContext, prompt: string, model: string): Promise<string> {
@@ -136,11 +135,13 @@ export function scheduleMentalModelDistillation(
 ): Promise<void> {
   const target = agentMentalModelTarget(runtime);
   if (!target || state.shuttingDown) return Promise.resolve();
-  const governance = effectiveWorkerGovernance(state, runtime);
-  if (governance.distillerRuns !== undefined && (runtime.distillerRunCount || 0) >= governance.distillerRuns) {
-    emitHiveEvent(state, "budget_exhausted", { agent: runtime.config.name, scope: "worker", resource: "distillerRuns", remaining: 0, limit: governance.distillerRuns }, "Distiller");
-    return Promise.resolve();
-  }
+  // The legacy `governance.distillerRuns` cap was removed by F9 (G-16
+  // cutover). `effectiveWorkerGovernance(...)` returns `Object.freeze({})`,
+  // so the prior pre-check and the race-safe re-check inside the queued
+  // task were both dead — they never fired. The distiller now runs
+  // unconditionally per task; if a per-worker cap is reintroduced it
+  // should live on `state.config.settings.budgets.perWorker.<cap>`, not
+  // on the deprecated governance shape. See audit B4 (HTML §5).
   const runCount = runtime.runCount;
   const queues = state.distillQueues ||= new Map<string, Promise<void>>();
   const background = state.backgroundTasks ||= new Set<Promise<void>>();
@@ -149,8 +150,6 @@ export function scheduleMentalModelDistillation(
     // A newer run for the same runtime supersedes this queued snapshot. Skipping
     // it prevents an old conversation from overwriting a newer mental model.
     if (state.shuttingDown || runtime.runCount !== runCount) return;
-    // Reserve at launch time so queued distillers cannot all pass the same cap.
-    if (governance.distillerRuns !== undefined && (runtime.distillerRunCount || 0) >= governance.distillerRuns) return;
     runtime.distillerRunCount = (runtime.distillerRunCount || 0) + 1;
     await runDistiller(state, ctx, runtime);
   }).catch((): void => undefined);
