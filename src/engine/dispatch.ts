@@ -372,12 +372,18 @@ export async function dispatchAgent(
   // the session to the lifecycle. If `installBudgetEventHooks` throws (e.g.
   // `session.subscribe(...)` rejects), the lifecycle already owns the
   // session, so `close(failed=true)` aborts and disposes it cleanly.
+  //
+  // Wave 5 / F3 — also wires the budget tool_call guard on
+  // `session.agent.beforeToolCall`. Pass `currentDelegationDepth: () => delegationDepth`
+  // so checkBudgetPolicy sees the per-call depth captured at this dispatch's
+  // start (events.ts / G-29 contract — `currentDelegationDepth() + 1`).
   await installWorkerBudgetHooks({
     runtime,
     session,
     sessionManager,
     preflightPolicy,
     runController,
+    currentDelegationDepth: () => delegationDepth,
   });
 
   const abortWorker = (): void => {
