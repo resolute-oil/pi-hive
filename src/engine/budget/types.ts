@@ -315,13 +315,13 @@ export interface RequestCompactionResult {
   compacted: boolean;
   estimatedTokens: number;
   limit: number;
-  reason?: "no_runtime" | "over_cap" | "compact_failed" | "session_unavailable";
+  reason?: "no_runtime" | "over_cap" | "compact_failed" | "session_unavailable" | "session_settled";
   error?: string;
 }
 
 export interface RequestEndSessionResult {
   ok: boolean;
-  reason?: "no_runtime" | "session_unavailable";
+  reason?: "no_runtime" | "session_unavailable" | "session_settled";
   error?: string;
 }
 

@@ -310,3 +310,39 @@ test("requestSnapshot: runtime exists but sessionManager lacks branchWithSummary
   assert.equal(result.reason, "session_unavailable", "session-unavailable must not be classified as no_runtime");
   assert.ok(result.error && /snapshotable/i.test(result.error), "error string describes the missing capability");
 });
+
+// ── B11: cooperative tools refuse when the worker's runtime has settled.
+// The audit (HTML §5 B11) flagged that requestCompaction and requestEndSession
+// invoked the SDK without checking the worker's lifecycle state. The SDK's
+// compact()/abort() do serialize concurrent calls (verified by reading
+// agent-session.js: `compact` disconnects + aborts the current agent first;
+// `abort` is idempotent via waitForIdle), but the cooperative tools should
+// still refuse when the runtime is already in a terminal state — there's
+// nothing left to compact or end, and the cooperative ledger entry would
+// just confuse the dashboard timeline.
+// ---------------------------------------------------------------------------
+
+test("B11: requestCompaction returns session_settled when runtime.status === 'done'", async () => {
+  const session = makeFakeSession();
+  const runtime = makeRuntime({ session, runCount: 1 });
+  runtime.status = "done";
+  const state = makeState(runtime);
+
+  const result = await requestCompaction(state, "builder", { notes: "compact requested" });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "session_settled", "compaction refuses on settled runtime");
+  assert.ok(result.error && /already settled/i.test(result.error));
+  assert.equal(session.compactCalls.length, 0, "session.compact() must NOT be called on settled runtime");
+});
+
+test("B11: requestEndSession returns session_settled when runtime.status === 'error'", async () => {
+  const session = makeFakeSession();
+  const runtime = makeRuntime({ session, runCount: 1 });
+  runtime.status = "error";
+  const state = makeState(runtime);
+
+  const result = await requestEndSession(state, "builder", { reason: "task complete" });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "session_settled");
+  assert.equal(session.abortCalls, 0, "session.abort() must NOT be called on error-state runtime");
+});

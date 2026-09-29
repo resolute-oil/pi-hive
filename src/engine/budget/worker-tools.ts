@@ -1292,6 +1292,21 @@ export async function requestCompaction(
   if (!runtime) {
     return { ok: false, compacted: false, estimatedTokens: 0, limit: 0, reason: "no_runtime" };
   }
+  // Audit B11: refuse when the worker's lifecycle has already settled —
+  // there's nothing to compact, and the cooperative ledger entry would
+  // confuse the dashboard timeline. The SDK's compact() does serialize
+  // concurrent calls (it disconnects + aborts the current agent first
+  // per agent-session.js), but a settled runtime has no agent to abort.
+  if (runtime.status === "done" || runtime.status === "error") {
+    return {
+      ok: false,
+      compacted: false,
+      estimatedTokens: 0,
+      limit: 0,
+      reason: "session_settled",
+      error: `worker runtime is already settled (status: ${runtime.status})`,
+    };
+  }
   const session = runtime.session as CooperativeSession | undefined;
   const sessionManager = session?.sessionManager;
   if (!session || !sessionManager || typeof session.compact !== "function") {
@@ -1333,6 +1348,16 @@ export async function requestEndSession(
   const runtime = state.runtimes.get(callerName);
   if (!runtime) {
     return { ok: false, reason: "no_runtime" };
+  }
+  // Audit B11: same settled-runtime guard as requestCompaction above.
+  // SDK abort() is idempotent (waitForIdle waits for the abort to land),
+  // but a settled runtime has nothing left to abort.
+  if (runtime.status === "done" || runtime.status === "error") {
+    return {
+      ok: false,
+      reason: "session_settled",
+      error: `worker runtime is already settled (status: ${runtime.status})`,
+    };
   }
   const session = runtime.session as CooperativeSession | undefined;
   const sessionManager = session?.sessionManager;
