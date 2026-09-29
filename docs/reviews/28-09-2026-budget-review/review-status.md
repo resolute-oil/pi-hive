@@ -257,7 +257,7 @@ The next session should:
 2. **Read `04-refactor-plan.md`** — the authoritative plan; the plan's §0.5 calls out the removal policy and §0.6 calls out the regression-test policy.
 3. **Read `05-parallelization-analysis.md`** — coordinator + worker model, per-phase worktrees, wave structure.
 4. **Read `INDEX.md`** for the reading order if uncertain where to start.
-5. **Close PR #54** via web UI or `gh pr close 54 --repo resolute-oil/pi-hive` (per plan §6.2 decision) — this is the first action item, before any worktree is opened.
+5. **PR #54 close** is a remote action. Per the LOCAL-ONLY constraint in `README.md`, the user decides when this happens. The decision (close in favor of refactor) is already made and recorded in §6.2; the actual `gh pr close 54` may be performed by the user in a future session when the repo cleanup step runs. The first action item for the coordinator is opening the Wave 0 worktree — PR #54 close is not gating on that.
 6. **Pick a coordinator or worker role.** If you're a fresh session, ask the user whether to be the coordinator (owning the plan + sessions/) or a worker (picking up the next phase). If the coordinator already exists, take a worker role and pick up the next phase from `sessions/`.
 7. **Open the worktree for your assigned phase or task** with the correct naming convention. The base is the **current HEAD of the local `refactor-budget` staging branch** (NOT `main`, NOT a remote ref). Examples:
    - Coordinator (wave 0 contracts): `git worktree add .worktrees/refactor-budget-f0-contracts -b refactor/budget-f0-contracts origin/refactor/budget`
@@ -267,15 +267,15 @@ The next session should:
    - See `README.md` §1 for the canonical pattern, including a `REFACTOR_BUDGET=$(git rev-parse origin/refactor/budget)` helper so each command captures the current base.
 8. **Work TDD-style** (red-green-refactor) per task in the plan. Each task has a gate — don't move on until the gate passes.
 9. **Write a session log** in `sessions/<date>-<your-role>-<phase>.md` before ending the session. The template is in `sessions/README.md`.
-10. **Commit per task, push to `origin` (not `upstream` per AGENTS.md), open a PR.** Do NOT merge — coordinator + user review per AGENTS.md.
-11. **Tick the plan** when tasks complete: the coordinator updates `[ ]` to `[x]` in `04-refactor-plan.md` once the worker's PR has its gate verified.
+10. **Commit per task on the per-phase branch.** **Do NOT `git push`. Do NOT open a PR.** Per the LOCAL-ONLY constraint in `README.md`, all work stays on the local branch in this `APP_ROOT` until a future session performs repo cleanup. The coordinator reviews the local diff when the worker hands off.
+11. **Tick the plan** when tasks complete: the coordinator updates `[ ]` to `[x]` in `04-refactor-plan.md` once the worker's gate is verified locally.
 
 ### 6.3 Branch and worktree conventions
 
 - **The implementation does NOT happen on a single mega-branch.** Each phase or task gets its own worktree under `APP_ROOT/.worktrees/refactor-budget-<phase>-<task>/` with branch `refactor/budget-<phase>-<task>`. See `README.md` §1 and `05-parallelization-analysis.md` §0.5.
-- The review branch `review/budget-redesign-2026-09-28` is for documentation only. **Do not push it to origin.**
-- Per AGENTS.md: never push to `upstream`; all pushes go to `origin` (the fork).
-- The `refactor/budget` worktree on `ea9c54a` (SDK 0.99.1 bump + hive:version fix) is the staging branch for *documentation* updates only. Implementation work does NOT happen on this branch.
+- The review branch `review/budget-redesign-2026-09-28` is for documentation only. **Do not push it to origin.** (This was already the convention; the LOCAL-ONLY constraint reinforces it.)
+- **Per the LOCAL-ONLY constraint, NO `git push` to `origin` for ANY branch in this refactor.** The constraint is broader than AGENTS.md's "no push to upstream" rule. All branches (`review/budget-redesign-2026-09-28`, `refactor/budget`, every `refactor/budget-<phase>-<task>`) stay local. Pushing is deferred until the user performs repo cleanup on `origin` in a future session.
+- The `refactor/budget` worktree on the current HEAD (currently `ea9c54a` + 4 commits) is the staging branch for *documentation* updates only. Implementation work does NOT happen on this branch — it happens in per-phase worktrees based off this branch.
 
 ### 6.4 Verification gates for implementation work
 
@@ -339,10 +339,11 @@ APP_ROOT branch:  feat/budget-strategy
 APP_ROOT HEAD:    9f950fb
 APP_ROOT state:   clean (HANDOFF.md is gitignored)
 
-Open PRs:         #54 (feat/budget-strategy) — recommended CLOSE in favor of refactor
-                  No refactor PR yet — coordinator + workers open per-phase PRs from
-                  per-phase worktrees under APP_ROOT/.worktrees/, each based off the
-                  current HEAD of the refactor-budget staging branch.
+Open PRs:         #54 (feat/budget-strategy) — recommended CLOSE in favor of refactor.
+                  No refactor PR will be opened — per the LOCAL-ONLY constraint in
+                  README.md, all work stays on local branches in this APP_ROOT.
+                  Future sessions that perform repo cleanup on origin can decide
+                  whether to open a PR at that point.
 
 Next action:      Coordinator session picks up, reads README.md (working conventions),
                   closes PR #54, and opens the Wave 0 contracts worktree

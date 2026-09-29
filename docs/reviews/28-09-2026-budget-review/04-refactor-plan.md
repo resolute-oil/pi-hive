@@ -1336,31 +1336,27 @@ Ready for F10 when: F9's deletions are committed; legacy paths are gone.
 
 Ready for F11 when: F10's reviewer sign-offs are committed.
 
-#### Feature F11 — PR merge
+#### Feature F11 — Local-only landing
 
-> Goal: PR #54 disposition decided; refactor PR opened; user merges per AGENTS.md.
+> Goal: PR #54 disposition decided; refactor work stays local to `APP_ROOT` per the LOCAL-ONLY constraint in `README.md`. **No PR is opened, no `git push` is performed, no remote activity of any kind.** This feature records the disposition and the local-landing decision.
 
-- [ ] **T11.1** Decide and act on PR #54 disposition (default: close in favor of refactor).
-  - Files: PR #54 comment + branch action
-  - Gate: user confirmation; PR #54 closed (or amended per user's call)
+- [ ] **T11.1** Decide PR #54 disposition: **close** (the refactor supersedes). Document the rationale in `sessions/<coordinator>-F11.md`. The actual `gh pr close 54` action may be deferred to the future session that performs the repo cleanup (per the LOCAL-ONLY constraint) — the decision itself is recorded here; use `ask_user` if uncertain whether to perform the close now.
+  - Files: `sessions/<coordinator>-F11.md`
+  - Gate: decision recorded with explicit user sign-off
 
-- [ ] **T11.2** Open refactor PR against `main` with all 12-15 commits.
-  - Files: refactor PR
-  - Gate: PR exists; all checks pass; user review
+- [ ] **T11.2** Verify local-only state: every per-phase branch exists only in this `APP_ROOT`'s refs (no remote tracking, no `git push` performed). Run `git branch -vv` in `APP_ROOT` and confirm all `refactor/budget-*` branches show no upstream. Document the verification in `sessions/<coordinator>-F11.md`.
+  - Files: `sessions/<coordinator>-F11.md`
+  - Gate: verification recorded; every `refactor/budget-*` branch shows no upstream
 
-- [ ] **T11.3** Wait for user merge per AGENTS.md (no auto-merge; user merges explicitly).
-  - Files: none
-  - Gate: user explicitly merges
-
-- [ ] **T11.4** Update local main: `git fetch origin main && git pull --ff-only`. Delete feature branch + worktree.
-  - Files: none
-  - Gate: APP_ROOT on `main` at the merge commit; worktree removed (per the worktree precheck)
+- [ ] **T11.3** Local cleanup is gated on user instruction. When the user instructs (typically after the repo-cleanup step is performed in a future session), `git worktree remove .worktrees/refactor-budget-<phase>-<task>` per AGENTS.md's precheck rule. Until then, worktrees stay in place — they are the artifact.
+  - Files: none (cleanup commands only)
+  - Gate: user instructions; do not perform unprompted
 
 **How do I know F11 is complete?**
-- [ ] All 4 task checkboxes above are marked.
-- [ ] PR #54 disposition decided and documented.
-- [ ] Refactor PR exists with all 12-15 commits.
-- [ ] All CI checks pass on the refactor PR.
+- [ ] All 3 task checkboxes above are marked.
+- [ ] PR #54 disposition decided and documented (T11.1).
+- [ ] Local-only verification recorded (T11.2) — every `refactor/budget-*` branch shows no upstream.
+- [ ] Worktrees remain in place until the user instructs otherwise (T11.3).
 - [ ] User has explicitly merged the PR.
 - [ ] Local main is fast-forwarded to the merged commit.
 - [ ] Worktree removed (after `git status` precheck confirms clean tree).
@@ -1489,9 +1485,11 @@ Ready for F13 when: F12 is published and linked from the README.
 
 All decisions below were resolved via the gap-decisions walkthrough (commit `f06e3b4` + subsequent). The plan reflects the chosen direction.
 
-1. **PR #54 disposition.** **Decision: close** (the refactor supersedes). The refactor will open a new PR with the full rewrite.
+**2026-09-29 update (LOCAL-ONLY constraint):** Items 1, 3 above are reinterpreted under the LOCAL-ONLY constraint (see `README.md` top of file). Item 1's "open a new PR with the full rewrite" is replaced by: no PR is opened; the work lands on local per-phase branches in this `APP_ROOT` only. Item 3's "separate PR after refactor lands" is similarly held until a future session performs the repo cleanup on `origin`.
+
+1. **PR #54 disposition.** **Decision: close** (the refactor supersedes). The actual `gh pr close 54` may be deferred to the future session that performs repo cleanup (per the LOCAL-ONLY constraint).
 2. **Config migration window.** **Decision: hard cutover** — no dual-format, no `schema_version`, no deprecation telemetry. Users manually fix `hive-config.yaml` files (per G-16).
-3. **Dashboard intervention UI.** **Decision: separate PR after refactor lands** (F13). The engine commands are correct and tested; the UI ships in a follow-up.
+3. **Dashboard intervention UI.** **Decision: dashboard UI to invoke the operator commands** is part of F13 in the local refactor work; no separate PR is opened until repo cleanup.
 4. **Per-call `CustomEntry` write cadence.** **Decision: throttled** (10 messages / 5% spend, always on thresholds). F3 T3.1 implements.
 5. **Operator command exposure.** **Decision: all 7 operator commands** (end, compact, respawn, pause, snapshot, restore, resume — per G-04). F5 implements.
 6. **`session.dispose()` on `endWorkerSession`.** **Decision: do NOT dispose** (preserve session for potential `resumeWorkerSession`).
@@ -1624,7 +1622,7 @@ A future session picking up this work should:
 7. **Pick a phase to start** (Phase 1, 2, 3, or 4). Each task within a phase is self-contained. **Or**, if multi-agent, follow the Wave 0 → 1 → 2 → 3 → 4 → 5 structure from §11. The coordinator owns the wave sequencing.
 8. **Follow the per-task TDD plan and gate.** Write the test first (red), implement (green), refactor. Don't move to the next task until the gate passes. Regression tests required for any bug being fixed (see §0.6).
 9. **Restart the running server** after editing budget modules (stale-process trap).
-10. **Open one PR per phase or task** from the per-phase branch — NEVER a single PR from a mega-branch. PR title follows Conventional Commits. Wait for coordinator + user approval before merge per AGENTS.md.
+10. **Commit per task on the per-phase branch**. **Do NOT `git push`. Do NOT open a PR.** Per the LOCAL-ONLY constraint in `README.md`, the work stays on the local branch in this `APP_ROOT` only. The coordinator reviews the local diff when the worker hands off; PR activity is deferred to a future session after the repo cleanup. Title each commit per Conventional Commits.
 11. **Write a session log** in `sessions/<date>-<your-role>-<phase>.md` before ending the session per the template in `sessions/README.md`.
 
 If blocked, surface the blocker to the user via `ask_user` (inline mode, AGENTS.md-compliant). Do not invent workarounds. Do not defer — if you can't decide, ask.
@@ -1783,7 +1781,7 @@ Per-task commit messages follow Conventional Commits (per AGENTS.md). Examples:
 - Wave 2: `feat(budget): add installBudgetEventHooks and delegateAgent`
 - Wave 3: `feat(budget): wire live tracking and end-of-run finalization`, `feat(budget): add 5 stop/pause/resume operator commands`, `feat(budget): add 3 branch/clone operator commands`, `feat(budget): add 3 cooperative shutdown tools`
 - Wave 4: `test(budget): pin race-condition paths`, `test(budget): pin reload-stable behavior`
-- Wave 5: `chore(refactor): delete legacy governance and budget-strategy modules`, `chore(refactor): apply reviewer sign-off fixes`, `chore(refactor): open PR and wait for user merge`
+- Wave 5: `chore(refactor): delete legacy governance and budget-strategy modules`, `chore(refactor): apply reviewer sign-off fixes`, `chore(refactor): record F11 local-only landing` (no push, no PR)
 
 The coordinator ticks `[ ]` to `[x]` in this plan as each worker's PR merges. Worker session logs in `sessions/` track day-by-day progress; the coordinator's session log tracks phase state across the wave structure.
 

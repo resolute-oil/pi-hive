@@ -29,20 +29,21 @@ The refactor runs as **one coordinator session** that owns the plan and `session
 
 **Coordinator session** (one at a time, owns the plan):
 
-- Maintains `04-refactor-plan.md` checkboxes. When a worker reports a task complete (with passing gate and PR opened), the coordinator ticks `[ ]` to `[x]`.
+- Maintains `04-refactor-plan.md` checkboxes. When a worker reports a task complete (with passing gate, locally committed on the per-phase branch), the coordinator ticks `[ ]` to `[x]`.
 - Maintains `sessions/` directory. Each session writes a log per the template in `sessions/README.md`. The coordinator's own log tracks phase completion, escalations, and worker handoff notes.
-- Reviews worker PR diffs before opening the next phase. If a worker's PR has issues, the coordinator routes them back to the worker (does NOT silently fix or silently accept).
+- Reviews worker diffs in the per-phase worktree (locally — no remote PRs). If a worker's work has issues, the coordinator routes them back to the worker (does NOT silently fix or silently accept).
 - Escalates ambiguous decisions to the user via `ask_user` (inline mode). Never defers without permission.
-- Owns the worktree-creation pattern (below) and verifies each new worker is in a correctly-named per-phase worktree before opening their first PR.
+- Owns the worktree-creation pattern (below) and verifies each new worker is in a correctly-named per-phase worktree based off `refactor-budget` HEAD before they start.
+- Per the LOCAL-ONLY constraint in `README.md`: NEVER pushes. NEVER opens a PR. NEVER performs any remote activity. The coordinator's role is local review + plan tracking + escalation.
 
 **Worker session** (one per phase or task, owns that work):
 
 - Picks up a phase from the plan based on coordinator's handoff.
-- Creates a per-phase worktree under `APP_ROOT/.worktrees/` with the naming convention from §0.5 in `README.md` (e.g., `.worktrees/refactor-budget-f5-eol-commands/`, branch `refactor/budget-f5-eol-commands`).
+- Creates a per-phase worktree under `APP_ROOT/.worktrees/` with the naming convention from `README.md` §1 (e.g., `.worktrees/refactor-budget-f5-eol-commands/`, branch `refactor/budget-f5-eol-commands`).
 - TDD throughout (red-green-refactor per `README.md` §2). Test first, then implement.
 - Adds regression tests for every bug fixed (T7.6 captures the user-reported fresh=true symptom).
 - Removes pre-existing conflicting code per `04-refactor-plan.md` §0.5 removal policy. When in doubt, `ask_user`.
-- Commits per task. Pushes to `origin` (never `upstream` per AGENTS.md). Opens a PR. Does NOT merge — waits for coordinator + user.
+- Commits per task on the per-phase branch. **Does NOT `git push`. Does NOT open a PR.** Per the LOCAL-ONLY constraint, the branch lives only in this `APP_ROOT`'s local refs until a future session performs the repo cleanup.
 - Writes a session log in `sessions/<date>-<agent>-<phase>.md` per the template.
 - Uses `ask_user` for ambiguous decisions. Never defers — if blocked, asks.
 
@@ -50,7 +51,7 @@ The refactor runs as **one coordinator session** that owns the plan and `session
 
 - Follow the same TDD / regression-test / no-defer / ask_user / session-log conventions.
 - The invoking worker session writes the sub-agent invocation summary into its session log.
-- Sub-agents do NOT push branches or open PRs directly; the parent worker session owns the branch.
+- Sub-agents do NOT push branches or open PRs directly (would be impossible given the LOCAL-ONLY constraint); the parent worker session owns the branch.
 
 **Worktree creation pattern (the canonical command):**
 
@@ -88,11 +89,11 @@ Each task belongs to a phase (F1-F13). Per the working conventions, each phase o
 | F8 (T8.x) Reload-stable | F2-F5 | `tests/budget-reload.test.ts` | `refactor/budget-f8-reload` |
 | F9 (T9.x) Legacy cleanup | every consumer of `governance.ts` updated | `git rm src/engine/governance.ts`, `git rm src/engine/budget-strategy.ts`, dispatch.ts slimming | `refactor/budget-f9-legacy-cleanup` |
 | F10 (T10.x) Reviewer sign-off | full diff complete | reviewer outputs | `refactor/budget-f10-reviews` |
-| F11 (T11.x) PR merge | F10 | `gh pr` actions | (coordinator opens, never merges alone — user merges per AGENTS.md) |
+| F11 (T11.x) Local-only landing | F10 | none (per LOCAL-ONLY constraint — no remote activity) | coordinator records in `sessions/`; user instructs any future repo cleanup |
 | F12 (T12.x) Migration guide | F6 spec finalized | `docs/migrations/budget-config-v2.md` | `refactor/budget-f12-migration-guide` |
 | F13 (T13.x) Dashboard intervention UI | F5 commands spec'd (already done in §2.8 of plan) | `ui/web/src/**` | `refactor/budget-f13-dashboard` |
 
-**Each row is its own worktree.** The worktree lives at `APP_ROOT/.worktrees/refactor-budget-<phase-or-task>/` and the branch name MUST match. Coordinator opens each phase's PR; user merges after coordinator + reviewer sign-off.
+**Each row is its own worktree.** The worktree lives at `APP_ROOT/.worktrees/refactor-budget-<phase-or-task>/` and the branch name MUST match. Per the LOCAL-ONLY constraint in `README.md`: no PR is opened, no `git push` is performed, no remote activity of any kind. The coordinator reviews diffs locally and ticks the plan as work lands.
 
 **Key insight from §2.3, §2.8, §2.10 of `04-refactor-plan.md`:** every operator command, every cooperative tool, and the config schema already have *specified signatures*. The plan describes the wire contract. The interfaces are the only thing blocking parallel implementation.
 
@@ -289,9 +290,9 @@ All race tests pass 100 consecutive runs (the plan's `for i in {1..100}; do just
 
 ### 7.3 Agent 5C — F11: PR merge (user-action, not agent)
 
-T11.1 (decide PR #54 disposition), T11.2 (open refactor PR), T11.3 (wait for user merge per AGENTS.md), T11.4 (fast-forward local main).
+T11.1 (record PR #54 disposition decision; actual close action may be deferred), T11.2 (verify local-only state — no upstream on any `refactor/budget-*` branch), T11.3 (local cleanup gated on user instruction).
 
-**Per AGENTS.md, the user merges; the agent cannot auto-merge.**
+**Per the LOCAL-ONLY constraint in `README.md`, there is no `git push`, no PR, no merge. The work lands locally and stays here until a future session performs repo cleanup and re-enables remote activity.**
 
 ---
 
@@ -441,7 +442,7 @@ The plan's gate-after-every-task discipline is preserved: each agent's tasks hav
 
 ## 14. What this analysis assumes
 
-1. **AGENTS.md file-edits-in-worktree rule applies** — but per-phase worktrees, NOT one mega-branch. Each worker has its own worktree under `APP_ROOT/.worktrees/refactor-budget-<phase>-<task>/`, each based off the **current HEAD of the local `refactor-budget` staging branch** (NOT `main` and NOT a remote ref). Each worker opens its own PR. The coordinator reviews PRs as they land.
+1. **AGENTS.md file-edits-in-worktree rule applies** — but per-phase worktrees, NOT one mega-branch. Each worker has its own worktree under `APP_ROOT/.worktrees/refactor-budget-<phase>-<task>/`, each based off the **current HEAD of the local `refactor-budget` staging branch** (NOT `main` and NOT a remote ref). Per the LOCAL-ONLY constraint, no PR is opened, no `git push` is performed; the coordinator reviews diffs locally as they land.
 2. **Each sub-agent has Bash + Read + Edit + Write** (general-purpose subagent type, per AGENTS.md tool selection).
 3. **The Wave 0 contract-agreement is its own sub-agent task** — short, focused, single file set. Should not exceed 30 min. Lives on branch `refactor/budget-f0-contracts`.
 4. **The plan's interface specifications are accurate** — §2.3, §2.5, §2.8, §2.10, §2.13 of `04-refactor-plan.md` are the source of truth for what each Wave 0 stub must declare. If anything in those sections is wrong, Wave 0 is the place to catch it (via typecheck), before downstream agents depend on it.
@@ -467,15 +468,15 @@ A future session picking up this work and running it in parallel-agent mode shou
    cd .worktrees/refactor-budget-f0-contracts
    ln -s ../../node_modules node_modules   # two levels under APP_ROOT/ — see AGENTS.md
    ```
-7. **Run Wave 0** (coordinator as 1 sub-agent, ~30 min) — locks all interface contracts. PR opens from the worktree, lands to `refactor-budget` after user merge per AGENTS.md.
-8. **Run Wave 1** (coordinator spawns 4 worker sub-agents in parallel) — F1, F6, F12, T5.7 in disjoint files. Each worker opens its own per-phase worktree based off the post-Wave-0 `refactor-budget` HEAD.
+7. **Run Wave 0** (coordinator as 1 sub-agent, ~30 min) — locks all interface contracts. Branch `refactor/budget-f0-contracts` stays local per the LOCAL-ONLY constraint.
+8. **Run Wave 1** (coordinator spawns 4 worker sub-agents in parallel) — F1, F6, F12, T5.7 in disjoint files. Each worker opens its own per-phase worktree based off the post-Wave-0 `refactor-budget` HEAD. Each branch stays local.
 10. **Run Wave 2** (1 worker sub-agent) — F2 spine. Sequential after Wave 1.
 11. **Run Wave 3** (4 worker sub-agents in parallel) — F3+F4, three F5 sub-tracks.
 12. **Run Wave 4** (2 worker sub-agents in parallel) — F7 races, F8 reload. (Or earlier, in parallel with Waves 1-3.)
-13. **Run Wave 5** (3 sequential worker sub-agents) — F9 cleanup, F10 reviews, F11 merge.
+13. **Run Wave 5** (3 sequential worker sub-agents) — F9 cleanup, F10 reviews, F11 local-only landing.
 14. **Out-of-band:** Worker for F13 dashboard runs anytime after Wave 0, recommended after Wave 3, in its own per-phase worktree (`refactor/budget-f13-dashboard`).
-15. **Each worker commits per task to its own per-phase branch** and opens a PR. The coordinator reviews and ticks `[ ]` to `[x]` in `04-refactor-plan.md` as PRs merge.
-16. **Wait for user merge** per AGENTS.md. The coordinator NEVER merges alone.
+15. **Each worker commits per task to its own per-phase branch**. The coordinator reviews the local diff and ticks `[ ]` to `[x]` in `04-refactor-plan.md` as the gate passes. No `git push`, no PR — see the LOCAL-ONLY constraint.
+16. **No merge step.** Per the LOCAL-ONLY constraint, there is no merge activity. The work lands locally and stays in this `APP_ROOT` until a future session performs repo cleanup.
 
 ---
 
@@ -488,7 +489,7 @@ A future session picking up this work and running it in parallel-agent mode shou
 - **`pi-docs/extension-patterns-reference.md`** — Pi patterns applied across the plan
 - **`review-runs/spec-flow-review.md`** — 30 gaps + 18 questions driving the plan's correctness
 - **`sessions/`** — session logs for every coordinator + worker session
-- **`AGENTS.md`** — worktree rule, `ask_user` discipline, no-upstream-push rule
+- **`AGENTS.md`** — worktree rule, `ask_user` discipline, no-upstream-push rule (this refactor additionally extends the rule to no-origin-push per the LOCAL-ONLY constraint)
 
 ---
 
