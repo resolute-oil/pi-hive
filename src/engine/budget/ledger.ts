@@ -205,7 +205,6 @@ export class BudgetLedger {
     sessionManager: SessionManager,
     agentSlug: string,
     policy: WorkerBudgetPolicy,
-    _signal?: AbortSignal,
   ): Promise<BudgetLedger> {
     const ownEntries = ledgerEntries(sessionManager).filter(
       (entry) => entry.data?.agentSlug === agentSlug,
@@ -240,7 +239,7 @@ export class BudgetLedger {
    * from `session.getSessionStats()` — this is the only place cumulative is
    * written. The ledger is the cache; `getSessionStats()` is the truth.
    */
-  public recordEvent(event: string, cumulative: BudgetLedgerCumulative, _signal?: AbortSignal): void {
+  public recordEvent(event: string, cumulative: BudgetLedgerCumulative): void {
     this.cumulative.tokens = cumulative.tokens;
     this.cumulative.costUsd = cumulative.costUsd;
     this.cumulative.runs = cumulative.runs;
@@ -292,7 +291,7 @@ export class BudgetLedger {
    * `tokensBefore - estimatedTokensAfter`. Pure in-memory update; the next
    * `maybeSnapshot` or `snapshot` will pick up the new total.
    */
-  public recordCompaction(savings: number, _signal?: AbortSignal): void {
+  public recordCompaction(savings: number): void {
     this.cumulative.tokens = Math.max(0, this.cumulative.tokens - savings);
   }
 

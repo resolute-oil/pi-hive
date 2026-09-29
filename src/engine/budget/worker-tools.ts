@@ -426,7 +426,6 @@ export async function runBudgetPreflight(
     ctx.sessionManager as unknown as SessionManager,
     slug,
     policy,
-    ctx.signal,
   );
   const blocked = checkBudgetPolicy(
     ledger,
@@ -499,7 +498,7 @@ export async function createBudgetAwareSession(
   // (cooperative tools + summarize_progress) into customTools.
   const runtime = resolveRuntime(state, agentName);
   const slug = runtime ? agentSlug(runtime.config) : agentName;
-  const ledger = await BudgetLedger.restore(sessionManager, slug, policy, ctx.signal);
+  const ledger = await BudgetLedger.restore(sessionManager, slug, policy);
 
   // 4. Create the AgentSession. Default uses `createAgentSession` with the
   // minimum options required for the SDK to spin up a session bound to
@@ -954,7 +953,6 @@ export async function respawnWorkerSession(
     newSessionManager,
     args.agent,
     deps.policy,
-    ctx.signal,
   );
 
   // 8. Install event hooks on the NEW session.
@@ -1173,7 +1171,6 @@ export async function restoreWorkerSession(
     newSessionManager,
     args.agent,
     deps.policy,
-    ctx.signal,
   );
 
   // 5. Snapshot the ledger with `kind: "restore"`. This is the audit-trail

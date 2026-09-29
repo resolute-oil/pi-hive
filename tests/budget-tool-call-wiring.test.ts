@@ -182,7 +182,7 @@ async function installWithSeededCumulative(args: {
   // The test calls installWorkerBudgetHooks directly to exercise the guard
   // wrapping in isolation, mirroring how the production path wires it AFTER
   // createBudgetAwareSession's event-hook install.
-  const ledger = await BudgetLedger.restore(sessionManager, "wiring-worker", policy, controller.signal);
+  const ledger = await BudgetLedger.restore(sessionManager, "wiring-worker", policy);
   await installWorkerBudgetHooks({
     session,
     sessionManager,

@@ -586,7 +586,7 @@ test("createBudgetToolCallGuard: T3.4 blocks 'bash' when budget is exhausted (Bu
   );
 
   // Seed cumulative so checkBudgetPolicy returns a block.
-  ledger.recordEvent("message_end", { tokens: cap, costUsd: 0, runs: 1 }, controller.signal);
+  ledger.recordEvent("message_end", { tokens: cap, costUsd: 0, runs: 1 });
 
   const result = await guard({ toolName: "bash", input: { command: "echo hi" } });
   assert.ok(result, "guard returned a non-undefined result");
@@ -610,7 +610,7 @@ test("createBudgetToolCallGuard: T3.4 blocks edit, write, read; passes through g
   });
   const { ledger, sm } = await makeLedger(policy);
   const controller = new AbortController();
-  ledger.recordEvent("message_end", { tokens: cap, costUsd: 0, runs: 1 }, controller.signal);
+  ledger.recordEvent("message_end", { tokens: cap, costUsd: 0, runs: 1 });
   const guard = createBudgetToolCallGuard(ledger, policy, sm, controller, () => 1);
 
   // The four blocking targets — each must return a block.
@@ -637,7 +637,7 @@ test("createBudgetToolCallGuard: T3.4 returns undefined (allow) when budget is w
   const { ledger, sm } = await makeLedger(policy);
   const controller = new AbortController();
   // Cumulative below cap (100 < 100_000) → no block.
-  ledger.recordEvent("message_end", { tokens: 100, costUsd: 0.01, runs: 1 }, controller.signal);
+  ledger.recordEvent("message_end", { tokens: 100, costUsd: 0.01, runs: 1 });
   const guard = createBudgetToolCallGuard(ledger, policy, sm, controller, () => 1);
 
   const r = await guard({ toolName: "bash", input: {} });
@@ -653,7 +653,7 @@ test("createBudgetToolCallGuard: T3.4 short-circuits when the controller is alre
   controller.abort();
   // Cumulative at the cap — would normally block, but the abort short-circuit
   // lets the in-flight call resolve so the agent can finish settling.
-  ledger.recordEvent("message_end", { tokens: 1_000_000, costUsd: 0, runs: 1 }, controller.signal);
+  ledger.recordEvent("message_end", { tokens: 1_000_000, costUsd: 0, runs: 1 });
   const guard = createBudgetToolCallGuard(ledger, policy, sm, controller, () => 1);
 
   const r = await guard({ toolName: "bash", input: {} });

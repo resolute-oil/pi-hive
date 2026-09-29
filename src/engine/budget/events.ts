@@ -313,7 +313,7 @@ export function installBudgetEventHooks(
       // §2.6 — record first, then snapshot. The recordEvent update MUST
       // happen before the snapshot reads the new totals so a
       // post-message-end `maybeSnapshot` reflects the message we just saw.
-      ledger.recordEvent("message_end", cumulative, controller.signal);
+      ledger.recordEvent("message_end", cumulative);
       ledger.maybeSnapshot(cumulative, policy, controller.signal);
 
       // ── T3.2 / T3.3 — Warning + Exhaustion threshold crossings ────────
@@ -350,10 +350,10 @@ export function installBudgetEventHooks(
         // No-op compactions (or aborted ones that report zero savings) still
         // record 0 — keeps the in-memory token total consistent with the
         // branch so the next message_end reads the same baseline.
-        ledger.recordCompaction(0, controller.signal);
+        ledger.recordCompaction(0);
         return;
       }
-      ledger.recordCompaction(savings, controller.signal);
+      ledger.recordCompaction(savings);
       return;
     }
 
