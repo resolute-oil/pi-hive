@@ -34,7 +34,6 @@ export async function runDistillerProcess(state: HiveState, ctx: ExtensionContex
   const { session } = await createAgentSession({
     cwd: ctx.cwd,
     model: resolvedModel,
-    modelRegistry: (ctx as any).modelRegistry,
     thinkingLevel: "off",
     tools: [],
     noTools: "all",

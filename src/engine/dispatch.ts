@@ -390,7 +390,6 @@ export async function dispatchAgent(
   const created = await createSession({
     cwd: ctx.cwd,
     model: resolvedModel,
-    modelRegistry: (ctx as any).modelRegistry,
     thinkingLevel: thinking as any,
     tools: allToolNames,
     customTools: hiveTools,
