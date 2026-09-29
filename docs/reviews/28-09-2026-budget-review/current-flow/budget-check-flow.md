@@ -203,7 +203,7 @@ If `tokensBefore == null || estimatedTokensAfter == null || tokensBefore <= esti
 
 None of the three commands gate on strategy. The dashboard's UI is the only layer that filters by strategy, via the `interventionAvailable` flag on `budget_warning`. The dispatch `state` table itself does not check the strategy.
 
-This is by design per `tmp/budget-strategy-plan.md#3-operator-intervention-surface-is-strategy-conditional-clarification`: "All three dispatch commands (`endWorkerSession`, `compactWorkerSession`, `respawnWorkerSession`) live in `src/engine/dispatch.ts`. The dashboard intervention UI ... reads `interventionAvailable` plus the worker's runtime strategy to decide which commands to expose. The dispatch commands themselves don't gate on strategy."
+This is by design per `../raw-evidence/budget-strategy-plan.md#3-operator-intervention-surface-is-strategy-conditional-clarification`: "All three dispatch commands (`endWorkerSession`, `compactWorkerSession`, `respawnWorkerSession`) live in `src/engine/dispatch.ts`. The dashboard intervention UI ... reads `interventionAvailable` plus the worker's runtime strategy to decide which commands to expose. The dispatch commands themselves don't gate on strategy."
 
 ## 5. Tests pinning the contract
 

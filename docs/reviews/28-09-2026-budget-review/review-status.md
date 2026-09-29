@@ -312,8 +312,8 @@ If 4+ hours: read every file in `docs/reviews/28-09-2026-budget-review/`.
 ## 7. Cross-reference
 
 - **HANDOFF.md** (project root, gitignored) — updated 2026-09-28 with this session's accomplishments. Includes Quick state recap for the next session.
-- **`tmp/2025-09-28-fresh-true-budget-bug-unresolved.md`** — Bug 3 hypothesis document. The refactor plan makes Bug 3 class structurally impossible; verification via F7 T7.7.
-- **`tmp/budget-strategy-plan.md`** — the budget-strategy plan that `feat/budget-strategy` was built from. The plan's §1 references its gaps.
+- **`raw-evidence/2025-09-28-fresh-true-budget-bug-unresolved.md`** — Bug 3 hypothesis document. The refactor plan makes Bug 3 class structurally impossible; verification via F7 T7.7.
+- **`raw-evidence/budget-strategy-plan.md`** — the budget-strategy plan that `feat/budget-strategy` was built from. The plan's §1 references its gaps.
 - **`AGENTS.md`** (project root) — worktree rule, `ask_user` discipline, no-upstream-push rule, conventional commits, etc.
 - **Pi docs** at `/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/docs/` — cited in `pi-docs/extension-patterns-reference.md` and `raw-evidence/pi-sdk-session-api.md`.
 - **Online Pi docs** at `https://pi.dev/docs/latest/` — refresh additions in `extension-patterns-reference.md#12` and `pi-sdk-session-api.md`.

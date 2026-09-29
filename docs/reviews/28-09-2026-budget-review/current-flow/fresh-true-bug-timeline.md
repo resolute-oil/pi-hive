@@ -65,7 +65,7 @@ The comment at lines 36-50 explains the symmetry with `workerConsumedCost`:
 
 ## Bug 3 (third mystery) — post-test residual `governanceTokens=15134`
 
-**Status: UNRESOLVED.** Documented in `tmp/2025-09-28-fresh-true-budget-bug-unresolved.md`.
+**Status: UNRESOLVED.** Documented in `../raw-evidence/2025-09-28-fresh-true-budget-bug-unresolved.md`.
 
 ### What the user observes
 

@@ -84,7 +84,7 @@ Five resources × two scopes × two strategies × three counters = 60 cells. Eac
 
 ### Issue 4 — Operator intervention is wired before the dashboard UI exists
 
-**Severity: medium.** The three dispatch commands (`endWorkerSession`, `compactWorkerSession`, `respawnWorkerSession`) are in `src/engine/dispatch.ts:929-1099` and fully tested in `tests/budget-strategy.test.ts`. The dashboard UI to invoke them is "out of scope for PR #54" per `tmp/budget-strategy-plan.md`. The engine commands are correct in isolation but unusable from the UI surface that the user actually interacts with.
+**Severity: medium.** The three dispatch commands (`endWorkerSession`, `compactWorkerSession`, `respawnWorkerSession`) are in `src/engine/dispatch.ts:929-1099` and fully tested in `tests/budget-strategy.test.ts`. The dashboard UI to invoke them is "out of scope for PR #54" per `raw-evidence/budget-strategy-plan.md`. The engine commands are correct in isolation but unusable from the UI surface that the user actually interacts with.
 
 **Evidence:** see `current-flow/budget-check-flow.md#4-operator-intervention-three-dispatch-commands` and the plan's "Dashboard intervention UI (out of scope for PR #54)" note.
 
@@ -171,7 +171,7 @@ Cross-reference: `pi-docs/extension-patterns-reference.md` (the full reference w
 Cross-reference: `skills-review/compound-engineering-inventory.md` (full inventory of all 47 skills). For this review, the top three skills are:
 
 1. **`architecture-strategist`** — design integrity check. Applies to the dual-counter system (Issue 1) and the strategy layering (Issue 5).
-2. **`spec-flow-analyzer`** — does the design match what was asked? Applies to the strategy plan (`tmp/budget-strategy-plan.md`) vs. what shipped in `feat/budget-strategy`. Gap inventory: dashboard UI is missing, `summarize_progress` validation has edge cases (`empty notes allowed`, `compact_failed` path emits `worker_compaction` with `phase: "end"` — same shape as a successful compact).
+2. **`spec-flow-analyzer`** — does the design match what was asked? Applies to the strategy plan (`raw-evidence/budget-strategy-plan.md`) vs. what shipped in `feat/budget-strategy`. Gap inventory: dashboard UI is missing, `summarize_progress` validation has edge cases (`empty notes allowed`, `compact_failed` path emits `worker_compaction` with `phase: "end"` — same shape as a successful compact).
 3. **`code-simplicity-reviewer`** — YAGNI pass. Applies to the dual-counter system (Issue 1) and the operator commands shipped before the UI (Issue 4).
 
 The full top-10 list is in the skills review file.
@@ -201,7 +201,7 @@ The structural critique in this document is the input to whatever direction the 
 Items the user may want to consider when choosing direction (not asked here, just noted for the record):
 
 - **PR #54 disposition** — currently open, awaiting user merge. Options: merge as-is, amend with fixes, close and start fresh. The review documents what's in PR #54 but doesn't recommend a disposition.
-- **Refactor scope** — minimal fix (close Bug 3), structural simplification (collapse dual counter system), pi-native redesign (CustomEntry/UsageEntry), or feature-narrowing (drop compact strategy). Documented in `tmp/budget-strategy-plan.md` for context but not analyzed in this review.
+- **Refactor scope** — minimal fix (close Bug 3), structural simplification (collapse dual counter system), pi-native redesign (CustomEntry/UsageEntry), or feature-narrowing (drop compact strategy). Documented in `raw-evidence/budget-strategy-plan.md` for context but not analyzed in this review.
 - **Dashboard UI** — the operator intervention UI (End / Compact / Respawn buttons) is missing. The engine is correct; the UI is the gap. Independent decision from the budget math work.
 
 These are notes for the user, not questions to ask via `ask_user`. The user will determine direction after reviewing this report.

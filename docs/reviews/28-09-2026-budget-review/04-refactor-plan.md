@@ -1551,7 +1551,7 @@ just pi-dev
 - **`current-flow/fresh-true-bug-timeline.md`** — Bug 1, 2, 3 timeline; this plan makes the bug class structurally impossible
 - **`pi-docs/extension-patterns-reference.md`** — every Pi pattern applied in this plan (with citations and section anchors)
 - **`raw-evidence/pi-sdk-session-api.md`** — every SDK primitive used (with verified behavior from local SDK source)
-- **`tmp/2025-09-28-fresh-true-budget-bug-unresolved.md`** — Bug 3 root cause analysis; superseded by this plan's structural fix
+- **`raw-evidence/2025-09-28-fresh-true-budget-bug-unresolved.md`** — Bug 3 root cause analysis; superseded by this plan's structural fix
 - **`review-status.md`** — updated to point at this plan as the implementation input
 - **`05-parallelization-analysis.md`** — multi-agent wave structure, 16-agent roster, file-partition strategy; full dependency graph
 - **`AGENTS.md`** — worktree-only rule, `ask_user` discipline, no-upstream-push rule, conventional commits

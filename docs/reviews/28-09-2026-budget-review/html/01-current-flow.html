@@ -246,7 +246,7 @@ return runtime.governanceTokens ?? runtime.effectiveTokens ?? runtimeTokens(runt
           <div class="timeline-date">2025-09-28</div>
           <div class="timeline-title">Bug 3 — third mystery, post-test residual <span class="tag status-unresolved">UNRESOLVED</span></div>
           <div class="timeline-detail">
-            After Bug 1 + Bug 2 fixes, fresh=true still aborts with <code>tokens=0</code> but <code>remaining.tokens=0</code>. Top hypothesis: the end-of-run <code>governanceTokens += delta</code> accumulation at <code>dispatch.ts:~868</code> reads pre-overwrite <code>runtime.*</code> values. Three plausible root causes ranked in <code>tmp/2025-09-28-fresh-true-budget-bug-unresolved.md</code>.
+            After Bug 1 + Bug 2 fixes, fresh=true still aborts with <code>tokens=0</code> but <code>remaining.tokens=0</code>. Top hypothesis: the end-of-run <code>governanceTokens += delta</code> accumulation at <code>dispatch.ts:~868</code> reads pre-overwrite <code>runtime.*</code> values. Three plausible root causes ranked in <code>../raw-evidence/2025-09-28-fresh-true-budget-bug-unresolved.md</code>.
           </div>
         </div>
       </div>
