@@ -2,13 +2,18 @@
 
 The budget refactor (Wave 1) restructures the resource-governance section of `hive-config.yaml` and each agent's `.md` frontmatter. If your project has no `worker:` / `team-budgets:` block under `settings:` and no `governance:` block in any agent's frontmatter, the refactor is a no-op.
 
+> ⚠️ **Window values are an OBJECT, not a string.** The YAML layer accepts
+> `window: { kind: "rolling" | "per-day" | "all-time", duration?: ms }`. The
+> values `per-session`, `per-team-lifetime`, `per-run`, `per-hour` are the
+> *runtime flat strings* after `resolveWindow` flattens the object form —
+> they are NOT valid YAML keys. See `tmp/budget-config-v2-template.md`
+> for the full reference.
+
 ## Hard cutover — what changed
 
 There is **no dual-format support**, no `schema_version` field, no deprecation telemetry, no automatic conversion. The first release that ships the refactor accepts **only** the v2 shape. If `hive-config.yaml` still uses the v1 form, the loader rejects it at startup with a path-aware error. Edit the file by hand (decision G-16).
 
-`settings.worker.*` and `settings.team-budgets.*` are gone. The new top-level key is `budgets:` with `per-worker:` and `per-team:` sub-blocks. Flat keys (`token-budget`, `cost-budget-usd`, `max-runs`, `max-delegation-depth`) become nested `{ cap: N }` objects under the matching resource (`tokens`, `cost-usd`, `runs`, `depth`). `governance:` in agent frontmatter is renamed to `budgets:`. `tokens.scope` becomes `tokens.include`. A new optional `window:` field makes the time period explicit.
-
-> **`worker.timeout-ms` and `worker.distiller-runs`** stay where they are — they are not budget keys. Only `max-runs`, `token-budget`, `cost-budget-usd`, `max-delegation-depth` move.
+`settings.worker.*` and `settings.team-budgets.*` are gone. The new top-level key is `budgets:` with `per-worker:` and `per-team:` sub-blocks. Flat keys (`token-budget`, `cost-budget-usd`, `max-runs`, `max-delegation-depth`) become nested `{ cap: N }` objects under the matching resource (`tokens`, `cost-usd`, `runs`, `depth`). `governance:` in agent frontmatter is renamed to `budgets:`. `tokens.scope` becomes `tokens.include`. A new optional `window:` field makes the time period explicit. `worker.timeout-ms` and `worker.distiller-runs` are no longer valid `settings.*` keys; the timeout and distiller settings have no v2 equivalent in `hive-config.yaml`.
 
 Everything else (`shared_context`, `settings.subagent-output-limit`, `hive:`, `planning:`, `telemetry:`, `distiller:`) is unchanged.
 
@@ -29,7 +34,10 @@ settings:
 ```yaml
 budgets:
   per-worker:
-    tokens: { cap: 3500, window: per-session, include: [input, output] }
+    tokens:
+      cap: 3500
+      # window: omitted → defaults to per-session for workers
+      include: [input, output]
 ```
 
 The default `window:` and `include:` values match v1's implicit behavior — you can omit them.
@@ -51,9 +59,15 @@ settings:
 ```yaml
 budgets:
   per-team:
-    tokens:  { cap: 5000000, window: per-team-lifetime, include: [input, output, cacheRead, cacheWrite] }
-    cost-usd: { cap: 100,      window: per-team-lifetime }
-    runs:    { cap: 100 }
+    tokens:
+      cap: 5000000
+      window: { kind: all-time }                        # unbounded (lifetime)
+      include: [input, output, cacheRead, cacheWrite]  # team default
+    cost-usd:
+      cap: 100
+      window: { kind: all-time }
+    runs:
+      cap: 100
 ```
 
 ### 3. Multiple caps (tokens + cost + runs)
@@ -75,9 +89,15 @@ settings:
 ```yaml
 budgets:
   per-worker:
-    tokens:  { cap: 1000000, window: per-session, include: [input, output] }
-    cost-usd: { cap: 25,       window: per-session }
-    runs:    { cap: 20 }
+    tokens:
+      cap: 1000000
+      # window omitted → defaults to per-session for workers
+      include: [input, output]
+    cost-usd:
+      cap: 25
+      # window omitted → defaults to per-session for workers
+    runs:
+      cap: 20
 ```
 
 Each resource is its own object. The validator accepts only the four resource names (`tokens`, `cost-usd`, `runs`, `depth`).
@@ -105,12 +125,12 @@ budgets:
   per-worker:
     tokens:
       cap: 3500
-      window: per-session
+      # window omitted → defaults to per-session
       include: [input, output]                              # matches v1 "input_output"
   per-team:
     tokens:
       cap: 50000
-      window: per-team-lifetime
+      window: { kind: all-time }                            # matches v1 team-lifetime
       include: [input, output, cacheRead, cacheWrite]       # matches v1 "all"
 ```
 
@@ -118,7 +138,7 @@ The defaults match v1: workers exclude cache, teams include everything.
 
 ### 5. The `window:` field (time-period semantics)
 
-Makes the time period explicit (per-session for workers, per-team-lifetime for teams) and adds advanced windows (`per-run`, `per-day`, `per-hour`) for rate-limit use cases.
+Makes the time period explicit via the object form `{ kind, duration? }`. The kind value is `rolling`, `per-day`, or `all-time` — never a flat string. `duration` is required when `kind: rolling` (ms) and forbidden when `kind: all-time`. Omitting `window:` keeps v1's implicit behavior: per-session for workers, lifetime-unlimited for teams. For rate-limit cases, use `rolling` with a millisecond `duration`.
 
 **Before** (v1, implicit):
 
@@ -137,11 +157,23 @@ budgets:
   per-worker:
     tokens:
       cap: 3500
-      window: per-session               # default for workers
+      window: { kind: per-day }            # default for workers — explicit
   per-team:
     cost-usd:
       cap: 50
-      window: per-team-lifetime         # default for teams
+      window: { kind: all-time }            # default for teams — explicit
+```
+
+**Rate-limit example** (rolling 1-hour window):
+
+```yaml
+budgets:
+  per-worker:
+    tokens:
+      cap: 50000
+      window:
+        kind: rolling
+        duration: 3600000                   # 1 hour in ms
 ```
 
 ### 6. Depth cap
@@ -161,7 +193,7 @@ settings:
 ```yaml
 budgets:
   per-worker:
-    depth: { cap: 2 }
+    depth: { cap: 2 }                      # window is NOT allowed on depth
 ```
 
 ### 7. Per-agent override (`governance:` → `budgets:`)
@@ -190,43 +222,24 @@ budgets:
 ---
 ```
 
-### 8. Budget strategy (advanced)
+### 8. Budget strategy (advanced, deferred)
 
-Replaces the flat `budget-strategy: default | compact` enum with a structured `strategies:` block. Optional — most projects can omit `strategies:`.
+The v1 `budget-strategy: default | compact` flat enum is gone. The replacement (structured `strategies:` with `on-approaching-limit` / `on-exhaustion` / `summary` blocks) is deferred to v3 (decision C5). The v2 schema's `budgets.strategies:` field is reserved as `Type.Never()` — any concrete value fails validation today.
 
-**Before** (v1):
+What you get in v2 instead:
 
-```yaml
-settings:
-  worker-governance:
-    budget-strategy: compact
-    progress-summary-token-limit: 2000
-```
+- A **default wrap-up hint** is always emitted at the warning threshold (≤ 20% remaining). The worker SEES it via `appendCustomMessageEntry("budget_warning", ..., display: true)`. The worker's `summarize_progress` cooperative tool is the documented response (preserved from v1).
+- A **default abort** fires at 0% remaining (T3.3 / G-01 / G-02). The session aborts after `markExhaustion` writes the ledger entry; the canonical `agent_settled` checkpoint follows.
 
-**After** (v2):
-
-```yaml
-budgets:
-  strategies:
-    on-approaching-limit:
-      action: wrap-up           # wrap-up | compact | none
-      threshold: 0.20           # fire when 20% remains
-      hint: "Wrap up your work; call summarize_progress when done."
-    on-exhaustion:
-      action: compact           # compact | abort | none
-    summary:
-      max-tokens: 2000
-```
-
-The v1 `default` strategy maps to `on-approaching-limit.action: wrap-up, on-exhaustion.action: abort`. The v1 `compact` strategy maps to `on-approaching-limit.action: wrap-up, on-exhaustion.action: compact`.
+If you need structured strategies (auto-compact at exhaustion, custom thresholds, summary hints), drop the `budgets.strategies:` block from your config and stay on the v3-ready defaults until the C5 PR lands. Do NOT migrate the v1 strategy block into v2 — it will fail validation.
 
 ## Manual fix checklist
 
 1. Delete `worker:` and `team-budgets:` from `settings:`. Move every budget sub-key into the new top-level `budgets:` block per the examples above.
 2. Rename `token-budget` → `tokens.cap`, `cost-budget-usd` → `cost-usd.cap`, `max-runs` → `runs.cap`, `max-delegation-depth` → `depth.cap`.
 3. Replace `token-budget-scope: input_output` with `include: [input, output]` and `token-budget-scope: all` with `include: [input, output, cacheRead, cacheWrite]`.
-4. Optional: add `window:` to each cap (defaults are `per-session` for workers, `per-team-lifetime` for teams).
-5. Keep `worker.timeout-ms` and `worker.distiller-runs` where they are — they are not budget keys.
+4. Optional: add `window:` as an OBJECT (`{ kind, duration? }`) to each cap. Defaults are `per-session` for workers (no window needed) and `all-time` for teams (no time bound). The runtime flat strings (`per-session`, `per-team-lifetime`, etc.) are NOT valid YAML keys.
+5. Remove `worker.timeout-ms` and `worker.distiller-runs` — they are no longer accepted under `settings:` in v2.
 6. For each agent `.md` in `agents/`, rename `governance:` to `budgets:` and convert its sub-keys to the nested shape.
 
 Run `just verify` after the edits. The loader is strict: quoted numbers, fractions for integer fields, zero, negatives, `NaN`, infinity, and unknown keys all fail at startup.
@@ -262,6 +275,7 @@ The config loader is path-aware — the error names the file, the line, and the 
 - `unknown key "token-budget"` under `budgets.per-worker:` — used a v1 flat name. Use `tokens.cap`, `cost-usd.cap`, `runs.cap`, or `depth.cap`.
 - `unknown key "scope"` under `budgets.per-worker.tokens` — replace with `include: [Usage keys]`.
 - `unknown key "governance"` in agent frontmatter — rename to `budgets:`.
-- `invalid combination: window "per-day" on cost-usd` — `per-day` is valid for `tokens` only; `cost-usd` accepts `per-session` and `per-team-lifetime`.
+- `window.kind must be one of rolling, per-day, all-time` — flat-string values like `per-session` or `per-team-lifetime` are NOT valid YAML keys. Use the object form (`{ kind: ... }`).
+- `duration is required when kind is "rolling"` — a rolling window must specify its length in milliseconds.
 
 For anything else, run with `HIVE_TELEMETRY_VERBOSE=1` for the full validation trace.
