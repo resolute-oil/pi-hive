@@ -41,6 +41,7 @@ import {
   validateBudgets,
 } from "../src/core/schema.ts";
 import { validateRawConfig } from "../src/core/config-validation.ts";
+import { loadConfig } from "../src/core/config.ts";
 import {
   LEGACY_GOVERNANCE_KEYS,
   rejectLegacyGovernanceFrontmatter,
@@ -287,4 +288,69 @@ test("T6.10: per-day window roll-over resets the cap at UTC midnight", () => {
   // And the per-day cap is carried in a BudgetCap that downstream code can read.
   const cap = { resource: "tokens", cap: 1000, window };
   assert.equal(Value.Check(BudgetCapSchema, cap), true);
+});
+
+// ---------------------------------------------------------------------------
+// F6 wire-up — `enrichFromFrontmatter` MUST call `validateBudgetsFrontmatter`.
+//
+// The unit-level T6.4 test pins `validateBudgetsFrontmatter` rejects legacy
+// keys, but `enrichFromFrontmatter` (src/core/config.ts:87) never calls it:
+// users writing `governance: { tokenBudget: 1000 }` in agent.md frontmatter
+// got a silent no-op. These tests pin the integration path end-to-end: a
+// project with a legacy frontmatter MUST fail `loadConfig` loudly.
+// ---------------------------------------------------------------------------
+
+function projectWithAgentFrontmatter(frontmatter: string): string {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-hive-f6-wireup-"));
+  mkdirSync(join(cwd, ".pi", "hive", "agents"), { recursive: true });
+  writeFileSync(
+    join(cwd, ".pi", "hive", "agents", "planner.md"),
+    `---\nmodel: openai/gpt-5\nthinking: off\nagent-type: planner\n---\nPlan.\n`,
+  );
+  writeFileSync(
+    join(cwd, ".pi", "hive", "agents", "coder.md"),
+    `---\n${frontmatter}\n---\nCode.\n`,
+  );
+  writeFileSync(
+    join(cwd, ".pi", "hive", "hive-config.yaml"),
+    `settings:\n  distiller:\n    enabled: false\nplanning:\n  main:\n    name: Plan Main\n    path: .pi/hive/agents/planner.md\nhive:\n  main:\n    name: Hive Main\n    path: .pi/hive/agents/coder.md\n  agents:\n    - name: Coder\n      path: .pi/hive/agents/coder.md\n`,
+  );
+  return cwd;
+}
+
+test("F6 wire-up: loadConfig rejects `governance:` block in agent frontmatter", () => {
+  const cwd = projectWithAgentFrontmatter(
+    `model: openai/gpt-5\nthinking: off\nagent-type: coder\ngovernance:\n  token-budget: 1000`,
+  );
+  assert.throws(
+    () => loadConfig(cwd),
+    /legacy 'governance' key/,
+    "legacy `governance:` block in frontmatter must surface a hard error",
+  );
+});
+
+test("F6 wire-up: loadConfig rejects a bare legacy frontmatter key (e.g. `tokenBudget`)", () => {
+  const cwd = projectWithAgentFrontmatter(
+    `model: openai/gpt-5\nthinking: off\nagent-type: coder\ntokenBudget: 1000`,
+  );
+  assert.throws(
+    () => loadConfig(cwd),
+    /legacy/i,
+    "bare legacy frontmatter key must surface a hard error",
+  );
+});
+
+test("F6 wire-up: loadConfig accepts a well-formed `budgets:` frontmatter override", () => {
+  const cwd = projectWithAgentFrontmatter(
+    `model: openai/gpt-5\nthinking: off\nagent-type: coder\nbudgets:\n  tokens:\n    cap: 1000`,
+  );
+  // No throw = wiring is live and validation accepts the new shape.
+  assert.doesNotThrow(() => loadConfig(cwd));
+});
+
+test("F6 wire-up: loadConfig accepts frontmatter without any budgets: block", () => {
+  const cwd = projectWithAgentFrontmatter(
+    `model: openai/gpt-5\nthinking: off\nagent-type: coder`,
+  );
+  assert.doesNotThrow(() => loadConfig(cwd));
 });
