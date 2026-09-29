@@ -109,3 +109,26 @@ ln -s ../../node_modules .worktrees/<branch>/node_modules
 # ln -s "$APP_ROOT/node_modules" "$APP_ROOT/.worktrees/<branch>/node_modules"
 git worktree remove .worktrees/<branch>   # after the branch merges
 ```
+
+## Budget system
+
+The budget subsystem (`src/engine/budget/`) caps tokens / cost / runs / delegation depth per worker (`settings.budgets.per-worker`) and across the whole team (`settings.budgets.per-team`). Each cap is `{ cap, window?: { kind: "rolling" | "per-day" | "all-time", duration?: ms }, include?: [...] }`; per-agent overrides live in each `.md`'s top-level `budgets:` frontmatter (the legacy `governance:` block is gone, hard cutover G-16). The ledger is the single source of truth: `installBudgetEventHooks` subscribes to `message_end`, `compaction_end`, `agent_settled`, and `createBudgetToolCallGuard` blocks `bash`/`edit`/`write`/`read` at the gate. See [`docs/budgets.md`](docs/budgets.md) for the system overview and [`tmp/budget-config-v2-template.md`](tmp/budget-config-v2-template.md) for the canonical schema.
+
+Operator commands (driven from outside the worker, all in `src/engine/budget/worker-tools.ts`):
+
+- `endWorkerSession(agent, reason)` — graceful stop; `session.abort()` + ledger snapshot (`kind: "end"`); session preserved for later resume.
+- `compactWorkerSession(agent, reason, customInstructions?)` — runs `session.compact()` and snapshots (`kind: "compact"`).
+- `respawnWorkerSession(agent, reason, newTask?)` — disposes the old session, branches the old SM with summary, creates a fresh SM + session, writes `kind: "respawn"`.
+- `pauseWorkerSession(agent, reason)` — `waitForIdle()` + ledger snapshot (`kind: "pause"`); the session is resumable.
+- `snapshotWorkerSession(agent, label)` — branches the SM with a summary entry (`kind: "snapshot"`); produces a `branchPath` for later restore.
+- `restoreWorkerSession(agent, snapshotId)` — opens the branched SM via `createBranchedSession` + `SessionManager.open`; returns `{ isError: true, code: "restore_failed" }` when the source SM is in-memory (don't crash).
+- `resumeWorkerSession(agent)` — re-attaches event hooks on a paused session + `kind: "resume"` snapshot.
+- `abortWorkerCompaction(agent)` — `session.abortCompaction()` + `kind: "compact-aborted"` snapshot; the session continues.
+
+Cooperative tools (callable by the worker itself, all write a `cooperative-*` ledger entry first so the dashboard timeline captures intent even if the SDK call throws):
+
+- `request_compaction({ notes })` — self-driven SDK compaction (`kind: "cooperative-compact"`).
+- `request_end_session({ reason })` — graceful self-shutdown (`kind: "cooperative-end"`).
+- `request_snapshot({ label })` — branch the session for later restore (`kind: "cooperative-snapshot"`).
+
+Detailed migration from v1: [`docs/migrations/budget-config-v2.md`](docs/migrations/budget-config-v2.md).

@@ -131,21 +131,21 @@ This file declares **only**: the orchestrator, the agent tree (`name` / `color` 
 | `default-tools` | Fallback tool list **only** if an agent omits `tools` | `read, grep, find, ls` |
 | `max-parallel` | Optional maximum concurrent worker runs; omitted means unlimited | unlimited |
 | `queue-size` | Optional FIFO wait queue used when `max-parallel` is reached; omitted means fail immediately | disabled |
-| `worker.timeout-ms` | Optional timeout for each worker run | unlimited |
-| `worker.max-delegation-depth` | Optional nested delegation depth | unlimited |
-| `worker.max-runs` | Optional run budget per worker | unlimited |
-| `worker.token-budget` | Optional token budget per worker | unlimited |
-| `worker.cost-budget-usd` | Optional USD budget per worker | unlimited |
-| `worker.distiller-runs` | Optional distillation-run budget per worker | unlimited |
-| `team-budgets.max-runs` | Optional run pool shared by the team | unlimited |
-| `team-budgets.token-budget` | Optional token pool shared by the team | unlimited |
-| `team-budgets.cost-budget-usd` | Optional USD pool shared by the team | unlimited |
+| `budgets.per-worker.tokens.cap` | Optional per-worker token cap | unlimited |
+| `budgets.per-worker.cost-usd.cap` | Optional per-worker USD cap | unlimited |
+| `budgets.per-worker.runs.cap` | Optional per-worker run-count cap | unlimited |
+| `budgets.per-worker.depth.cap` | Optional per-worker delegation-depth cap | unlimited |
+| `budgets.per-team.tokens.cap` | Optional team-wide token cap (cumulative across all workers) | unlimited |
+| `budgets.per-team.cost-usd.cap` | Optional team-wide USD cap | unlimited |
+| `budgets.per-team.runs.cap` | Optional team-wide run-count cap | unlimited |
 | `secret-paths` | Additional project-relative or absolute paths reserved from every worker | `[]` |
 | `distiller.enabled` | Run the mental-model distiller after each worker | `true` |
 | `distiller.model` | `provider/id` for distillation (required if enabled) | — |
 | `distiller.conversation-lines` | Tail of the session fed to the distiller (`1..10000`) | `200` |
 
-Configured numeric limits must be positive finite values (`cost-budget-usd` may be fractional; count/token/time limits are integers). Quoted numbers, fractions for integer fields, zero, negatives, `NaN`, infinity, and unknown keys are rejected during config load with a path-aware error. Governance limits are all optional: omitting them does not install hidden defaults.
+> **Budgets schema (PR #57).** Resource governance lives at `settings.budgets:` with two sub-blocks — `per-worker:` (every agent, unless overridden per-agent) and `per-team:` (cumulative across the whole team). Each cap is `{ cap: <number>, window?: { kind, duration? }, include?: [keys] }`. The legacy flat keys (`settings.worker.token-budget`, `settings.worker.cost-budget-usd`, `settings.worker.max-runs`, `settings.worker.max-delegation-depth`, `settings.team-budgets.*`) are gone — the v1 loader is removed, v1 keys fail validation. Per-agent overrides use a top-level `budgets:` block in each agent's `.md` frontmatter (replaces the v1 `governance:` block). See [`docs/migrations/budget-config-v2.md`](docs/migrations/budget-config-v2.md) for migration steps and [`tmp/budget-config-v2-template.md`](tmp/budget-config-v2-template.md) for the complete reference (including `window:` object semantics — `kind` is `rolling`, `per-day`, or `all-time`, never a flat string).
+
+Configured numeric limits must be positive finite values (`cost-usd.cap` may be fractional; count/token/time limits are integers). Quoted numbers, fractions for integer fields, zero, negatives, `NaN`, infinity, and unknown keys are rejected during config load with a path-aware error. Budget caps are all optional: omitting them does not install hidden defaults (per G-16, an absent `budgets:` block means every resource is intentionally unlimited).
 
 ### Template (copy, then edit to the confirmed tree)
 
@@ -169,21 +169,42 @@ shared_context: []
 settings:
   subagent-output-limit: 12000
   default-tools: read, grep, find, ls
-  # Resource governance is opt-in. Omit this whole block for unconstrained runs.
   max-parallel: 10
   queue-size: 20
-  worker:
-    timeout-ms: 1800000
-    max-delegation-depth: 4
-    max-runs: 20
-    token-budget: 1000000
-    cost-budget-usd: 25
-    distiller-runs: 10
-  team-budgets:
-    max-runs: 100
-    token-budget: 5000000
-    cost-budget-usd: 100
-  # Any agent node may override worker defaults with its own `governance:` map.
+
+  # Resource governance (PR #57). Two sub-blocks: `per-worker` applies to
+  # every agent unless that agent overrides it via its own `budgets:` frontmatter;
+  # `per-team` is cumulative across the whole team. Omit the whole `budgets:`
+  # block for unconstrained runs (the loader does NOT install hidden defaults).
+  budgets:
+    per-worker:
+      tokens:
+        cap: 1000000                          # 1M tokens per worker session
+        window:
+          kind: per-day                      # rolling | per-day | all-time
+        include: [input, output]             # exclude cache for workers
+      cost-usd:
+        cap: 25.00                           # $25 USD per worker session
+        window:
+          kind: per-day
+      runs:
+        cap: 20                              # 20 dispatches per worker
+      depth:
+        cap: 4                               # 4 levels of nested delegation
+    per-team:
+      tokens:
+        cap: 5000000                         # 5M tokens across the whole team
+        window:
+          kind: all-time                     # unbounded (no UTC reset)
+        include: [input, output, cacheRead, cacheWrite]
+      cost-usd:
+        cap: 100.00
+        window:
+          kind: all-time
+      runs:
+        cap: 100                             # 100 dispatches across the team
+      # depth: NOT ALLOWED under per-team (depth is a per-worker invariant)
+
   # Reserved before normal domain rules. Add project-specific credentials here.
   secret-paths:
     - config/secrets.json
