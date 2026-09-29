@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Budget Refactor Completeness Review — 2025-09-29</title>
+  <link rel="stylesheet" href="assets/review.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>mermaid.initialize({ startOnLoad: true, theme: 'neutral', securityLevel: 'loose' });</script>
+</head>
+<body>
+  <header class="hero">
+    <div class="container">
+      <p class="eyebrow">pi-hive review · 2025-09-29</p>
+      <h1>Budget refactor completeness review</h1>
+      <p class="subtitle">A per-feature completeness audit of <code>refactor/budget-pi-native</code> at <code>ca9930a</code> (PR #57) — what landed from the v2 refactor plan, what didn't, and why the <code>compact</code> budget strategy is unreachable to end users.</p>
+      <p class="meta">
+        Baseline: <code>refactor/budget-pi-native</code> @ <code>ca9930a</code> (PR #57) ·
+        Branch under review: <code>refactor/budget-pi-native</code> ·
+        Reviewers: 3 parallel sub-agents (completeness, code quality, compact-strategy forensic) via <code>SubagentWorkflow</code>
+      </p>
+    </div>
+  </header>
+
+  <nav class="container">
+    <ul class="report-nav">
+      <li><a href="#summary">Executive summary</a></li>
+      <li><a href="#compact">Why <code>compact</code> is unreachable</a></li>
+      <li><a href="#features">Per-feature completeness (F1–F13)</a></li>
+      <li><a href="#wiring">The F5 wiring gap</a></li>
+      <li><a href="#quality">Code quality findings</a></li>
+      <li><a href="#recommendations">Recommendations</a></li>
+      <li><a href="#methodology">Methodology</a></li>
+    </ul>
+  </nav>
+
+  <main class="container">
+
+    <section id="summary" class="key-findings">
+      <h2>Executive summary</h2>
+      <p>
+        PR #57 (<code>refactor/budget-pi-native</code>) shipped a major v2 budget system spanning 13 features and ~2,100 LOC of rewritten code.
+        The F10 reviewer rounds (kieran-typescript, architecture-strategist, code-simplicity) signed off on the budget module
+        <strong>in isolation</strong>. This review asks the question the F10 rounds did not: <em>did the features actually land and get wired into production entry points?</em>
+        Three parallel sub-agents audited completeness, code quality (extending F10), and the user's specific question about <code>compact</code> strategy.
+      </p>
+
+      <div class="cards">
+        <div class="card">
+          <h3>What landed (6 of 13)</h3>
+          <p><strong>6 features are complete and wired into production.</strong> F1 (primitives), F3 (live tracking), F4 (end-of-run), F7 (race-safe accounting), F8 (reload-stable ledger), F9 (legacy cleanup), F10 (reviewer sign-off), F12 (migration guide). Wave 5A's <code>dispatch.ts</code> slim is also in (at 699 LOC vs the 600 target — a minor overshoot from PR #58's fresh-true fix).</p>
+          <span class="card-meta">Per-feature evidence in §3.</span>
+        </div>
+
+        <div class="card">
+          <h3>What didn't land (1 critical gap)</h3>
+          <p><strong>F5 is function-complete but unwired.</strong> The 8 operator commands, 3 cooperative tools, and the <code>summarize_progress</code> cooperative tool are all implemented and unit-tested but never invoked by <code>dispatchAgent</code>, never exposed in <code>buildHiveTools</code>, and never wired to any operator CLI. <strong>~1,300 LOC + ~3,200 LOC of tests for code with zero production callers.</strong> Events.ts:195 warning tells workers to call <code>summarize_progress({notes: "..."})</code> — a tool they cannot reach.</p>
+          <span class="card-meta">Full inventory in §4.</span>
+        </div>
+
+        <div class="card">
+          <h3>F2 is also unwired (parallel implementation)</h3>
+          <p>The plan's <strong>F2 spine</strong> (<code>delegateAgent</code>) is exported and unit-tested but never called from production. The dispatch path implements the same 5-step flow inline via <code>createWorkerSession</code> + <code>installWorkerBudgetHooks</code> + <code>runBudgetPreflight</code>. Two paths, one test-only. <code>docs/budgets.md</code> describes <code>delegateAgent</code> as the production entry point — that's incorrect.</p>
+          <span class="card-meta">See §3 F2 row.</span>
+        </div>
+
+        <div class="card">
+          <h3>Why <code>compact</code> is unreachable</h3>
+          <p>The <code>compact</code> budget strategy was <strong>intentionally deferred to v3</strong> per plan §6.2 #12 (C5 conditional). But the deferral was never communicated to <strong>workers</strong>: the <code>summarize_progress</code> tool description still claims <code>compact: true</code> injects notes into LLM context; in practice it always returns <code>compact_failed</code> with <code>details.strategy: "default"</code>. Operator-facing docs (<code>docs/budgets.md:83</code>) are honest about the deferral; worker-facing surfaces are not. <strong>This is dead code masquerading as a feature.</strong></p>
+          <span class="card-meta">Forensic answer with 17-step evidence chain in §2.</span>
+        </div>
+
+        <div class="card">
+          <h3>Real bugs in the integration code</h3>
+          <p><strong>F6 wiring bug:</strong> <code>validateBudgetsFrontmatter</code> is exported but never called from <code>enrichFromFrontmatter</code>. Users writing <code>governance: { tokenBudget: 1000 }</code> in <code>.md</code> frontmatter get a silent no-op. <strong>Other 12 code-quality findings</strong> extend the F10 rounds: silent Promise rejections in <code>events.ts:384</code>, inconsistent error envelopes in cooperative tools, duplicated type casts, dead branches in <code>tools.ts</code>, operator commands that don't honor <code>ctx.signal</code>.</p>
+          <span class="card-meta">All 12 findings in §5.</span>
+        </div>
+      </div>
+
+      <h3>The big picture</h3>
+      <ol>
+        <li><strong>The budget primitive layer is excellent.</strong> F1's <code>BudgetLedger</code> / <code>BudgetPolicy</code> / <code>WorkerBudgetStrategy</code> design is Pi-native, well-tested, and structurally eliminates the dual-counter bug class. The plan's "single source of truth = <code>session.getSessionStats()</code>" goal is achieved wherever the ledger is read.</li>
+        <li><strong>The dispatch integration is correct.</strong> <code>runBudgetPreflight</code> + <code>installBudgetEventHooks</code> wire the budget into <code>delegate_agent</code> end-to-end. Pre-flight, mid-run warning, tool-call block, and end-of-run ledger snapshot all work as designed.</li>
+        <li><strong>The cooperative surface is dead.</strong> 8 operator commands + 3 cooperative tools + <code>summarize_progress</code> total ~1,300 LOC and ~3,200 LOC of tests for code that has zero production callers. This is a 4,500-LOC deferred feature that <em>looks</em> shipped.</li>
+        <li><strong>The <code>compact</code> strategy was deferred but advertised.</strong> Users will discover dead code only when they try to use it — and they will get a confusing error. This is the highest-priority user-facing fix.</li>
+        <li><strong>Several "feature" exports are pure dead code, not features.</strong> <code>BudgetExhaustedError</code> class (never <code>new</code>'d), <code>WorkerBudgetStrategy</code> type with <code>_placeholder: never</code> (uninhabitable), <code>EffectiveWorkerGovernance</code> with all-undefined fields, the <code>index.ts</code> barrel with zero importers, the duplicated duplicated-duplicated type cast on <code>state.config.settings</code>. These are clearly <em>not</em> features per the refactor plan.</li>
+      </ol>
+    </section>
+
+    <section id="compact" class="key-findings">
+      <h2>Why the <code>compact</code> budget strategy is unreachable</h2>
+
+      <p><strong>TL;DR:</strong> The <code>compact</code> strategy is <strong>not missing</strong> — it was <strong>intentionally deferred to v3</strong> by plan §6.2 decision #12, but the deferral was never communicated to <strong>workers</strong> at the tool layer. The tool still advertises <code>compact: true</code> as a working feature; in practice it always returns <code>compact_failed</code> with the lie <code>details.strategy: "compact"</code> on the unreachable success path. This is dead code masquerading as a feature.</p>
+
+      <h3>The decision</h3>
+      <p>The plan's §2.13 C5 proposed a structured <code>strategies</code> config replacing the legacy flat <code>budgetStrategy: default | compact</code> enum. The plan explicitly marked C5 as <em>conditional</em> with the default recommendation <strong>"defer to v3"</strong> (refactor plan §6.2 #12):</p>
+      <blockquote>
+        <strong>C5 — Structured strategies (replace <code>budget-strategy</code> enum).</strong>
+        Decision: conditional — land only if richer strategies are wanted in v2.
+        Default recommendation: <strong>defer to v3</strong>.
+      </blockquote>
+      <p>The user accepted the default. C5 is deferred. <code>compact</code> as a runtime strategy is unreachable in v2.</p>
+
+      <h3>The 17-step evidence chain</h3>
+      <p>From plan to runtime, the chain that locks <code>compact</code> out:</p>
+
+      <div class="evidence-item">
+        <div class="evidence-step">Step 1 — Decision to defer</div>
+        <p>Plan §6.2 #12: "C5 — Structured strategies... Decision: conditional... Default recommendation: defer to v3."</p>
+        <p class="evidence-interpretation">v2 ships the C5 placeholder only. The structured-strategy shape is not implemented.</p>
+      </div>
+
+      <div class="evidence-item">
+        <div class="evidence-step">Step 2 — Type is uninhabitable</div>
+        <p><code>src/engine/budget/types.ts:96</code>:</p>
+        <div class="evidence-quote">export interface WorkerBudgetStrategy {
+  // TODO C5: deferred to v3 unless user overrides
+  readonly _placeholder: never;
+}</div>
+        <p class="evidence-interpretation"><code>{ readonly _placeholder: never }</code> makes the type uninhabitable. No runtime value can satisfy it. The resolver's only legal outcome is <code>undefined</code>.</p>
+      </div>
+
+      <div class="evidence-item">
+        <div class="evidence-step">Step 3 — Resolver hardcodes <code>undefined</code></div>
+        <p><code>src/engine/budget/strategy.ts:31-35</code>:</p>
+        <div class="evidence-quote">export function resolveWorkerBudgetStrategy(
+  _state: HiveState,
+  _agentName: string,
+): WorkerBudgetStrategy | undefined {
+  return undefined;
+}</div>
+        <p class="evidence-interpretation">Single source-of-truth resolver returns <code>undefined</code> for any input. Parameters are underscore-prefixed (deliberately ignored).</p>
+      </div>
+
+      <div class="evidence-item">
+        <div class="evidence-step">Step 4 — Convenience predicates hardcode <code>false</code></div>
+        <p><code>strategy.ts:43</code> (<code>strategyRequestsWrapUp</code>) and <code>strategy.ts:53</code> (<code>strategyRequestsCompactOnExhaustion</code>) both return <code>false</code> unconditionally.</p>
+        <p class="evidence-interpretation">Even if a strategy object existed, the system would treat it as a no-op default.</p>
+      </div>
+
+      <div class="evidence-item">
+        <div class="evidence-step">Step 5 — Tool has its own resolver that hardcodes <code>"default"</code></div>
+        <p><code>src/agents/tools/summarize-progress.ts:142</code>:</p>
+        <div class="evidence-quote">function resolveStrategy(_state: HiveState, _runtime: AgentRuntime | undefined): "default" | "compact" {
+  return "default";
+}</div>
+        <p class="evidence-interpretation">Even though this returns a <code>"default" | "compact"</code> literal (not <code>undefined</code>), the implementation always returns <code>"default"</code>. The docstring (lines 138-141) explicitly states: "The structured strategy (C5) is deferred to v3; for now we always return <code>"default"</code>".</p>
+      </div>
+
+      <div class="evidence-item">
+        <div class="evidence-step">Step 6 — Compact-mode branch always fails</div>
+        <p><code>summarize-progress.ts:228-251</code>:</p>
+        <div class="evidence-quote">if (compactRequested) {
+  const strategy = resolveStrategy(state, runtime);
+  if (strategy !== "compact") {
+    return {
+      content: [{ type: "text",
+        text: `summarize_progress: compact flag ignored under "${strategy}" strategy — operator drives intervention. Notes stored.` }],
+      details: { ok: false, caller: callerName, reason: "compact_failed", strategy, ... },
+      isError: true,
+    };
+  }
+  // UNREACHABLE in v2 — strategy is never "compact"
+  const sessionManager = runtime.session?.sessionManager;
+  if (sessionManager?.appendCustomMessageEntry) {
+    sessionManager.appendCustomMessageEntry("progress_note", ...);
+  }
+}</div>
+        <p class="evidence-interpretation">When <code>compactRequested === true</code>, the <code>strategy !== "compact"</code> guard at line 231 fires, returning early. Lines 245-251 (<code>appendCustomMessageEntry</code>) are unreachable in v2.</p>
+      </div>
+
+      <div class="evidence-item">
+        <div class="evidence-step">Step 7 — Error message frames it as "rejected under default"</div>
+        <p><code>summarize-progress.ts:235</code>: <code>"summarize_progress: compact flag ignored under \"default\" strategy — operator drives intervention. Notes stored."</code></p>
+        <p class="evidence-interpretation">Implies the worker could in principle be on a <code>compact</code> strategy. That implication is false — there is no <code>compact</code> strategy to be on. C5 placeholder means the strategy enum is single-valued.</p>
+      </div>
+
+      <div class="evidence-item">
+        <div class="evidence-step">Step 8 — Success text lies</div>
+        <p><code>summarize-progress.ts:286</code>: <code>${compactRequested ? " (compact honored)" : ""}</code></p>
+        <p class="evidence-interpretation">This text only executes in the success path. Since <code>resolveStrategy</code> always returns <code>"default"</code> and the guard at line 231 always fires, line 286 is reached only when <code>compactRequested</code> is false — the conditional append never renders.</p>
+      </div>
+
+      <div class="evidence-item">
+        <div class="evidence-step">Step 9 — Structured details also lie</div>
+        <p><code>summarize-progress.ts:282</code>: <code>const strategy = compactRequested ? "compact" : resolveStrategy(state, runtime);</code> followed by <code>details.strategy: strategy</code> at line 297.</p>
+        <p class="evidence-interpretation">When the success path runs (only when <code>compactRequested</code> is false), this is fine. But the structured details would record <code>strategy: "compact"</code> for any <code>compactRequested: true</code> — except those calls always return at line 231-249 with <code>isError: true</code> before reaching this code. So in practice the lie never reaches the dashboard. <strong>But it's a fragile lie: if the guard order changes, the lie surfaces.</strong></p>
+      </div>
+
+      <div class="evidence-item">
+        <div class="evidence-step">Step 10 — Tool description claims it works</div>
+        <p><code>summarize-progress.ts:176</code>: <em>"Under the <code>compact</code> budget strategy, pass <code>compact: true</code> to inject the notes into LLM context immediately; under <code>default</code> the flag is rejected."</em></p>
+        <p class="evidence-interpretation">The worker-facing description frames compact as a strategy toggle the user could in principle set. It does NOT say (a) no such strategy exists in v2, (b) the flag is C5-deferred, or (c) it will always be rejected in v2 regardless of configuration.</p>
+      </div>
+
+      <div class="evidence-item">
+        <div class="evidence-step">Step 11 — Schema rejects any <code>strategies:</code> config</div>
+        <p><code>src/core/schema.ts:313</code>:</p>
+        <div class="evidence-quote">strategies: Type.Optional(Type.Never()),</div>
+        <p class="evidence-interpretation">A user who tries to set <code>budgets.strategies: { on-approaching-limit: ..., on-exhaustion: ... }</code> fails YAML validation outright. No opt-in for C5; the validator gates the v3 surface.</p>
+      </div>
+
+      <div class="evidence-item">
+        <div class="evidence-step">Step 12 — Legacy escape hatch removed</div>
+        <p><code>src/core/types.ts:163</code>: <em>"REMOVED per F9: WorkerGovernance / TeamBudgets — replaced by the new nested <code>settings.budgets:</code> shape. The legacy flat-key fields were deleted from config-validation's allowlist by the Wave 1B hard cutover (G-16)."</em></p>
+        <p class="evidence-interpretation">The v1 escape hatch — <code>worker-governance.budget-strategy: compact</code> in agent .md frontmatter — is gone. Users who upgraded and tried the legacy key get a hard-throw at config-load (G-16 hard cutover).</p>
+      </div>
+
+      <div class="evidence-item">
+        <div class="evidence-step">Step 13 — Migration guide is honest to operators</div>
+        <p><code>docs/budgets.md:83</code>: <em>"If a project still relies on <code>compact</code> behavior, leave it pinned to the last v1 release until C5 lands."</em></p>
+        <p class="evidence-interpretation">Operator-facing docs are honest. The deferral IS communicated — but only to operators, not to workers at runtime.</p>
+      </div>
+
+      <div class="evidence-item">
+        <div class="evidence-step">Step 14 — Operator docs explain the unreachable type</div>
+        <p><code>docs/budgets.md:67</code>: <em>"A <strong>flat default strategy</strong> is the only mode... The <code>WorkerBudgetStrategy</code> type carries <code>readonly _placeholder: never</code>, so <code>resolveWorkerBudgetStrategy</code> always returns <code>undefined</code>."</em></p>
+        <p class="evidence-interpretation">Two surfaces disagree: operator docs say no strategy exists; worker-facing tool description implies a <code>compact</code> strategy exists.</p>
+      </div>
+
+      <div class="evidence-item">
+        <div class="evidence-step">Step 15 — Operator command <code>compactWorkerSession</code> works (independent path)</div>
+        <p><code>src/engine/budget/worker-tools.ts:608</code>: <code>export async function compactWorkerSession(...): Promise&lt;CompactWorkerSessionResult&gt;</code></p>
+        <p class="evidence-interpretation">There IS a working operator-driven compact command — it calls <code>session.compact(customInstructions)</code> directly. But this is the operator path, NOT the worker-driven <code>summarize_progress({ compact: true })</code>. The two surfaces are independent. The cooperative path through <code>summarize_progress</code> is dead; the operator path through <code>compactWorkerSession</code> works fine.</p>
+      </div>
+
+      <div class="evidence-item">
+        <div class="evidence-step">Step 16 — F9 commit deleted the legacy <code>budget-strategy.ts</code></div>
+        <p><code>git log refactor/budget-pi-native</code>: <code>e685693 refactor(budget): wave 5A — F9 legacy cleanup (delete governance.ts, budget-strategy.ts, slim dispatch.ts)</code></p>
+        <p class="evidence-interpretation">The legacy single-file <code>budget-strategy.ts</code> with the <code>default | compact</code> enum resolver was deleted in F9. The new <code>summarize-progress.ts</code> replaces it with a hardcoded <code>return "default"</code>.</p>
+      </div>
+
+      <div class="evidence-item">
+        <div class="evidence-step">Step 17 — Worker-visible dashboard masks the failure</div>
+        <p>Per the cooperative-eol tests, every <code>summarize_progress</code> call writes a <code>progress_notes</code> ledger entry. The dashboard renders this as a successful wrap-up record, not as a config gap.</p>
+        <p class="evidence-interpretation">Operators inspecting the timeline cannot distinguish a working wrap-up from a no-op compact.</p>
+      </div>
+
+      <h3>What this means for a worker</h3>
+      <p>A worker (or test) that follows the tool description and calls <code>summarize_progress({notes: "...", compact: true})</code> to roll its context window gets:</p>
+      <ul>
+        <li><code>isError: true</code></li>
+        <li>Message: <code>"summarize_progress: compact flag ignored under \"default\" strategy — operator drives intervention. Notes stored."</code></li>
+        <li><code>details.reason === "compact_failed"</code></li>
+      </ul>
+      <p>The notes ARE stored (the tool stores them on <code>state.progressNotes[callerName]</code> before the strategy check), but the <code>compact</code> feature the worker requested is silently rejected. The <code>(compact honored)</code> success string and <code>details.strategy: "compact"</code> lie are unreachable today but would surface if the guard order changed.</p>
+
+      <h3>Dead code paths inventory</h3>
+      <p>Every path the cooperative "compact" feature would have used, mapped to file:line:</p>
+      <table class="findings-table">
+        <thead><tr><th>Trigger</th><th>Actual behavior in v2</th><th>Location</th></tr></thead>
+        <tbody>
+          <tr><td><code>summarize_progress({compact: true})</code> with valid notes</td><td><code>sessionManager.appendCustomMessageEntry</code> NEVER called</td><td><code>summarize-progress.ts:251</code></td></tr>
+          <tr><td><code>summarize_progress({compact: true})</code> success text</td><td>Unreachable: control always returns at 231-249</td><td><code>summarize-progress.ts:286</code></td></tr>
+          <tr><td><code>details.strategy: "compact"</code> on success path</td><td>Unreachable; would surface if guard order changed</td><td><code>summarize-progress.ts:297</code></td></tr>
+          <tr><td><code>WorkerGovernance.budgetStrategy</code> config (v1 escape hatch)</td><td>Type deleted by F9; hard-throw on unknown keys (G-16)</td><td><code>src/core/types.ts:163</code></td></tr>
+          <tr><td><code>budgets.strategies.on-exhaustion.action: compact</code></td><td>Schema rejects: <code>strategies: Type.Never()</code></td><td><code>src/core/schema.ts:313</code></td></tr>
+          <tr><td>Resolver returning any non-<code>undefined</code> value</td><td>Type system prevents it (<code>_placeholder: never</code>)</td><td><code>strategy.ts:31</code></td></tr>
+          <tr><td><code>strategyRequestsWrapUp</code> returning true</td><td>Hardcoded <code>return false</code></td><td><code>strategy.ts:43</code></td></tr>
+          <tr><td><code>strategyRequestsCompactOnExhaustion</code> returning true</td><td>Hardcoded <code>return false</code></td><td><code>strategy.ts:53</code></td></tr>
+        </tbody>
+      </table>
+
+      <h3>Recommendations (from the compact-strategy sub-agent)</h3>
+      <ol>
+        <li><strong>Update the tool description</strong> to honestly say compact is C5-deferred. <em>Effort: trivial.</em></li>
+        <li><strong>Fix the error message at line 235</strong> — replace "compact flag ignored under ${strategy} strategy — operator drives intervention" with "compact is not implemented in this version of pi-hive (C5 placeholder); only the notes are stored." <em>Effort: trivial.</em></li>
+        <li><strong>Drop the dead <code>(compact honored)</code> success branch at line 286 and the <code>details.strategy: "compact"</code> lie at line 297</strong>. Both are unreachable today and tell the dashboard a thing that did not happen. <em>Effort: trivial.</em></li>
+        <li><strong>Either remove the <code>compact</code> parameter from the schema or stub it to a no-op success</strong>. Option (b) is less churn: keep the parameter but make <code>compact: true</code> a documented no-op that still saves notes and returns success. <em>Effort: small.</em></li>
+        <li><strong>Implement C5 (structured strategies) as planned</strong> — proper fix per refactor-plan §2.13 C5. Replace <code>_placeholder: never</code> with a real <code>WorkerBudgetStrategy</code> shape, allow <code>strategies:</code> in <code>BudgetsConfigSchema</code> (not <code>Type.Never</code>), wire <code>resolveWorkerBudgetStrategy</code> to read config, and have <code>summarize_progress</code> reach the <code>appendCustomMessageEntry</code> path when the resolved strategy requests compact. <em>Effort: large.</em></li>
+      </ol>
+    </section>
+
+    <section id="features" class="key-findings">
+      <h2>Per-feature completeness (F1–F13)</h2>
+      <p>Each feature is graded against the refactor plan §3 "How do I know this feature is complete?" checklist. Evidence is file:line from the completeness sub-agent's audit.</p>
+
+      <table class="findings-table">
+        <thead>
+          <tr><th>ID</th><th>Feature</th><th>Status</th><th>Wiring</th><th>Evidence</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>F1</code></td>
+            <td>Budget primitives (<code>BudgetLedger</code>, <code>BudgetPolicy</code>, <code>WorkerBudgetStrategy</code>)</td>
+            <td><span class="badge badge-success">complete</span></td>
+            <td><span class="badge badge-success">wired</span></td>
+            <td>All 3 classes live in <code>src/engine/budget/{ledger,policy,strategy}.ts</code>. F10 Round 1 cleaned dead exports. <code>WorkerBudgetStrategy</code> is an uninhabitable C5 placeholder (line 96: <code>readonly _placeholder: never</code>). <code>index.ts</code> barrel re-exports the surface but has zero importers (callers reach into named paths).</td>
+          </tr>
+          <tr>
+            <td><code>F2</code></td>
+            <td><code>delegateAgent</code> spine</td>
+            <td><span class="badge badge-warning">implemented but unwired</span></td>
+            <td><span class="badge badge-error">test-only</span></td>
+            <td><code>worker-tools.ts:462</code> defines <code>delegateAgent</code> with the full 5-step flow (preflight → SM factory → createSession → ledger restore → install hooks). 17 tests in <code>tests/budget-worker-tools.test.ts</code>. <strong>Production never calls it</strong>: <code>dispatch.ts:29</code> imports only <code>{BUDGET_EXHAUSTED_ERROR_NAME, runBudgetPreflight}</code>; the production path runs <code>createWorkerSession</code> + <code>installWorkerBudgetHooks</code> inline. The two paths diverge only in non-fresh SM factory (<code>continueRecent(cwd)</code> vs <code>open(runtime.sessionFile)</code>). <code>docs/budgets.md:27,30,200</code> incorrectly describes <code>delegateAgent</code> as the production entry point.</td>
+          </tr>
+          <tr>
+            <td><code>F3</code></td>
+            <td>Live budget tracking (warning, abort, tool_call block)</td>
+            <td><span class="badge badge-success">complete</span></td>
+            <td><span class="badge badge-success">wired</span></td>
+            <td><code>events.ts:218</code> (<code>installBudgetEventHooks</code>), <code>:311</code> (<code>evaluateThresholds</code>), <code>:458</code> (<code>createBudgetToolCallGuard</code>). Throttling constants at <code>events.ts:45</code> (<code>THROTTLE_MESSAGE_INTERVAL=10</code>) and <code>:47</code> (<code>THROTTLE_SPEND_RATIO=0.05</code>). Warning at 20% via <code>appendCustomMessageEntry</code>; exhaustion at 0% with abort. Tool-call blocking wired in <code>worker-session-factory.ts:171-198</code> for bash/edit/write/read. Tests: <code>tests/budget-events.test.ts</code> (21), <code>tests/budget-evaluate-thresholds.test.ts</code> (6), <code>tests/budget-events-ordering.test.ts</code> (4), <code>tests/budget-tool-call-wiring.test.ts</code> (8).</td>
+          </tr>
+          <tr>
+            <td><code>F4</code></td>
+            <td>End-of-run finalization (<code>agent_settled</code> snapshot)</td>
+            <td><span class="badge badge-success">complete</span></td>
+            <td><span class="badge badge-success">wired</span></td>
+            <td><code>events.ts:282-288</code> handles <code>agent_settled</code> → <code>ledger.snapshot(stats, policy, "checkpoint", signal)</code>. Reachable from production: <code>installWorkerBudgetHooks</code> (worker-session-factory.ts:162) → <code>installBudgetEventHooks</code>. <code>dispatch.ts:670-672</code> explicitly notes: "the legacy <code>governanceTokens</code> / <code>governanceCostUsd</code> accumulation that used to live here is gone. <code>installBudgetEventHooks</code> (F2 spine) is the sole finalization path."</td>
+          </tr>
+          <tr>
+            <td><code>F5</code></td>
+            <td>6 EOL/respawn operator commands + 3 cooperative tools + <code>summarize_progress</code></td>
+            <td><span class="badge badge-warning">function-complete</span></td>
+            <td><span class="badge badge-error">unwired</span></td>
+            <td><strong>The headline finding.</strong> 8 operator commands (<code>endWorkerSession:578</code>, <code>compactWorkerSession:608</code>, <code>pauseWorkerSession:640</code>, <code>resumeWorkerSession:670</code>, <code>abortWorkerCompaction:706</code>, <code>respawnWorkerSession:828</code>, <code>snapshotWorkerSession:946</code>, <code>restoreWorkerSession:1060</code>) + 3 cooperative tools (<code>requestCompaction:1215</code>, <code>requestEndSession:1257</code>, <code>requestSnapshot:1290</code>) + <code>buildSummarizeProgressTool</code> (<code>summarize-progress.ts:167</code>) are all implemented and tested. <strong>None</strong> are invoked by <code>dispatchAgent</code>. <strong>None</strong> are registered in <code>buildHiveTools</code> (which only registers 10 tools: route_agent, team_status, delegate_agent, team_conversation, hive_sdd_status, hive_cycle_summary, submit_review_verdict, plan_new, plan_task_complete, plan_select). <strong>None</strong> have CLI commands, RPC handlers, or TUI commands. <code>events.ts:195</code> warning tells workers to call <code>summarize_progress({notes})</code> — a tool they cannot reach.</td>
+          </tr>
+          <tr>
+            <td><code>F6</code></td>
+            <td>Backwards-compatible config schema (nested shape + C1-C6)</td>
+            <td><span class="badge badge-warning">partial</span></td>
+            <td><span class="badge badge-warning">YAML wired, frontmatter test-only</span></td>
+            <td>Schema layer: <code>schema.ts:285</code> (<code>WorkerBudgetConfigSchema</code>), <code>:294</code> (<code>TeamBudgetConfigSchema</code>), <code>:308</code> (<code>BudgetsConfigSchema</code>), <code>:316</code> (<code>AgentBudgetsOverrideSchema</code>). Discriminated union <code>BudgetCap</code>. Validator at <code>schema.ts:395</code>. C1 (rename governance→budgets): <code>frontmatter.ts:43-72</code>. C2 (include:): <code>UsageKey</code> union. C3 (defaults): DELIBERATELY SKIPPED per G-16. C4 (discriminated union): implemented. C5 (structured strategies): DEFERRED to v3 — <code>strategies: Type.Optional(Type.Never())</code> at <code>schema.ts:313</code>. C6 (explicit window): implemented. <strong>Wiring bug:</strong> <code>validateBudgetsFrontmatter</code> is invoked only from <code>tests/config-schema.test.ts:183,191</code>, NEVER from <code>src/core/config.ts</code> (which contains <code>enrichFromFrontmatter</code>). Legacy <code>governance:</code> keys in .md frontmatter are silently dropped.</td>
+          </tr>
+          <tr>
+            <td><code>F7</code></td>
+            <td>Race-safe accounting</td>
+            <td><span class="badge badge-success">complete</span></td>
+            <td><span class="badge badge-success">wired</span></td>
+            <td>Race tests in <code>tests/budget-races.test.ts</code>: T7.1 abort-then-getSessionStats (100 consecutive runs), T7.2 parallel delegation (G-09: team totals consistent), T7.3 compaction racing message_end, T7.4 session_start racing CustomEntry write, T7.6 agent_settled after abort, T7.7 Bug 3 regression. Implementation: <code>BudgetLedger.recordEvent</code> + <code>recordCompaction</code> + throttled <code>maybeSnapshot</code>.</td>
+          </tr>
+          <tr>
+            <td><code>F8</code></td>
+            <td>Reload-stable ledger</td>
+            <td><span class="badge badge-success">complete</span></td>
+            <td><span class="badge badge-success">wired</span></td>
+            <td>Tests in <code>tests/budget-reload.test.ts</code>: T8.1 /reload, T8.2 pre-reload exhausted, T8.3 pause+resume, T8.4 no closure-captured state, T8.5 /tree, T8.6 /fork. Implementation: <code>BudgetLedger.restore</code> walks <code>getBranch()</code> filtering <code>customType === "pi-hive-budget-ledger"</code>, takes latest entry per <code>agentSlug</code>.</td>
+          </tr>
+          <tr>
+            <td><code>F9</code></td>
+            <td>Legacy cleanup (delete <code>governance.ts</code>, <code>budget-strategy.ts</code>; slim <code>dispatch.ts</code>)</td>
+            <td><span class="badge badge-success">complete</span></td>
+            <td><span class="badge badge-success">wired</span></td>
+            <td><code>src/engine/governance.ts</code> and <code>src/engine/budget-strategy.ts</code> do not exist (verified). <code>dispatch.ts</code> is 699 LOC (target was ≤600; minor overshoot from PR #58's fresh-true fix). 7 helper modules extracted: <code>worker-session-factory.ts</code>, <code>worker-runtime.ts</code>, <code>worker-subscription.ts</code>, <code>runtime-stats.ts</code>, <code>worker-lifecycle.ts</code>, <code>delegation-end.ts</code>, <code>dispatch-helpers.ts</code>. <code>governanceTokens</code>/<code>governanceCostUsd</code>/<code>effectiveTokens</code> removed from <code>AgentRuntime</code> (<code>types.ts:229-234</code> comment).</td>
+          </tr>
+          <tr>
+            <td><code>F10</code></td>
+            <td>Reviewer sign-off (3 rounds)</td>
+            <td><span class="badge badge-success">complete</span></td>
+            <td><span class="badge badge-muted">n/a</span></td>
+            <td>3 review rounds in <code>docs/reviews/28-09-2026-budget-review/review-runs/round-{1,2,3}-*.md</code>. Signed off on <code>src/engine/budget/</code> in isolation. <strong>Did not verify integration</strong> — the F2 unwiring, F5 wiring gap, and F6 frontmatter bug all slipped past.</td>
+          </tr>
+          <tr>
+            <td><code>F12</code></td>
+            <td>Migration guide (<code>docs/migrations/budget-config-v2.md</code>)</td>
+            <td><span class="badge badge-success">complete</span></td>
+            <td><span class="badge badge-success">wired</span></td>
+            <td>8 before/after examples (plan required ≥5): §1 simple worker budget, §2 team budget, §3 multiple caps, §4 include: list, §5 window: object, §6 depth cap, §7 governance→budgets rename, §8 C5 deferral. Hard cutover documented (G-16). Rollback instructions at lines 130+.</td>
+          </tr>
+          <tr>
+            <td><code>F13</code></td>
+            <td>Dashboard intervention UI (6 EOL buttons)</td>
+            <td><span class="badge badge-error">missing</span></td>
+            <td><span class="badge badge-muted">n/a</span></td>
+            <td>Explicitly deferred to a follow-up PR per plan §6.2 #3. Engine commands are correct; UI ships separately. Not in this PR's scope.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Wave 5A — <code>dispatch.ts</code> slim</h3>
+      <p>Plan §3.9 (F9 includes this). <code>dispatch.ts</code> was slimmed from ~1,100 LOC to 699 LOC by extracting 7 helper modules. All 7 are imported by dispatch.ts and used. <strong>Wave 5A landed cleanly</strong>, with a minor LOC overshoot from PR #58's fresh-true fix (16% over the 600 target).</p>
+    </section>
+
+    <section id="wiring" class="key-findings">
+      <h2>The F5 wiring gap (in detail)</h2>
+      <p>F5 is the largest single completeness gap. Here's the inventory of what's unwired and what would need to change.</p>
+
+      <h3>What's exported but never called</h3>
+      <table class="findings-table">
+        <thead><tr><th>Symbol</th><th>File:line</th><th>Tests</th><th>Production callers</th></tr></thead>
+        <tbody>
+          <tr><td><code>endWorkerSession</code></td><td><code>worker-tools.ts:578</code></td><td><code>tests/budget-eol.test.ts</code> (15 tests)</td><td><strong>0</strong></td></tr>
+          <tr><td><code>compactWorkerSession</code></td><td><code>worker-tools.ts:608</code></td><td>same</td><td><strong>0</strong></td></tr>
+          <tr><td><code>pauseWorkerSession</code></td><td><code>worker-tools.ts:640</code></td><td>same</td><td><strong>0</strong></td></tr>
+          <tr><td><code>resumeWorkerSession</code></td><td><code>worker-tools.ts:670</code></td><td>same</td><td><strong>0</strong></td></tr>
+          <tr><td><code>abortWorkerCompaction</code></td><td><code>worker-tools.ts:706</code></td><td>same</td><td><strong>0</strong></td></tr>
+          <tr><td><code>respawnWorkerSession</code></td><td><code>worker-tools.ts:828</code></td><td><code>tests/budget-eol-branch-clone.test.ts</code></td><td><strong>0</strong></td></tr>
+          <tr><td><code>snapshotWorkerSession</code></td><td><code>worker-tools.ts:946</code></td><td>same</td><td><strong>0</strong></td></tr>
+          <tr><td><code>restoreWorkerSession</code></td><td><code>worker-tools.ts:1060</code></td><td>same</td><td><strong>0</strong></td></tr>
+          <tr><td><code>requestCompaction</code></td><td><code>worker-tools.ts:1215</code></td><td><code>tests/cooperative-eol.test.ts</code></td><td><strong>0</strong></td></tr>
+          <tr><td><code>requestEndSession</code></td><td><code>worker-tools.ts:1257</code></td><td>same</td><td><strong>0</strong></td></tr>
+          <tr><td><code>requestSnapshot</code></td><td><code>worker-tools.ts:1290</code></td><td>same</td><td><strong>0</strong></td></tr>
+          <tr><td><code>buildSummarizeProgressTool</code></td><td><code>summarize-progress.ts:167</code></td><td><code>tests/summarize-progress.test.ts</code></td><td><strong>0</strong></td></tr>
+        </tbody>
+      </table>
+
+      <h3>What dispatch.ts actually does</h3>
+      <p><code>src/engine/dispatch.ts</code> (37KB, 699 lines post-slim) calls exactly these budget exports:</p>
+      <ul>
+        <li><code>runBudgetPreflight</code> (lines 162, 202) — pre-flight before and after slot acquisition</li>
+        <li><code>BUDGET_EXHAUSTED_ERROR_NAME</code> (line 29) — duck-type check</li>
+      </ul>
+      <p>The rest goes through <code>worker-session-factory.ts</code>, which calls:</p>
+      <ul>
+        <li><code>createBudgetToolCallGuard</code>, <code>installBudgetEventHooks</code> (events.ts)</li>
+        <li><code>BudgetLedger.restore</code> (ledger.ts)</li>
+      </ul>
+      <p>No operator command is ever called from dispatch. No cooperative tool is ever registered in <code>buildHiveTools</code>.</p>
+
+      <h3>What <code>buildHiveTools</code> actually exposes</h3>
+      <p><code>src/agents/tools.ts:105</code> registers these 10 tools:</p>
+      <ol>
+        <li><code>route_agent</code></li>
+        <li><code>team_status</code></li>
+        <li><code>delegate_agent</code></li>
+        <li><code>team_conversation</code></li>
+        <li><code>hive_sdd_status</code></li>
+        <li><code>hive_cycle_summary</code></li>
+        <li><code>submit_review_verdict</code></li>
+        <li><code>plan_new</code></li>
+        <li><code>plan_task_complete</code></li>
+        <li><code>plan_select</code></li>
+      </ol>
+      <p>Missing: <code>summarize_progress</code>, <code>request_compaction</code>, <code>request_end_session</code>, <code>request_snapshot</code>. The grep confirms: zero matches for any of these names in <code>tools.ts</code>.</p>
+
+      <h3>Why this happened</h3>
+      <p>The refactor plan §11 (parallelization) shipped Wave 0 → 1 → 2 → 3 → 4 → 5 with Wave 3B/3C/3D implementing the F5 operator commands. The F10 reviewer rounds reviewed Wave 5A (post-Wave 3) but the plan §11.5 Wave 3 file-partition assigned 3B, 3C, 3D all to <code>worker-tools.ts</code>. The integration work — wiring those functions into <code>dispatchAgent</code> and <code>buildHiveTools</code> — was never a tracked Wave. It was implicitly deferred to F13 (dashboard intervention UI), but F13 explicitly says "engine commands correct; UI in follow-up PR" without specifying how the engine commands are invoked.</p>
+
+      <p>Per plan §6.2 #5: "Operator command exposure. Decision: all 7 operator commands." But the decision says <em>expose</em>, not <em>wire</em>. The exposure is the contract; the wiring was implicit.</p>
+
+      <p>This is a <strong>scope gap, not a feature gap</strong>. The features are correct. The integration was never tracked.</p>
+    </section>
+
+    <section id="quality" class="key-findings">
+      <h2>Code quality findings (extending F10)</h2>
+      <p>F10 made 3 rounds of surgical fixes on <code>src/engine/budget/</code>. The code-quality sub-agent verified those fixes and found 12 additional findings beyond F10.</p>
+
+      <h3>Verified F10 fixes</h3>
+      <ul>
+        <li><strong>F10 Round 1 FIND-1/2/3</strong> (dead re-exports of <code>THROTTLE_*</code>, unused <code>OperatorLedgerKind</code> alias, unused <code>_BudgetExhaustedError</code> import) — all removed.</li>
+        <li><strong>F10 Round 2 FIND-D1</strong> (unused <code>BudgetWarningDetails</code> interface) — removed. FIND-D2 (lifecycle contract) — documented.</li>
+        <li><strong>F10 Round 3 FIND-S1</strong> (<code>cumulativeFromRuntime</code> missing <code>reasoningTokens</code>) — <strong>FIXED</strong>. <code>worker-tools.ts:1143</code> now declares <code>reasoningTokens: number</code> and line 1146 includes it in the sum. <em>Recommendation: add a test with non-zero reasoning tokens to pin the fix (test sets <code>reasoningTokens: 0</code> today).</em></li>
+      </ul>
+
+      <h3>New findings (12)</h3>
+
+      <h4>Q1. <code>events.ts:384</code> — <code>void session.abort()</code> without <code>.catch</code> (medium, error-handling)</h4>
+      <p>Wraps <code>session.abort()</code> in <code>try { void session.abort(); } catch {}</code>. SDK declares <code>session.abort(): Promise&lt;void&gt;</code> (verified in <code>node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.d.ts:419</code>). If the SDK rejects asynchronously, this turns into an <code>unhandledRejection</code>. Compare with <code>dispatch.ts:393</code>: <code>void session.abort?.().catch((): undefined => undefined)</code>. <strong>Recommendation:</strong> chain <code>.catch</code> on the abort call to match the dispatch.ts pattern.</p>
+
+      <h4>Q2. Cooperative tools mis-classify "session missing SDK method" as "no_runtime" (medium, best-practice)</h4>
+      <p><code>requestEndSession</code> (<code>worker-tools.ts:1230-1236</code>) and <code>requestSnapshot</code> (<code>worker-tools.ts:1261-1269</code>) both return <code>reason: "no_runtime"</code> for two distinct cases: (a) <code>state.runtimes.get(callerName)</code> returned undefined, and (b) runtime's session exists but lacks the SDK method. <code>requestCompaction</code> correctly distinguishes these with <code>reason: "compact_failed"</code> + an <code>error</code> field. Inconsistent error envelope. <strong>Recommendation:</strong> widen <code>RequestEndSessionResult.reason</code> and <code>RequestSnapshotResult.reason</code> to <code>"no_runtime" | "session_unavailable"</code>.</p>
+
+      <h4>Q3. Duplicated <code>BudgetExhaustedError</code> handler in dispatch.ts (medium, error-handling)</h4>
+      <p>Two near-identical catch blocks at <code>dispatch.ts:161-172</code> (pre-slot) and <code>:201-211</code> (post-slot). F10 Round 2 noted this duplication (FIND-F1) and didn't fix it. Now grown to ~14 lines each. Only delta is <code>releaseWorkerSlot(state)</code> in post-slot. <strong>Recommendation:</strong> extract a <code>translateBudgetExhausted(state, runtime, caller, releaseSlot?)</code> helper. Pass slot-release as a callback. Also drop <code>budgetRemaining(state, runtime)</code> from the telemetry payload on the pre-slot path — it's meaningless when the budget is exhausted.</p>
+
+      <h4>Q4. Dead branch on <code>effectiveWorkerGovernance().tokenBudgetScope</code> in tools.ts (medium, best-practice)</h4>
+      <p>F10 Round 3 noted that <code>EffectiveWorkerGovernance</code> always returns <code>Object.freeze({})</code>, but explicitly scoped cleanup to "consumer code, not in the budget module". <code>tools.ts:158-160</code> is a consumer that branches on <code>tokenBudgetScope === "input_output"</code> — the "input_output" branch is unreachable. <code>distiller.ts:140-141</code> and <code>:153</code> have the same dead check. <strong>Recommendation:</strong> delete the unreachable branches at <code>tools.ts:158-160</code> and <code>distiller.ts:140-141,153</code>.</p>
+
+      <h4>Q5. <code>state.config.settings</code> cast duplicated 3 times (medium, type-safety)</h4>
+      <p><code>state.config?.settings as unknown as { budgets?: ... }</code> appears at <code>worker-tools.ts:229-234</code>, <code>display.ts:87</code>, and <code>display.ts:94</code>. The cast documents a real type-system seam but three copies means three places to update. <strong>Recommendation:</strong> extract a single <code>getBudgetsConfig(state)</code> helper that returns the cast-once value (10-line surgical change).</p>
+
+      <h4>Q6. Silent <code>appendCustomMessageEntry</code> catches hide sustained failures (low, error-handling)</h4>
+      <p><code>events.ts:372-379</code> (exhaustion hint), <code>:383-390</code> (exhaustion abort), and <code>:414-421</code> (warning hint) all wrap <code>sessionManager.appendCustomMessageEntry</code> in silent <code>try/catch</code>. A sustained failure (permission denied, disk full) means the worker never learns its budget is exhausted. <strong>Recommendation:</strong> at minimum, log the swallowed error via <code>logRecord</code>/<code>emitHiveEvent</code>.</p>
+
+      <h4>Q7. Operator commands don't check <code>ctx.signal.aborted</code> before SDK calls (low, signal-propagation)</h4>
+      <p>All 5 Wave 3B operator commands (<code>endWorkerSession:578</code>, <code>compactWorkerSession:608</code>, <code>pauseWorkerSession:640</code>, <code>resumeWorkerSession:670</code>, <code>abortWorkerCompaction:706</code>) call SDK methods that don't accept a signal parameter. If <code>ctx.signal</code> is already aborted, the SDK call still runs to completion. <strong>Recommendation:</strong> add early <code>if (ctx.signal?.aborted) return { isError: true, code: "aborted", ... }</code> at the top of each operator command.</p>
+
+      <h4>Q8. dispatch.ts:264 silent catch on resolveModel hides legitimate failures (low, error-handling)</h4>
+      <p><code>try { resolvedModel = resolveModel(ctx, model); } catch { resolvedModel = undefined; }</code>. The silent catch conflates every possible resolveModel error into a generic "Cannot resolve model" message. Pattern repeated at <code>dispatch.ts:45, 254, 402, 522</code>. <strong>Recommendation:</strong> bind the error and log via <code>logRecord</code> or <code>emitHiveEvent</code>; include <code>error?.message</code> in the user-facing message for actionable diagnostics.</p>
+
+      <h4>Q9. ledger.ts:243/295 — <code>recordEvent</code>/<code>recordCompaction</code> ignore signal (low, signal-propagation)</h4>
+      <p>Both methods take <code>_signal?: AbortSignal</code> with underscore prefix (intentionally unused). <code>maybeSnapshot</code>/<code>markWarning</code>/<code>markExhaustion</code> honor signal. Plan §2.12 declares "every write threads controller.signal" but only ledger writes that actually touch the disk honor it. <code>recordEvent</code>/<code>recordCompaction</code> are in-memory mutations; defensible to ignore signal. <strong>Recommendation:</strong> document the distinction; rename the ignored parameter to make the contract explicit, or drop the parameter entirely.</p>
+
+      <h4>Q10. ledger.ts:197 — <code>BudgetLedger.restore</code> takes <code>_signal</code> but never reads it (low, signal-propagation)</h4>
+      <p>Cargo-culting through <code>worker-tools.ts:399</code>: <code>await BudgetLedger.restore(ctx.sessionManager as unknown as SessionManager, slug, policy, ctx.signal)</code>. Both the unused signal and the ReadonlySessionManager cast (F10 FIND-5) are passed but neither does anything. <strong>Recommendation:</strong> drop the <code>_signal</code> parameter; widen the signature to accept a readonly SM subset.</p>
+
+      <h4>Q11. Cooperative SDK calls race with in-flight work (low, race-condition)</h4>
+      <p><code>worker-tools.ts:1212</code> (<code>await session.compact(args.notes)</code> in <code>requestCompaction</code>) and <code>:1247</code> (<code>await session.abort()</code> in <code>requestEndSession</code>) invoke SDK methods without checking the session's current state. If the worker calls <code>requestCompaction</code> while auto-compaction is mid-flight, both compactions race. <code>requestEndSession</code> racing with dispatch's <code>lifecycle.close</code> could fire two aborts. <strong>Recommendation:</strong> add a state check before each SDK call; if the SDK serializes them, document it.</p>
+
+      <h4>Q12. F6 wiring bug — <code>validateBudgetsFrontmatter</code> not connected to <code>enrichFromFrontmatter</code> (medium, real bug)</h4>
+      <p><code>src/agents/frontmatter.ts:81</code> defines <code>validateBudgetsFrontmatter</code> but the file-level JSDoc at line 13-18 explicitly states "Until that wiring lands, this module exists for tests + future wiring; the existing read path silently ignores <code>budgets:</code> frontmatter." Verified: <code>validateBudgetsFrontmatter</code> is invoked only from <code>tests/config-schema.test.ts:183,191</code>, never from <code>src/core/config.ts</code> (which contains <code>enrichFromFrontmatter</code>). Users writing <code>governance: { tokenBudget: 1000 }</code> in their <code>agents/foo.md</code> get a silent no-op. <strong>Recommendation:</strong> wire <code>validateBudgetsFrontmatter</code> into <code>enrichFromFrontmatter</code> (~10 LOC change).</p>
+    </section>
+
+    <section id="recommendations" class="key-findings">
+      <h2>Recommendations</h2>
+      <p>Prioritized by impact, effort, and risk.</p>
+
+      <h3>Tier 1 — User-facing correctness (do these first)</h3>
+      <ol>
+        <li><strong>Document the <code>compact</code> strategy deferral</strong> in the <code>summarize_progress</code> tool description (<code>summarize-progress.ts:176</code>). <em>Effort: trivial, Risk: zero.</em></li>
+        <li><strong>Fix the error message at line 235</strong> — replace "compact flag ignored under ${strategy} strategy — operator drives intervention" with a direct "compact is not implemented in this version of pi-hive (C5 placeholder); only the notes are stored." <em>Effort: trivial, Risk: zero.</em></li>
+        <li><strong>Drop the dead <code>(compact honored)</code> success branch</strong> at line 286 and the <code>details.strategy: "compact"</code> lie at line 297. <em>Effort: trivial, Risk: zero.</em></li>
+        <li><strong>Wire <code>validateBudgetsFrontmatter</code> into <code>enrichFromFrontmatter</code></strong> to fix the silent-no-op on legacy <code>governance:</code> keys in <code>.md</code> frontmatter. <em>Effort: 5 min, Risk: low (10 LOC).</em></li>
+        <li><strong>Add a test pinning non-zero <code>reasoningTokens</code></strong> in <code>tests/cooperative-eol.test.ts</code>. The F10 Round 3 fix is verified by code reading but the test sets <code>reasoningTokens: 0</code>. <em>Effort: 5 min, Risk: zero.</em></li>
+      </ol>
+
+      <h3>Tier 2 — Documentation hygiene (low risk, high signal)</h3>
+      <ol>
+        <li><strong>Replace 7 dangling <code>tmp/2025-09-29-fresh-true-rebuild-runtime.md</code> references</strong> with PR #58 URLs. <em>Effort: 15 min, Risk: zero.</em></li>
+        <li><strong>Delete or rewrite the <code>streamedSnapshot</code> comment block</strong> at <code>dispatch.ts:289-311</code>. The local variable referenced by the comment doesn't exist. <em>Effort: 10 min, Risk: zero.</em></li>
+        <li><strong>Update <code>docs/budgets.md</code></strong> to describe <code>dispatchAgent</code> (not <code>delegateAgent</code>) as the entry point and mention <code>delegateAgent</code> as the test-only parallel implementation. <em>Effort: 30 min, Risk: zero.</em></li>
+        <li><strong>Commit the uncommitted F5 deferral marker comment</strong> at <code>worker-tools.ts:516-548</code> (already written in last session). <em>Effort: 1 min, Risk: zero.</em></li>
+        <li><strong>Delete dead branches in <code>tools.ts:158-160</code> and <code>distiller.ts:140-141,153</code></strong> (Q4). <em>Effort: 5 min, Risk: zero.</em></li>
+      </ol>
+
+      <h3>Tier 3 — Code quality fixes from §5 (low-medium risk)</h3>
+      <ol>
+        <li><strong>Q1: chain <code>.catch</code> on <code>events.ts:384</code> abort</strong>. <em>Effort: 1 min, Risk: zero.</em></li>
+        <li><strong>Q2: widen cooperative-tool error envelopes</strong> for consistent dashboard reporting. <em>Effort: 30 min, Risk: low (additive type widening).</em></li>
+        <li><strong>Q3: extract <code>translateBudgetExhausted</code> helper</strong> in <code>worker-tools.ts</code>. <em>Effort: 20 min, Risk: low.</em></li>
+        <li><strong>Q5: extract <code>getBudgetsConfig</code> helper</strong> to consolidate the cast. <em>Effort: 10 min, Risk: low.</em></li>
+        <li><strong>Q6: log swallowed <code>appendCustomMessageEntry</code> errors</strong> via <code>logRecord</code>. <em>Effort: 15 min, Risk: zero.</em></li>
+        <li><strong>Q7: honor <code>ctx.signal.aborted</code> in operator commands</strong>. <em>Effort: 20 min, Risk: low.</em></li>
+        <li><strong>Q8: bind and log error in <code>dispatch.ts:264</code> and the 4 other silent catches</strong>. <em>Effort: 20 min, Risk: low.</em></li>
+        <li><strong>Q9/Q10: clean up <code>_signal</code> parameters</strong> on ledger methods that ignore them. <em>Effort: 30 min, Risk: low (call sites still pass signal; rename to no-signal or document).</em></li>
+        <li><strong>Q11: document or guard cooperative SDK state checks</strong>. <em>Effort: 20 min, Risk: low (defensive code).</em></li>
+      </ol>
+
+      <h3>Tier 4 — F5 wiring decision (high priority, requires user input)</h3>
+      <p>Per HANDOFF.md §E "Decision matrix" and the completeness sub-agent, three options:</p>
+      <ul>
+        <li><strong>Wire it (Option A):</strong> Add <code>buildHiveTools</code> entries for <code>summarize_progress</code> + <code>request_compaction</code> + <code>request_end_session</code> + <code>request_snapshot</code>. Add CLI commands for the 8 operator commands. Wire dispatch to invoke them. <em>Effort: 600+ LOC, Risk: medium.</em></li>
+        <li><strong>Defer + document (Option B, recommended):</strong> Commit the uncommitted F5 deferral marker. Update <code>docs/budgets.md</code> to note "operator + cooperative commands: implemented in PR #57, deferred integration". <em>Effort: 50 lines of doc changes, Risk: zero.</em></li>
+        <li><strong>Remove (Option C, only with explicit user approval):</strong> Delete the F5 surface + tests + doc references. <em>Effort: ~2,000 lines removed, Risk: loses reviewed work.</em></li>
+      </ul>
+      <p><strong>Default recommendation:</strong> Option B (Defer + Document). The implementation is correct and reviewed; the wiring can land in a follow-up PR alongside F13 (dashboard UI). The audit-prep doc and the inline integration-status comment both recommend this path.</p>
+
+      <h3>Tier 5 — Pure dead code removal (after user confirmation)</h3>
+      <ol>
+        <li><code>src/engine/budget/index.ts</code> (19 lines, zero importers)</li>
+        <li><code>BudgetExhaustedError</code> class (<code>types.ts:217-225</code>, never <code>new</code>'d; duck-typed envelope used everywhere)</li>
+        <li><code>NewShapeSettings.workerBudgets</code> / <code>teamBudgets</code> legacy fields (<code>display.ts:69-80</code>; validator already rejects)</li>
+        <li><code>TeamUsageTotals</code> interface + <code>teamUsage()</code> function (only used by tests)</li>
+        <li><code>EffectiveWorkerGovernance</code> + the always-undefined function returning it (Q4)</li>
+        <li><code>OperatorLedgerKind</code> alias (already removed in F10 Round 1)</li>
+      </ol>
+      <p><em>Total: ~150 lines. Effort: 30 min, Risk: zero (pure removal, no callers). Per AGENTS.md / HANDOFF.md: per user direction 2025-09-29, do NOT remove code marked as "feature". None of the above are features per the plan. Safe to remove after user confirmation.</em></p>
+    </section>
+
+    <section id="methodology" class="key-findings">
+      <h2>Methodology</h2>
+      <p>This review was conducted 2025-09-29 against <code>refactor/budget-pi-native</code> at <code>ca9930a</code> (PR #57 base).</p>
+
+      <h3>Files reviewed</h3>
+      <ul>
+        <li><strong>Refactor plan:</strong> <code>docs/reviews/28-09-2026-budget-review/04-refactor-plan.md</code> (1,730 lines, 50KB)</li>
+        <li><strong>F10 reviewer outputs:</strong> <code>docs/reviews/28-09-2026-budget-review/review-runs/round-{1,2,3}-*.md</code></li>
+        <li><strong>Previous audit:</strong> <code>tmp/2025-09-29-refactor-completeness-review.md</code></li>
+        <li><strong>Budget module (9 files, ~3.8k LOC):</strong> <code>src/engine/budget/{types,policy,ledger,events,worker-tools,strategy,display,index,window-resolver}.ts</code></li>
+        <li><strong>Integration code (5 files, ~50k LOC):</strong> <code>src/engine/{dispatch,worker-session-factory,worker-extension,runtime-stats,distiller}.ts</code></li>
+        <li><strong>Agent tool surface:</strong> <code>src/agents/tools.ts</code> (buildHiveTools), <code>src/agents/tools/summarize-progress.ts</code></li>
+        <li><strong>Config validation:</strong> <code>src/core/{schema,config-validation,types}.ts</code>, <code>src/agents/frontmatter.ts</code></li>
+        <li><strong>Tests (21 files, ~8.5k LOC):</strong> <code>tests/budget-*.test.ts</code>, <code>tests/cooperative-eol.test.ts</code>, <code>tests/summarize-progress.test.ts</code>, <code>tests/dispatch-*.test.ts</code></li>
+      </ul>
+
+      <h3>Tools used</h3>
+      <ul>
+        <li>Three parallel sub-agents via <code>SubagentWorkflow</code> from <code>@tintinweb/pi-subagents</code> (the project-required delegation tool per AGENTS.md): one for completeness, one for code quality, one for the <code>compact</code> strategy forensic deep-dive. Total wall-clock: ~6 minutes (parallel).</li>
+        <li>Direct file reads + grep on the worktree at <code>.worktrees/review-completeness-2025-09-29</code> (branched from <code>refactor/budget-pi-native</code>).</li>
+        <li>Structured JSON output via schema-validated agent() calls — findings are queryable, not narrative.</li>
+      </ul>
+
+      <h3>Verification gates</h3>
+      <p>This review is read-only — no code changes. The audit findings will be acted on by a follow-up PR that:</p>
+      <ul>
+        <li>Touches only Tier 1 + Tier 2 + (per user) Tier 3 + Tier 4 + Tier 5 items.</li>
+        <li>Re-runs <code>just typecheck</code>, <code>just test</code>, and <code>npx eslint src/</code> before commit.</li>
+        <li>Is opened as a PR against <code>refactor/budget-pi-native</code> per AGENTS.md; user merges per the no-auto-merge rule.</li>
+      </ul>
+    </section>
+
+  </main>
+
+  <footer class="container">
+    <p>Generated 2025-09-29 from <code>refactor/budget-pi-native</code> @ <code>ca9930a</code>. This review is read-only — findings are advisory until acted on by a follow-up PR. Sub-agent raw outputs are preserved at <code>tmp/audit-{completeness,quality,compact}.json</code> for transparency.</p>
+  </footer>
+</body>
+</html>
