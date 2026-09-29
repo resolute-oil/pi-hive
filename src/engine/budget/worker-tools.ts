@@ -79,6 +79,9 @@ import { installBudgetEventHooks } from "./events";
 import type {
   BudgetLedgerEntry,
   BudgetExhaustedError as _BudgetExhaustedError,
+  BudgetLedgerCumulative,
+  BudgetLedgerData,
+  BudgetLedgerKind,
   DelegateAgentResult,
   RequestCompactionArgs,
   RequestCompactionResult,
@@ -1166,29 +1169,195 @@ export async function restoreWorkerSession(
 /** Counterpart to `pauseWorkerSession` — restores worker activity after a pause. */
 //      `summarize_progress` which is preserved in src/agents/tools/summarize-progress.ts).
 // ---------------------------------------------------------------------------
+// Wave 3D (F5 cooperative tools) — implements T5.10 / T5.11 / T5.12.
+//
+// Cooperative tools run from inside a worker's session. They look up the
+// worker's `AgentRuntime` via `state.runtimes[callerName]`, write a
+// CustomEntry to the runtime's own `SessionManager` so the ledger captures
+// the cooperative action with a distinct `kind` (§2.3 / G-08), and then
+// invoke the corresponding SDK primitive on `runtime.session`.
+//
+// These tools are the cooperative counterpart to the operator commands
+// (T5.1–T5.9): the operator drives them from outside the worker, the
+// worker drives these from inside. Both write the same shape of ledger
+// entry so the dashboard timeline renders operator + cooperative actions
+// uniformly. The kind values come from §2.3 — operator actions use bare
+// names (`end`, `compact`, …) and cooperative actions use the
+// `cooperative-*` prefix.
+//
+// NOTE: the operator command stubs in this file throw "not implemented"
+// until Wave 3B/3C land. The cooperative tools do NOT route through the
+// operator commands; they invoke the SDK primitives directly so the worker's
+// own session is the one acting. Operator commands would do the same once
+// implemented — the routing overlap is intentional and will be reconciled
+// when the operator commands land.
+// ---------------------------------------------------------------------------
 
-/** Cooperative: ask the SDK to compact now (vs. waiting for the 0% threshold). */
+/** Minimal structural view of `runtime.session.sessionManager`. Cast avoids needing the SDK's `SessionManager` full surface in the test fakes. */
+interface CooperativeSessionManager {
+  appendCustomEntry(customType: string, data?: unknown): string;
+  getLeafId(): string | null;
+  branchWithSummary(branchFromId: string | null, summary: string): string;
+}
+
+/** Minimal structural view of the runtime's session carrying the SDK primitives the cooperative tools invoke. */
+interface CooperativeSession {
+  compact(customInstructions?: string): Promise<{ tokensBefore: number; estimatedTokensAfter?: number }>;
+  abort(): Promise<void>;
+  sessionManager?: CooperativeSessionManager;
+}
+
+/** Compute the cumulative token/cost/runs totals from a runtime's accumulated counters. */
+function cumulativeFromRuntime(runtime: {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number;
+  runCount: number;
+}): BudgetLedgerCumulative {
+  return {
+    tokens:
+      runtime.inputTokens + runtime.outputTokens + runtime.cacheReadTokens + runtime.cacheWriteTokens,
+    costUsd: runtime.costUsd,
+    runs: runtime.runCount,
+  };
+}
+
+/** Write a cooperative-kind ledger entry to the runtime's own SessionManager. Captures the latest cumulative + a marker so the dashboard can surface cooperative actions distinctly from runtime-settled snapshots. */
+function writeCooperativeLedgerEntry(params: {
+  sessionManager: CooperativeSessionManager;
+  kind: BudgetLedgerKind;
+  agentSlug: string;
+  cumulative: BudgetLedgerCumulative;
+  reason?: string;
+  label?: string;
+  snapshotId?: string;
+}): void {
+  const data: BudgetLedgerData & Record<string, unknown> = {
+    caps: {},
+    cumulative: { ...params.cumulative },
+    writtenAt: 0, // Filled in by `appendCustomEntry` consumers that care; the cooperative entry is observable via `kind` + cumulative, not `writtenAt`.
+    agentSlug: params.agentSlug,
+    marker: "checkpoint",
+    kind: params.kind,
+  };
+  if (params.reason !== undefined) data.reason = params.reason;
+  if (params.label !== undefined) data.label = params.label;
+  if (params.snapshotId !== undefined) data.snapshotId = params.snapshotId;
+  params.sessionManager.appendCustomEntry(BUDGET_LEDGER_CUSTOM_TYPE, data);
+}
+
+/**
+ * §2.8 cooperative: ask the SDK to compact the worker's session now (vs.
+ * waiting for the auto-compact threshold). Writes a `cooperative-compact`
+ * ledger entry first so the dashboard timeline captures the worker's intent
+ * even if `session.compact()` throws.
+ */
 export async function requestCompaction(
-  _args: RequestCompactionArgs,
-  _ctx: ExtensionContext,
+  state: HiveState,
+  callerName: string,
+  args: RequestCompactionArgs,
 ): Promise<RequestCompactionResult> {
-  throw new Error("not implemented");
+  const runtime = state.runtimes.get(callerName);
+  if (!runtime) {
+    return { ok: false, compacted: false, estimatedTokens: 0, limit: 0, reason: "no_runtime" };
+  }
+  const session = runtime.session as CooperativeSession | undefined;
+  const sessionManager = session?.sessionManager;
+  if (!session || !sessionManager || typeof session.compact !== "function") {
+    return {
+      ok: false,
+      compacted: false,
+      estimatedTokens: 0,
+      limit: 0,
+      reason: "compact_failed",
+      error: "session is not compactable",
+    };
+  }
+
+  const cumulative = cumulativeFromRuntime(runtime);
+  writeCooperativeLedgerEntry({
+    sessionManager,
+    kind: "cooperative-compact",
+    agentSlug: callerName,
+    cumulative,
+    reason: args.notes,
+  });
+
+  const result = await session.compact(args.notes);
+  const estimatedTokens = result.estimatedTokensAfter ?? result.tokensBefore;
+  const limit = runtime.contextWindow ?? 0;
+  return { ok: true, compacted: true, estimatedTokens, limit };
 }
 
-/** Cooperative: graceful self-shutdown. */
+/**
+ * §2.8 cooperative: graceful self-shutdown of the worker's session. Writes
+ * a `cooperative-end` ledger entry so the dashboard distinguishes a worker
+ * self-ending from an operator-driven `endWorkerSession`.
+ */
 export async function requestEndSession(
-  _args: RequestEndSessionArgs,
-  _ctx: ExtensionContext,
+  state: HiveState,
+  callerName: string,
+  args: RequestEndSessionArgs,
 ): Promise<RequestEndSessionResult> {
-  throw new Error("not implemented");
+  const runtime = state.runtimes.get(callerName);
+  if (!runtime) {
+    return { ok: false, reason: "no_runtime" };
+  }
+  const session = runtime.session as CooperativeSession | undefined;
+  const sessionManager = session?.sessionManager;
+  if (!session || !sessionManager || typeof session.abort !== "function") {
+    return { ok: false, reason: "no_runtime" };
+  }
+
+  const cumulative = cumulativeFromRuntime(runtime);
+  writeCooperativeLedgerEntry({
+    sessionManager,
+    kind: "cooperative-end",
+    agentSlug: callerName,
+    cumulative,
+    reason: args.reason,
+  });
+
+  await session.abort();
+  return { ok: true };
 }
 
-/** Cooperative: branch the session for later `restoreWorkerSession`. */
+/**
+ * §2.8 cooperative: branch the worker's session for later
+ * `restoreWorkerSession`. Writes a `cooperative-snapshot` ledger entry with
+ * the produced snapshot id so the dashboard can link the two.
+ */
 export async function requestSnapshot(
-  _args: RequestSnapshotArgs,
-  _ctx: ExtensionContext,
+  state: HiveState,
+  callerName: string,
+  args: RequestSnapshotArgs,
 ): Promise<RequestSnapshotResult> {
-  throw new Error("not implemented");
+  const runtime = state.runtimes.get(callerName);
+  if (!runtime) {
+    return { ok: false, reason: "no_runtime" };
+  }
+  const session = runtime.session as CooperativeSession | undefined;
+  const sessionManager = session?.sessionManager;
+  if (!session || !sessionManager || typeof sessionManager.getLeafId !== "function") {
+    return { ok: false, reason: "no_runtime" };
+  }
+
+  const cumulative = cumulativeFromRuntime(runtime);
+  const leafId = sessionManager.getLeafId();
+  const snapshotId = sessionManager.branchWithSummary(leafId, args.label ?? "");
+
+  writeCooperativeLedgerEntry({
+    sessionManager,
+    kind: "cooperative-snapshot",
+    agentSlug: callerName,
+    cumulative,
+    label: args.label,
+    snapshotId,
+  });
+
+  return { ok: true, snapshotId };
 }
 
 // ---------------------------------------------------------------------------
