@@ -687,12 +687,6 @@ export async function dispatchAgent(
           runController.abort(new Error(`${exhausted.scope} ${exhausted.resource} budget exhausted`));
         }
       }
-    } else if (event.type === "agent_end") {
-      const messages = event.messages || [];
-      const last = [...messages].reverse().find((message: any) => message.role === "assistant");
-      // Keep the chunks fallback for output text; the usage-add block that used
-      // to live here is deleted (double-count fix, Decision 1).
-      if (last && !chunks.length && !streamedSnapshot) chunks.push(textFromMessage(last));
     }
     publishRuntimeUpdate(state);
     writeHiveStateSnapshot(state);
@@ -845,14 +839,15 @@ export async function dispatchAgent(
     reasoningTokens: nonneg(runtime.reasoningTokens - (runtime.runStartReasoningTokens ?? 0)),
     costUsd: nonneg(runtime.costUsd - (runtime.runStartCostUsd ?? 0)),
   };
-  // Scope-aware governance accumulation: input_output keeps the budget aligned
-  // with what fills the model's context window; "all" (default) preserves the
-  // legacy behavior that includes cache reads/writes and reasoning.
-  runtime.governanceTokens = (runtime.governanceTokens || 0)
-    + (tokenBudgetScope === "input_output"
-      ? delta.inputTokens + delta.outputTokens
-      : delta.inputTokens + delta.outputTokens + delta.cacheReadTokens + delta.cacheWriteTokens + delta.reasoningTokens);
-  runtime.governanceCostUsd = (runtime.governanceCostUsd || 0) + delta.costUsd;
+  // Wave 3A / T4.2 — legacy `governanceTokens` accumulation is DELETED.
+  // The new `installBudgetEventHooks` (F2 spine) is the sole finalization
+  // path; on `agent_settled` the ledger writes a `marker: "checkpoint"`
+  // CustomEntry and that is the canonical record of end-of-run spend.
+  // The fields `runtime.governanceTokens` / `runtime.governanceCostUsd`
+  // remain on `AgentRuntime` for backwards compat (legacy `governance.ts`
+  // functions still read them) but they no longer accumulate here —
+  // Wave 5 F9 will delete `governance.ts` outright once nothing references
+  // those functions.
   if (runtime.config.agentType === "reviewer") {
     // Persist per-artifact reviewer clearance whenever a review prompt is
     // explicit enough to identify its target. Some dashboard-triggered review
