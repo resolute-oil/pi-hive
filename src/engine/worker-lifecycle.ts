@@ -11,7 +11,7 @@
 // change; the dispatch file imports `WorkerRunLifecycle` from here.
 
 import type { AgentRuntime, HiveState } from "../core/types";
-import { releaseWorkerSlot } from "./governance";
+import { releaseWorkerSlot } from "./worker-queue";
 
 export class WorkerRunLifecycle {
   private session: any;

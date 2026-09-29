@@ -87,7 +87,13 @@ test("loadConfig normalizes settings and enriches model frontmatter", () => {
   assert.equal(config.agents[0].model, "anthropic/claude-sonnet");
 });
 
-test("worker governance is opt-in with settings defaults and per-agent overrides", () => {
+// Wave 5 / F9 — the legacy `worker-budgets:` / `team-budgets:` /
+// per-agent `governance:` keys were removed by the Wave 1B hard cutover
+// (G-16). The new shape is the nested `settings.budgets:` block (per-worker
+// + per-team), with per-agent overrides under `budgets:`. Replaced the
+// assertions below to pin the new contract; the unused legacy keys would
+// still be rejected by `validateRawConfig`'s allowlist.
+test("settings.budgets is opt-in with per-worker + per-team defaults and per-agent budgets override", () => {
   const unconstrainedCwd = fixtureProject();
   const unconstrainedPath = join(unconstrainedCwd, ".pi", "hive", "hive-config.yaml");
   writeFileSync(unconstrainedPath, readFileSync(unconstrainedPath, "utf8").replace("  max-parallel: 2\n", ""));
@@ -96,19 +102,28 @@ test("worker governance is opt-in with settings defaults and per-agent overrides
   const cwd = fixtureProject();
   const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
   let yaml = readFileSync(cfgPath, "utf8").replace(
-    "  max-parallel: 2",
-    "  max-parallel: 2\n  queue-size: 4\n  worker-budgets:\n    timeout-ms: 5000\n    max-runs: 3\n  team-budgets:\n    token-budget: 100000\n    cost-budget-usd: 12.5",
+    "  max-parallel:",
+    "  queue-size: 4\n  budgets:\n    per-worker:\n      runs:\n        cap: 3\n      tokens:\n        cap: 100000\n    per-team:\n      tokens:\n        cap: 200000\n      cost-usd:\n        cap: 12.5\n  max-parallel:",
   );
   yaml = yaml.replace(
     "    - name: Frontend Dev\n      path: .pi/hive/agents/frontend.md",
-    "    - name: Frontend Dev\n      path: .pi/hive/agents/frontend.md\n      governance:\n        max-runs: 1\n        max-delegation-depth: 2",
+    "    - name: Frontend Dev\n      path: .pi/hive/agents/frontend.md\n      budgets:\n        runs:\n          cap: 1\n        depth:\n          cap: 2",
   );
   writeFileSync(cfgPath, yaml);
   const config = loadConfig(cwd);
   assert.equal(config.settings.queueSize, 4);
-  assert.deepEqual(config.settings.workerBudgets, { timeoutMs: 5000, maxRuns: 3 });
-  assert.deepEqual(config.settings.teamBudgets, { tokenBudget: 100000, costBudgetUsd: 12.5 });
-  assert.deepEqual(config.hive?.agents[0].governance, { maxRuns: 1, maxDelegationDepth: 2 });
+  // The shape validator accepts the new nested `budgets:` block; loadConfig
+  // preserves the parsed config so the test can read back the field that was set.
+  const perWorker = (config.settings as Record<string, any>).budgets?.perWorker;
+  const perTeam = (config.settings as Record<string, any>).budgets?.perTeam;
+  assert.deepEqual(perWorker?.runs, { cap: 3 });
+  assert.deepEqual(perWorker?.tokens, { cap: 100000 });
+  assert.deepEqual(perTeam?.tokens, { cap: 200000 });
+  assert.deepEqual(perTeam?.costUsd, { cap: 12.5 });
+  // Per-agent `budgets:` block is also preserved.
+  const agentBudgets = (config.hive?.agents[0] as Record<string, any>).budgets;
+  assert.deepEqual(agentBudgets?.runs, { cap: 1 });
+  assert.deepEqual(agentBudgets?.depth, { cap: 2 });
 });
 
 test("loadConfig rejects unsafe telemetry limits and unknown telemetry keys", () => {
@@ -498,56 +513,51 @@ test("loadConfig rejects unknown settings and nested keys with path-aware errors
   assert.throws(() => loadConfig(cwd3), /hive\.agents\[0\]\.mysteryCapability is not a recognized configuration key/);
 });
 
-test("loadConfig accepts tokenBudgetScope on settings.workerBudgets, settings.teamBudgets, and per-agent governance", () => {
+test("loadConfig accepts budgets include: [Usage keys] on settings.budgets.perWorker.tokens", () => {
+  // Wave 5 / F9 — the legacy `tokenBudgetScope: input_output | all` enum was
+  // replaced by the more flexible `include: [Usage keys]` array (§2.13 C2).
+  // A valid `include` array is preserved verbatim through validateRawConfig
+  // and loadConfig.
   const cwd = fixtureProject();
   const file = join(cwd, ".pi", "hive", "hive-config.yaml");
   const base = readFileSync(file, "utf8");
-  // worker-budgets + teamBudgets both accept the kebab-case form documented in HANDOFF.md.
   writeFileSync(file, base
-    .replace("  default-tools: read, grep", `  worker-budgets:\n    token-budget: 200000\n    token-budget-scope: input_output\n  team-budgets:\n    token-budget: 1000000\n    token-budget-scope: all\n  default-tools: read, grep`));
+    .replace("  default-tools: read, grep", `  budgets:\n    per-worker:\n      tokens:\n        cap: 200000\n        include:\n          - input\n          - output\n    per-team:\n      tokens:\n        cap: 1000000\n        include:\n          - input\n          - output\n          - cacheRead\n          - cacheWrite\n  default-tools: read, grep`));
   const cfg = loadConfig(cwd);
-  assert.equal(cfg.settings.workerBudgets?.tokenBudgetScope, "input_output");
-  assert.equal(cfg.settings.teamBudgets?.tokenBudgetScope, "all");
-
-  // Per-agent governance block shares the same allowlist via the governance() helper.
-  const cwd2 = fixtureProject();
-  const file2 = join(cwd2, ".pi", "hive", "hive-config.yaml");
-  writeFileSync(file2, readFileSync(file2, "utf8").replace("      routing-tags: [frontend, react]", `      routing-tags: [frontend, react]\n      governance:\n        token-budget: 100000\n        token-budget-scope: input_output`));
-  const cfg2 = loadConfig(cwd2);
-  assert.equal(cfg2.agents[0].governance?.tokenBudgetScope, "input_output");
+  const perWorker = (cfg.settings as Record<string, any>).budgets?.perWorker?.tokens;
+  const perTeam = (cfg.settings as Record<string, any>).budgets?.perTeam?.tokens;
+  assert.equal(perWorker?.cap, 200000);
+  assert.deepEqual(perWorker?.include, ["input", "output"]);
+  assert.equal(perTeam?.cap, 1000000);
+  assert.deepEqual(perTeam?.include, ["input", "output", "cacheRead", "cacheWrite"]);
 });
 
-test("loadConfig rejects unknown tokenBudgetScope values with a clear error", () => {
-  // Worker block — typo silently defaulting to "all" would defeat the user's intent,
-  // so the raw-config layer fails loud instead of relying on governance.ts's ?? "all".
+test("loadConfig rejects unknown budgets include values with a clear error", () => {
+  // Wave 5 / F9 — the legacy `tokenBudgetScope` validation was replaced by
+  // the `include: [Usage keys]` allowlist (`input` | `output` | `cacheRead`
+  // | `cacheWrite` | `cost`). A typo on a worker's include list must surface
+  // at load time so the orchestrator catches it before the worker dispatches.
   for (const [badValue, expectedLabel] of [
-    ["inpt_output", "settings.workerBudgets.tokenBudgetScope"],
-    ["cache_only", "settings.workerBudgets.tokenBudgetScope"],
+    ["bogus_key", "settings.budgets.perWorker.tokens.include.0"],
+    ["reasoning", "settings.budgets.perWorker.tokens.include.0"],
   ] as const) {
     const cwd = fixtureProject();
     const file = join(cwd, ".pi", "hive", "hive-config.yaml");
-    writeFileSync(file, readFileSync(file, "utf8").replace("  default-tools: read, grep", `  worker-budgets:\n    token-budget: 200000\n    token-budget-scope: ${badValue}\n  default-tools: read, grep`));
-    assert.throws(() => loadConfig(cwd), new RegExp(`${expectedLabel} must be one of input_output, all`), `value ${badValue}`);
+    writeFileSync(file, readFileSync(file, "utf8").replace("  default-tools: read, grep", `  budgets:\n    per-worker:\n      tokens:\n        cap: 200000\n        include:\n          - ${badValue}\n  default-tools: read, grep`));
+    assert.throws(() => loadConfig(cwd), new RegExp(`${expectedLabel}.*must be equal`), `value ${badValue}`);
   }
 
   // Non-string value (e.g. an unquoted number from a YAML typo) is also rejected.
   const cwdNumber = fixtureProject();
   const fileNumber = join(cwdNumber, ".pi", "hive", "hive-config.yaml");
-  writeFileSync(fileNumber, readFileSync(fileNumber, "utf8").replace("  default-tools: read, grep", "  worker-budgets:\n    token-budget: 200000\n    token-budget-scope: 7\n  default-tools: read, grep"));
-  assert.throws(() => loadConfig(cwdNumber), /settings\.workerBudgets\.tokenBudgetScope must be one of input_output, all/);
+  writeFileSync(fileNumber, readFileSync(fileNumber, "utf8").replace("  default-tools: read, grep", "  budgets:\n    per-worker:\n      tokens:\n        cap: 200000\n        include: 7\n  default-tools: read, grep"));
+  assert.throws(() => loadConfig(cwdNumber), /settings\.budgets\.perWorker\.tokens\.include/);
 
-  // teamBudgets uses an inline allowlist, separate from GOVERNANCE_KEYS.
+  // Per-team scope: a typo on the team's include list surfaces at load time too.
   const cwdTeam = fixtureProject();
   const fileTeam = join(cwdTeam, ".pi", "hive", "hive-config.yaml");
-  writeFileSync(fileTeam, readFileSync(fileTeam, "utf8").replace("  default-tools: read, grep", "  team-budgets:\n    token-budget: 1000000\n    token-budget-scope: everything\n  default-tools: read, grep"));
-  assert.throws(() => loadConfig(cwdTeam), /settings\.teamBudgets\.tokenBudgetScope must be one of input_output, all/);
-
-  // Per-agent governance: a typo on a worker agent's own budget scope must surface
-  // at load time so the orchestrator catches it before the worker dispatches.
-  const cwdAgent = fixtureProject();
-  const fileAgent = join(cwdAgent, ".pi", "hive", "hive-config.yaml");
-  writeFileSync(fileAgent, readFileSync(fileAgent, "utf8").replace("      routing-tags: [frontend, react]", "      routing-tags: [frontend, react]\n      governance:\n        token-budget: 100000\n        token-budget-scope: cache_only"));
-  assert.throws(() => loadConfig(cwdAgent), /governance\.tokenBudgetScope must be one of input_output, all/);
+  writeFileSync(fileTeam, readFileSync(fileTeam, "utf8").replace("  default-tools: read, grep", "  budgets:\n    per-team:\n      tokens:\n        cap: 1000000\n        include:\n          - everything\n  default-tools: read, grep"));
+  assert.throws(() => loadConfig(cwdTeam), /settings\.budgets\.perTeam\.tokens\.include/);
 });
 
 test("loadConfig validates raw bounded positive integers before defaults", () => {

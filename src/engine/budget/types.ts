@@ -18,7 +18,7 @@
  * payloads can be discriminated by kind without a schema change.
  */
 
-import type { AgentSession, SessionEntry, SessionManager, SessionStats } from "@earendil-works/pi-coding-agent";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { BudgetLedger } from "./ledger";
 
 // ---------------------------------------------------------------------------

@@ -134,15 +134,10 @@ export interface AgentConfig {
   // config, NOT agent-type. There is no "commit ⇒ lead" enforcement — a small
   // project may deliberately let a leaf agent commit. Do not add a type gate here.
   commit?: string;
-  // Optional worker-governance overrides. Omitted fields inherit settings.workerBudgets;
-  // if neither level provides a value, that resource is intentionally unlimited.
-  governance?: WorkerGovernance;
   // ── Wave 1B — F6 config schema (C1) — per-agent override block. ───────────
-  // Replaces the legacy `governance:` frontmatter key. The two fields coexist
-  // during the wave-1 cutover scaffolding; Wave 2+ (F2/F9) will delete
-  // `governance` and rewire `engine/governance.ts` to read from `budgets`.
-  // Until then, parsing accepts `budgets:` (preferred) and ignores `governance:`
-  // — see `validateBudgetsFrontmatter` in src/agents/frontmatter.ts.
+  // Per-agent override for the team's budget caps. Optional fields inherit
+  // `settings.budgets.perWorker` (global defaults); absent block means every
+  // resource is intentionally unlimited. See §2.13 C1 in the refactor plan.
   budgets?: AgentBudgetsOverride;
   // Derived grouping label: the name of the top-level agent (the orchestrator's
   // direct report) whose subtree this agent belongs to. Not configured.
@@ -167,33 +162,12 @@ export interface TelemetrySettings {
   redactSensitiveData: boolean;
 }
 
-export interface WorkerGovernance {
-  timeoutMs?: number;
-  maxDelegationDepth?: number;
-  maxRuns?: number;
-  tokenBudget?: number;
-  // What `tokenBudget` counts. "all" (default) keeps the original cumulative-
-  // of-everything-Pi-reports accounting (input + output + cacheRead + cacheWrite
-  // + reasoning). "input_output" restricts to just the input + output tokens,
-  // which is what fills the model's context window on each call. Pick the
-  // mode that matches how the agent's workload is metered — for an agent
-  // with heavy prompt caching, "input_output" lets a 1M-token budget roughly
-  // track the model's 1M-token context window instead of being dominated by
-  // cached-read reuse.
-  tokenBudgetScope?: "input_output" | "all";
-  costBudgetUsd?: number;
-  distillerRuns?: number;
-}
-
-export interface TeamBudgets {
-  maxRuns?: number;
-  tokenBudget?: number;
-  // Same semantics as WorkerGovernance.tokenBudgetScope; configurable per
-  // tier so a project can mix a worker that budgets on input/output with a
-  // team that budgets on the full token total.
-  tokenBudgetScope?: "input_output" | "all";
-  costBudgetUsd?: number;
-}
+// REMOVED per F9: WorkerGovernance / TeamBudgets — replaced by the new
+// nested `settings.budgets:` shape (see BudgetsConfig below). The legacy
+// flat-key fields were deleted from config-validation's allowlist by the
+// Wave 1B hard cutover (G-16); F9 deletes the types. Wave 5A callers that
+// used to read these now read `state.config.settings.budgets.perWorker`
+// / `.perTeam` directly (see src/engine/budget/display.ts).
 
 export interface HiveSettings {
   subagentOutputLimit: number;
@@ -202,8 +176,10 @@ export interface HiveSettings {
   // hidden default. queueSize only activates fair waiting when maxParallel is hit.
   maxParallel?: number;
   queueSize?: number;
-  workerBudgets?: WorkerGovernance;
-  teamBudgets?: TeamBudgets;
+  // REMOVED per F9: legacy `workerBudgets` / `teamBudgets` keys. The new
+  // shape lives below at `budgets?: BudgetsConfig`; the Wave 1B config
+  // validator rejects the old keys outright.
+  budgets?: BudgetsConfig;
   telemetry?: TelemetrySettings;
   // Project-relative paths that no worker may read or mutate, even when a broad
   // domain would otherwise allow them. Absolute paths are supported for
@@ -250,10 +226,12 @@ export interface AgentRuntime {
   // authoritative overwrite must PRESERVE this accumulated value.
   reasoningTokens: number;
   costUsd: number;
-  // Monotonic governance accounting. Unlike session-lifetime SDK counters these
-  // never reset on fresh=true, so a fresh transcript cannot bypass budgets.
-  governanceTokens?: number;
-  governanceCostUsd?: number;
+  // REMOVED per F9: the legacy `governanceTokens` / `governanceCostUsd`
+  // monotonic counters were the dual-source-of-truth bug class the refactor
+  // plan targets. The SDK-aligned mirror above (`inputTokens`,
+  // `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `reasoningTokens`,
+  // `costUsd`) is overwritten from `session.getSessionStats()` at run end
+  // and is the single source of truth for cumulative spend.
   contextPct: number;
   // Raw context-window fill (Phase 4.7): the tokens/window behind contextPct.
   contextTokens?: number;

@@ -211,22 +211,21 @@ function mergeWorkerOverrides(
  * Layering (per §2.10 + §2.13 C1):
  *   1. `settings.budgets.perWorker` (global defaults)
  *   2. `<agent>.budgets` (per-agent override)
- *   3. LEGACY BACKWARD-COMPAT (Wave 2 only):
- *      - `<agent>.governance.*` (per-agent, legacy v1 `WorkerGovernance`)
- *      - `settings.workerBudgets.*` + `settings.teamBudgets.*` (global)
- *      Legacy fields are layered as a fallback only — a new field already
- *      set wins. The legacy shape was removed from the Wave 1B config
- *      validator (hard cutover), but legacy state objects can still carry
- *      it (test fixtures, in-flight dispatches during the rollout window).
- *      Wave 5 / F9 deletes this fallback.
  *
- * The team layer is taken from `settings.budgets.perTeam` (new shape) or
- * `settings.teamBudgets` (legacy shape). There is no per-team-agent
- * override — `team` aggregates across the whole team, not per-agent.
+ * The team layer is taken from `settings.budgets.perTeam`. There is no
+ * per-team-agent override — `team` aggregates across the whole team, not
+ * per-agent.
  *
  * Missing `state.config` (uninitialized hive): returns an empty policy
  * (no caps). Callers should treat an empty policy as "everything unlimited"
  * and skip the pre-flight check.
+ *
+ * Wave 5 / F9 removed the legacy `<agent>.governance:` /
+ * `settings.workerBudgets` / `settings.teamBudgets` fallback that Wave 2
+ * kept for hand-built state objects. The Wave 1B hard cutover already
+ * removed these keys from `validateRawConfig`'s allowlist, so no real
+ * configuration can carry them anymore — only test fixtures ever did, and
+ * the new tests use the new shape end-to-end.
  */
 export function resolveWorkerBudgetPolicy(state: HiveState, agentName: string): WorkerBudgetPolicy {
   const settings = state.config?.settings as unknown as {
@@ -234,11 +233,6 @@ export function resolveWorkerBudgetPolicy(state: HiveState, agentName: string): 
       perWorker?: ResolvedWorkerBudgets;
       perTeam?: import("../../core/types").TeamBudgetConfig;
     };
-    // Legacy v1 shape — still on `HiveSettings` for backward compat; removed
-    // by the Wave 1B config validator's allowlist but visible here on
-    // hand-built state objects.
-    workerBudgets?: import("../../core/types").WorkerGovernance;
-    teamBudgets?: import("../../core/types").TeamBudgets;
   } | undefined;
   const globalWorker = settings?.budgets?.perWorker;
   const globalTeam = settings?.budgets?.perTeam;
@@ -254,79 +248,9 @@ export function resolveWorkerBudgetPolicy(state: HiveState, agentName: string): 
     override,
   );
 
-  // LEGACY FALLBACK — overlay `governance:` (per-agent) and
-  // `settings.workerBudgets` (global) onto the new-shape worker layer. Only
-  // fills absent fields; new-shape values win. Wave 5 / F9 deletes this
-  // branch along with the legacy `WorkerGovernance` readers in
-  // `src/engine/governance.ts`.
-  applyLegacyWorkerFallback(worker, settings?.workerBudgets, findAgentLegacyGovernance(state.config, agentName));
-
   const team: ResolvedWorkerBudgets = normalizeWorkerBudgets(globalTeam);
-  // LEGACY FALLBACK for team — overlay `settings.teamBudgets` if no new
-  // team shape was provided. Same wave-5-deletion disclaimer.
-  applyLegacyTeamFallback(team, settings?.teamBudgets);
 
   return { worker, team };
-}
-
-/** Find a legacy `governance:` override on an agent in the config tree. */
-function findAgentLegacyGovernance(
-  config: HiveState["config"],
-  agentName: string,
-): import("../../core/types").WorkerGovernance | undefined {
-  if (!config) return undefined;
-  const targets = [config.orchestrator, ...(config.agents ?? [])].filter(Boolean) as AgentConfig[];
-  const stack: AgentConfig[] = [...targets];
-  const wanted = String(agentName || "").trim().toLowerCase();
-  while (stack.length > 0) {
-    const node = stack.shift()!;
-    const slug = agentSlug(node).toLowerCase();
-    const name = String(node.name || "").trim().toLowerCase();
-    if (slug === wanted || name === wanted) {
-      return (node as { governance?: import("../../core/types").WorkerGovernance }).governance;
-    }
-    if (node.members?.length) stack.unshift(...node.members);
-    if (node.children?.length) stack.unshift(...node.children);
-  }
-  return undefined;
-}
-
-/** Layer legacy `WorkerGovernance` over the new-shape worker block. */
-function applyLegacyWorkerFallback(
-  worker: ResolvedWorkerBudgets,
-  globalLegacy: import("../../core/types").WorkerGovernance | undefined,
-  agentLegacy: import("../../core/types").WorkerGovernance | undefined,
-): void {
-  const merged = { ...(globalLegacy ?? {}), ...(agentLegacy ?? {}) } as import("../../core/types").WorkerGovernance;
-  if (worker.tokens?.cap === undefined && merged.tokenBudget !== undefined) {
-    worker.tokens = { resource: "tokens", cap: merged.tokenBudget };
-  }
-  if (worker.costUsd?.cap === undefined && merged.costBudgetUsd !== undefined) {
-    worker.costUsd = { resource: "costUsd", cap: merged.costBudgetUsd };
-  }
-  if (worker.runs?.cap === undefined && merged.maxRuns !== undefined) {
-    worker.runs = { resource: "runs", cap: merged.maxRuns };
-  }
-  if (worker.depth?.cap === undefined && merged.maxDelegationDepth !== undefined) {
-    worker.depth = { resource: "depth", cap: merged.maxDelegationDepth };
-  }
-}
-
-/** Layer legacy `TeamBudgets` over the new-shape team block. */
-function applyLegacyTeamFallback(
-  team: ResolvedWorkerBudgets,
-  legacy: import("../../core/types").TeamBudgets | undefined,
-): void {
-  if (!legacy) return;
-  if (team.tokens?.cap === undefined && legacy.tokenBudget !== undefined) {
-    team.tokens = { resource: "tokens", cap: legacy.tokenBudget };
-  }
-  if (team.costUsd?.cap === undefined && legacy.costBudgetUsd !== undefined) {
-    team.costUsd = { resource: "costUsd", cap: legacy.costBudgetUsd };
-  }
-  if (team.runs?.cap === undefined && legacy.maxRuns !== undefined) {
-    team.runs = { resource: "runs", cap: legacy.maxRuns };
-  }
 }
 
 /** Normalize the schema-layer per-team/per-worker shape into the F1 flat-string shape. */

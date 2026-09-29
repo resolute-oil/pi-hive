@@ -1,6 +1,6 @@
 import { statSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentConfig, HiveConfig, HiveMode, HiveTeam } from "./types";
+import type { AgentConfig, BudgetsConfig, HiveConfig, HiveMode, HiveTeam } from "./types";
 import { parseYamlLite, parseFrontmatter } from "./yaml";
 import { agentSlug, configuredChildAgents, flatAgentConfig, normalizeAgentType, normalizeCommit, normalizePlanStages, safeRead, slug } from "./utils";
 import { validateAgentTypes, validateHiveConfigShape } from "./schema";
@@ -207,8 +207,10 @@ export function loadConfig(cwd: string): HiveConfig {
       defaultTools: settings.defaultTools ?? "read, grep, find, ls",
       maxParallel: settings.maxParallel,
       queueSize: settings.queueSize,
-      workerBudgets: settings.workerBudgets,
-      teamBudgets: settings.teamBudgets,
+      // REMOVED per F9: legacy `workerBudgets` / `teamBudgets` fields. The
+      // new `settings.budgets` block carries the nested per-worker / per-team
+      // caps and is preserved verbatim by loadConfig.
+      budgets: settings.budgets as unknown as BudgetsConfig | undefined,
       secretPaths: Array.isArray(settings.secretPaths) ? settings.secretPaths.map((entry: unknown) => String(entry).trim()).filter(Boolean) : [],
       telemetry: {
         enabled: telemetry.enabled !== false,

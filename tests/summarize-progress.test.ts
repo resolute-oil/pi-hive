@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { buildSummarizeProgressTool, type SummarizeProgressFailureReason } from "../src/agents/tools/summarize-progress.ts";
-import type { AgentRuntime, AgentConfig, HiveState, WorkerGovernance } from "../src/core/types.ts";
+import type { AgentRuntime, AgentConfig, HiveState } from "../src/core/types.ts";
 import type { BudgetLedger } from "../src/engine/budget/ledger.ts";
 
 // ---------------------------------------------------------------------------
@@ -58,17 +58,17 @@ interface FakeRuntimeOpts {
   budgetStrategy?: "default" | "compact";
 }
 
-function makeRuntime(opts: FakeRuntimeOpts = {}): AgentRuntime {
+function makeRuntime(_opts: FakeRuntimeOpts = {}): AgentRuntime {
   const sessionManager = makeFakeSessionManager();
   const session: FakeSession = { sessionManager };
-  const governance: WorkerGovernance | undefined = opts.budgetStrategy
-    ? { budgetStrategy: opts.budgetStrategy } as unknown as WorkerGovernance
-    : undefined;
+  // Wave 5 / F9 — the legacy `WorkerGovernance.budgetStrategy` was removed
+  // along with the rest of the legacy budget shape. `budgetStrategy` here
+  // is accepted as a no-op so callers can keep the same fixture shape; the
+  // tool now always resolves `"default"`.
   const config: AgentConfig = {
     name: "Test Worker",
     path: "/tmp/test-worker",
     slug: "test-worker",
-    ...(governance ? { governance } : {}),
   };
   return {
     config,
@@ -139,7 +139,6 @@ function makeState(opts: { runtime?: AgentRuntime; budgetStrategy?: "default" | 
         subagentOutputLimit: 12000,
         defaultTools: "",
         distiller: { enabled: false, model: "test-model", conversationLines: 100 },
-        workerBudgets: { budgetStrategy: opts.budgetStrategy } as unknown as WorkerGovernance,
       },
     } as unknown as HiveState["config"];
   }
@@ -224,35 +223,18 @@ test("summarize_progress returns a success result that names the caller and repo
 });
 
 // ---------------------------------------------------------------------------
-// 3. new: `compact: true` calls `session.sessionManager.appendCustomMessageEntry`.
+// 3. REMOVED per F9 — `compact: true` calls
+//    `session.sessionManager.appendCustomMessageEntry`.
 // ---------------------------------------------------------------------------
-
-test("summarize_progress({ compact: true }) injects notes via appendCustomMessageEntry under compact strategy", async () => {
-  const runtime = makeRuntime({ budgetStrategy: "compact" });
-  const state = makeState({ runtime });
-  const ledger = makeFakeLedger();
-
-  const notes = "wrap-up summary; injected via appendCustomMessageEntry";
-  const result = await invoke(state, ledger, { notes, compact: true });
-
-  assert.equal(result.isError, undefined, "compact strategy honors the flag");
-  const calls = runtime.session.sessionManager.calls;
-  assert.equal(calls.length, 1, "exactly one appendCustomMessageEntry call");
-  const call = calls[0];
-  assert.equal(call.customType, "progress_note");
-  assert.equal(call.content, notes);
-  assert.equal(call.display, false, "hidden from TUI");
-  assert.deepEqual(call.details, {
-    tokenCount: Math.ceil(notes.length / 4),
-    caller: CALLER,
-  });
-
-  // Success details report the compact path.
-  const details = result.details as { ok: boolean; compacted: boolean; compactRequested: boolean };
-  assert.equal(details.ok, true);
-  assert.equal(details.compacted, true);
-  assert.equal(details.compactRequested, true);
-});
+// The structured `compact` budget strategy (§2.13 C5) is deferred to v3.
+// Wave 5 / F9 removed the legacy `governance.budgetStrategy` /
+// `settings.workerBudgets.budgetStrategy` reads that this test depended on
+// (see `resolveStrategy` in src/agents/tools/summarize-progress.ts which now
+// always returns `"default"`). The compact path will be re-introduced with
+// the structured strategy config; for now, `compact: true` always returns
+// `isError: true` with `reason: "compact_failed"`, which the
+// `summarize_progress({ compact: true }) under default strategy` test
+// below pins.
 
 // ---------------------------------------------------------------------------
 // 4. new: `no_runtime` returns isError without crashing.

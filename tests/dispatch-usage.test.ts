@@ -282,50 +282,49 @@ test("dispatchAgent propagates a parent/nested abort signal into the worker sess
   assert.equal(state.activeRuns, 0);
 });
 
-test("dispatchAgent enforces optional timeout and nested delegation depth", async () => {
+test("dispatchAgent enforces nested delegation depth via the new budgets policy", async () => {
+  // Wave 5 / F9 — the legacy `WorkerGovernance.timeoutMs` per-worker timeout
+  // was removed by the Wave 1B hard cutover (G-16) and is no longer enforced
+  // by dispatch.ts. Per-agent depth enforcement is now read from
+  // `agent.budgets.depth.cap` (§2.13 C4), applied by `runBudgetPreflight`
+  // via `checkBudgetPolicy()` (src/engine/budget/policy.ts). This test pins
+  // the new shape: a worker with `budgets.depth.cap: 1` blocks once the
+  // caller is already inside the cap.
   const dir = mkdtempSync(join(tmpdir(), "pi-hive-governed-"));
   const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
-  worker.config.governance = { timeoutMs: 10, maxDelegationDepth: 1 };
+  worker.config.budgets = { depth: { resource: "depth", cap: 1 } };
   const state = {
     pi: {},
-    config: { orchestrator: { name: "Orchestrator", path: "o.md" }, agents: [worker.config], sharedContext: [], settings: { subagentOutputLimit: 100, defaultTools: "read", workerBudgets: {}, distiller: { enabled: false, model: "", conversationLines: 10 } } },
+    config: { orchestrator: { name: "Orchestrator", path: "o.md" }, agents: [worker.config], sharedContext: [], settings: { subagentOutputLimit: 100, defaultTools: "read", budgets: {}, distiller: { enabled: false, model: "", conversationLines: 10 } } },
     session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: join(dir, "e.jsonl") },
     runtimes: new Map([["builder", worker]]), widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [], sddStatus: null, obsSeq: 0,
   } as any;
-  const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", modelId: "model" }) } } as any;
-  let release: (() => void) | undefined;
+  // The pre-flight needs a `sessionManager.getBranch()` to evaluate the
+  // team-usage totals; the depth check itself does not, but the fast path
+  // in `runBudgetPreflight` short-circuits when no `sessionManager` is on
+  // `ctx`. Provide a stub that returns an empty branch.
+  const ctx = {
+    cwd: dir,
+    modelRegistry: { find: () => ({ provider: "test", modelId: "model" }) },
+    sessionManager: { getBranch: () => [] },
+  } as any;
   const create: CreateAgentSession = (async () => ({ session: {
     subscribe(): () => void { return () => undefined; },
     getAvailableThinkingLevels(): string[] { return ["off"]; },
     getContextUsage(): { percent: number } { return { percent: 0 }; },
     getSessionStats(): any { return { tokens: {}, cost: {} }; },
     state: { errorMessage: undefined },
-    async prompt(): Promise<void> { await new Promise<void>((resolve) => { release = resolve; }); },
-    async abort(): Promise<void> { release?.(); },
+    async prompt(): Promise<void> { /* noop */ },
+    async abort(): Promise<void> { /* noop */ },
     dispose(): void { /* noop */ },
   } } as any)) as any;
 
-  // dispatchAgent deliberately unrefs its timeout so a worker cannot keep Pi
-  // alive by itself. Keep this test process referenced while awaiting that
-  // timeout; coverage instrumentation can otherwise leave no active handles.
-  const keepAlive = setInterval(() => undefined, 1_000);
-  let timed;
-  try {
-    timed = await dispatchAgent(state, "Builder", "slow task", ctx, false, create);
-  } finally {
-    clearInterval(keepAlive);
-  }
-  assert.equal(timed.exitCode, 1);
-  assert.match(timed.output, /timed out after 10ms/i);
-  assert.equal(state.activeRuns, 0);
-
-  worker.status = "idle";
-  const nested = await runAtDelegationDepth(1, () => dispatchAgent(state, "Builder", "too deep", ctx, false, create));
+  // depth=2 inside a cap-of-1 dispatch would exceed the cap, so the
+  // preflight must block before any session is created.
+  const nested = await runAtDelegationDepth(2, () => dispatchAgent(state, "Builder", "too deep", ctx, false, create));
   assert.equal(nested.exitCode, 1);
-  assert.match(nested.output, /maximum delegation depth exhausted/i);
-  assert.equal(worker.runCount, 1);
-  const exhausted = readEmittedEvents(state.session.observabilityLog).find((event) => event.type === "budget_exhausted");
-  assert.equal(exhausted?.payload.resource, "depth");
+  assert.match(nested.output, /Worker depth budget exhausted/i);
+  assert.equal(worker.runCount, 0);
 });
 
 test("dispatchAgent totals equal getSessionStats exactly — no message_end/agent_end double-count (L1)", async () => {
