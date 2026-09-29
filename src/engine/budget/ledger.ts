@@ -1,5 +1,5 @@
 /**
- * Wave 1 — `BudgetLedger` class implementation.
+ * Wave 1+3A — `BudgetLedger` class implementation.
  *
  * Source of truth: docs/reviews/28-09-2026-budget-review/04-refactor-plan.md
  *   §2.3 ledger persistence via `appendCustomEntry("pi-hive-budget-ledger", ...)`
@@ -10,6 +10,9 @@
  *   §2.7 end-of-run on `agent_settled` (the canonical "Pi will not continue
  *        automatically" event)
  *   §2.12 every write MUST thread `controller.signal`
+ *   §3.3 F3 — `markWarning` / `markExhaustion` write CustomEntries with the
+ *              threshold-crossing marker so the dashboard timeline and the
+ *              G-02 ordering test can pin warning/exhausted before checkpoint.
  *
  * Design notes:
  * - Single source of truth: cumulative tokens/costUsd are pulled from
@@ -102,7 +105,6 @@ function ledgerEntries(sessionManager: SessionManager): LedgerCustomEntry[] {
  * short-circuit before the write.
  */
 export class BudgetLedger {
-  private readonly agentSlug: string;
   private readonly policy: WorkerBudgetPolicy;
   private readonly sessionManager: SessionManager;
   /** Cumulative spend reconstructed from the branch at restore time. */
@@ -115,6 +117,25 @@ export class BudgetLedger {
   public lastKind?: BudgetLedgerKind;
   /** Marker for the most recent ledger write (warning / exhausted / checkpoint). */
   public lastMarker?: BudgetLedgerMarker;
+  /**
+   * The `agentSlug` this ledger belongs to (T3.2 dedup key component for
+   * worker-scope warnings; matches Wave 0's `WorkerBudgetPolicy` contract).
+   * Made public in Wave 3A so `installBudgetEventHooks` can read it without
+   * an extra constructor parameter — the slug is already known to the
+   * factory's caller (the dispatch path passes it to `BudgetLedger.restore`).
+   */
+  public readonly agentSlug: string;
+  /**
+   * Wave 3A / F3 — Dedup set for warning emissions, keyed by
+   * `${scope}:${resource}:${agent|team}`. In-memory only (not persisted to
+   * the branch via `appendCustomEntry`); a session respawn starts fresh so
+   * the worker can re-receive the warning in its new context.
+   *
+   * T3.2 — plan §3.3 requires the key shape to match Wave 0's `WorkerBudgetPolicy`
+   * exactly: `${scope}:${resource}:${agent|team}`. The runtime agentSlug is
+   * the worker key; the team-wide key is the literal `"team"`.
+   */
+  public readonly warnedKeys: Set<string> = new Set<string>();
 
   // Throttling state — kept private; updated by recordEvent / maybeSnapshot.
   private messagesSinceLastSnapshot = 0;
@@ -302,6 +323,34 @@ export class BudgetLedger {
       kind: kind === "checkpoint" ? undefined : kind,
       signal,
     });
+  }
+
+  /**
+   * Wave 3A / F3 — T3.2. Write a CustomEntry with `marker: "warning"` to record
+   * that the worker was just notified it crossed the 20% remaining threshold.
+   * The caller (events.ts) emits the matching `appendCustomMessageEntry` so the
+   * worker SEES the hint in its next context; this entry is the dashboard-
+   * visible record of the threshold crossing and is what the ordering test
+   * (T3.6) relies on to pin the warning → checkpoint order in the branch.
+   *
+   * The cumulative is the worker's running totals AT THE TIME OF EMISSION —
+   * never the totals from a later message. This is what makes the warning ×
+   * `summarize_progress` ordering test (T3.5) deterministic.
+   */
+  public markWarning(cumulative: BudgetLedgerCumulative, signal?: AbortSignal): void {
+    this.writeEntry({ cumulative, marker: "warning", kind: undefined, signal });
+  }
+
+  /**
+   * Wave 3A / F3 — T3.3. Write a CustomEntry with `marker: "exhausted"` to
+   * record the abort-at-0% threshold crossing. The caller MUST invoke
+   * `session.abort()` (or `controller.abort()`) AFTER this write returns so
+   * the exhausted entry is on the branch BEFORE the session aborts and emits
+   * `agent_settled` (which writes the checkpoint). The branch ordering is
+   * what T3.6 pins.
+   */
+  public markExhaustion(cumulative: BudgetLedgerCumulative, signal?: AbortSignal): void {
+    this.writeEntry({ cumulative, marker: "exhausted", kind: undefined, signal });
   }
 
   /**

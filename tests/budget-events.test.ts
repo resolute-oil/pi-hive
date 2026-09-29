@@ -33,9 +33,15 @@ import {
   BUDGET_LEDGER_CUSTOM_TYPE,
   BudgetLedger,
   THROTTLE_MESSAGE_INTERVAL,
+  THROTTLE_SPEND_RATIO,
 } from "../src/engine/budget/ledger.ts";
-import { installBudgetEventHooks } from "../src/engine/budget/events.ts";
+import {
+  BUDGET_WARNING_CUSTOM_TYPE,
+  createBudgetToolCallGuard,
+  installBudgetEventHooks,
+} from "../src/engine/budget/events.ts";
 import type {
+  BudgetBlock,
   BudgetLedgerData,
   WorkerBudgetPolicy,
 } from "../src/engine/budget/types.ts";
@@ -81,9 +87,11 @@ interface ScriptedSession {
   stats: SessionStats;
   statsCallCount: number;
   lastEmitted: unknown[];
+  abortCallCount: number;
   subscribe(listener: (event: unknown) => void): () => void;
   getSessionStats(): SessionStats;
   emit(event: unknown): void;
+  abort(): Promise<void> | void;
 }
 
 function makeSession(initialStats: SessionStats): ScriptedSession {
@@ -92,6 +100,7 @@ function makeSession(initialStats: SessionStats): ScriptedSession {
     stats: initialStats,
     statsCallCount: 0,
     lastEmitted: [],
+    abortCallCount: 0,
     subscribe(listener: (event: unknown) => void): () => void {
       session.listener = listener;
       return () => {
@@ -105,6 +114,9 @@ function makeSession(initialStats: SessionStats): ScriptedSession {
     emit(event: unknown): void {
       session.lastEmitted.push(event);
       session.listener?.(event);
+    },
+    abort(): Promise<void> | void {
+      session.abortCallCount += 1;
     },
   };
   return session;
@@ -345,4 +357,332 @@ test("message_end: getSessionStats() is called exactly once (no zero, no double-
   session.emit({ type: "message_end" });
   const after = session.statsCallCount;
   assert.equal(after - before, 1, "exactly one getSessionStats() call per message_end");
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// Wave 3A — F3 live tracking (T3.1 spend-ratio trigger, T3.2 warning,
+// T3.3 exhaustion, T3.4 tool_call blocking).
+// ──────────────────────────────────────────────────────────────────────────
+
+function allLedgerEntries(sm: SessionManager): BudgetLedgerData[] {
+  return ledgerEntries(sm);
+}
+
+function messagesOfType(sm: SessionManager, customType: string): unknown[] {
+  // `appendCustomMessageEntry` writes `type: "custom_message"` with a
+  // `customType` discriminator; `appendCustomEntry` writes `type: "custom"`.
+  // Both are filtered here so a single helper finds either flavor.
+  return sm.getBranch().filter((e) => {
+    if (e.type !== "custom" && e.type !== "custom_message") return false;
+    return (e as { customType?: unknown }).customType === customType;
+  });
+}
+
+// ── Case 13 (T3.1 spend-ratio trigger): message_end writes a snapshot when ─
+// ── the spend change since the last snapshot crosses THROTTLE_SPEND_RATIO ──
+
+test("message_end: T3.1 spend-ratio trigger writes a snapshot before the message interval", async () => {
+  // Cap = 1_000 so that 5% = 50 tokens and 6% = 60 tokens — a clean ratio
+  // scenario without waiting for the message-interval trigger.
+  const cap = 1_000;
+  const policy = makePolicy({
+    tokens: { resource: "tokens", cap },
+  });
+  const { ledger, sm } = await makeLedger(policy);
+  const session = makeSession(makeStats(0, 0));
+  installBudgetEventHooks(session, ledger, policy, sm, new AbortController());
+
+  // First message: 200 tokens = 20% of cap → write.
+  session.stats = makeStats(200, 0.02);
+  session.emit({ type: "message_end" });
+  assert.equal(allLedgerEntries(sm).length, 1, "first message writes the snapshot (20% ≥ 5%)");
+
+  // Second message: bump by 10 tokens (1% of cap) — below threshold, no write.
+  // We need THROTTLE_MESSAGE_INTERVAL - 1 more messages to fire on interval;
+  // send them all with the same tiny bump so the spend ratio stays < 5%.
+  for (let i = 0; i < THROTTLE_MESSAGE_INTERVAL - 1; i++) {
+    session.stats = makeStats(210, 0.021);
+    session.emit({ type: "message_end" });
+  }
+  assert.equal(
+    allLedgerEntries(sm).length,
+    1,
+    `inter-message bumps of 1% stay below ${THROTTLE_SPEND_RATIO * 100}% — no new write until the interval fires`,
+  );
+
+  // Third message: bump by 60 tokens (6% of cap from last snapshot at 200)
+  // → above threshold → write.
+  session.stats = makeStats(270, 0.027);
+  session.emit({ type: "message_end" });
+  assert.equal(
+    allLedgerEntries(sm).length,
+    2,
+    "60/1000 = 6% ≥ 5% triggers a second snapshot via the spend-ratio path",
+  );
+});
+
+// ── Case 14 (T3.2 warning at 20%): emits a budget_warning CustomMessageEntry ─
+// ── + writes a marker:"warning" CustomEntry, dedup by key. ─────────────────
+
+test("message_end: T3.2 emits budget_warning at 20% remaining (dedup by scope:resource:agent)", async () => {
+  const cap = 1_000;
+  const policy = makePolicy({
+    tokens: { resource: "tokens", cap },
+  });
+  const { ledger, sm } = await makeLedger(policy);
+  const session = makeSession(makeStats(0, 0));
+  installBudgetEventHooks(session, ledger, policy, sm, new AbortController());
+
+  // 800 tokens = 20% remaining → at the warning threshold.
+  session.stats = makeStats(800, 0);
+  session.emit({ type: "message_end" });
+
+  // One CustomMessageEntry of type "budget_warning" + one ledger CustomEntry
+  // with marker "warning".
+  const warnings = messagesOfType(sm, BUDGET_WARNING_CUSTOM_TYPE);
+  assert.equal(warnings.length, 1, "exactly one budget_warning CustomMessageEntry");
+  const warningEntry = warnings[0] as { details?: { scope?: string; resource?: string; remaining?: number; cap?: number; interventionAvailable?: boolean } };
+  assert.equal(warningEntry.details?.scope, "worker");
+  assert.equal(warningEntry.details?.resource, "tokens");
+  assert.equal(warningEntry.details?.interventionAvailable, true, "default strategy → intervention available");
+  assert.equal(warningEntry.details?.remaining, 200);
+  assert.equal(warningEntry.details?.cap, cap);
+
+  // Ledger entry with marker "warning" present.
+  const ledgerWithWarningMarker = allLedgerEntries(sm).filter((d) => d.marker === "warning");
+  assert.equal(ledgerWithWarningMarker.length, 1, "one ledger CustomEntry with marker:'warning'");
+  assert.equal(ledgerWithWarningMarker[0]!.cumulative.tokens, 800, "ledger entry records the cumulative at message M");
+
+  // Dedup: emit another message_end at the same cumulative (no spend trigger).
+  // Already at messagesSinceLastSnapshot > 0 and spend ratio < threshold, so
+  // maybeSnapshot is throttled. The warning MUST NOT fire a second time.
+  // Bump stats by 10 tokens (1% — below spend threshold) so the ledger
+  // moves forward but the maybeSnapshot does not write.
+  session.stats = makeStats(810, 0);
+  session.emit({ type: "message_end" });
+  assert.equal(
+    messagesOfType(sm, BUDGET_WARNING_CUSTOM_TYPE).length,
+    1,
+    "second message_end at the same scope/resource must NOT re-emit the warning (dedup)",
+  );
+  assert.equal(
+    allLedgerEntries(sm).filter((d) => d.marker === "warning").length,
+    1,
+    "no second warning ledger entry either",
+  );
+
+  // Verify the dedup key exactly matches `${scope}:${resource}:${agent|team}`.
+  assert.equal(ledger.warnedKeys.has("worker:tokens:worker"), true, "dedup key uses worker scope + tokens resource + agentSlug");
+  assert.equal(ledger.warnedKeys.has("team:tokens:team"), false, "team scope has its own (empty) dedup key");
+});
+
+// ── Case 15 (T3.2 dedup by team): team scope warning has its own key ─────
+
+test("message_end: T3.2 team warning fires independently from worker warning (separate dedup key)", async () => {
+  const workerCap = 1_000;
+  const teamCap = 4_000;
+  const policy: WorkerBudgetPolicy = {
+    worker: { tokens: { resource: "tokens", cap: workerCap } },
+    team: { tokens: { resource: "tokens", cap: teamCap } },
+  };
+  // Seed the branch with another worker's ledger entry totaling 3000 tokens
+  // so the TEAM aggregate is at 3000 / 4000 = 75% used (25% remaining).
+  const { ledger, sm } = await makeLedger(policy);
+  sm.appendCustomEntry(BUDGET_LEDGER_CUSTOM_TYPE, {
+    caps: { teamTokens: teamCap, workerTokens: workerCap },
+    cumulative: { tokens: 3000, costUsd: 0, runs: 1 },
+    writtenAt: 1,
+    agentSlug: "other-worker",
+  });
+  const session = makeSession(makeStats(0, 0));
+  installBudgetEventHooks(session, ledger, policy, sm, new AbortController());
+
+  // Worker bumps to 850 → 15% remaining (≤20% fires for worker).
+  // Team aggregate = 3000 + 850 = 3850 / 4000 = 3.75% remaining (≤20% fires
+  // for team). Both fire in this single message_end.
+  session.stats = makeStats(850, 0);
+  session.emit({ type: "message_end" });
+
+  const warningEntries = messagesOfType(sm, BUDGET_WARNING_CUSTOM_TYPE);
+  assert.equal(warningEntries.length, 2, "worker + team both fire (distinct scope/resource pairs)");
+
+  const scopeResourcePairs = warningEntries.map((entry) => {
+    const e = entry as { details?: { scope?: string; resource?: string } };
+    return `${e.details?.scope}:${e.details?.resource}`;
+  });
+  assert.ok(scopeResourcePairs.includes("worker:tokens"), "worker:tokens warning fired");
+  assert.ok(scopeResourcePairs.includes("team:tokens"), "team:tokens warning fired");
+
+  // Dedup keys recorded for both pairs.
+  assert.ok(ledger.warnedKeys.has("worker:tokens:worker"), "worker key recorded");
+  assert.ok(ledger.warnedKeys.has("team:tokens:team"), "team key uses literal 'team' (NOT the agentSlug)");
+});
+
+// ── Case 16 (T3.3 exhaustion at 0%): emits + marks + aborts ─────────────
+
+test("message_end: T3.3 emits budget_exhausted + writes marker:'exhausted' + calls session.abort()", async () => {
+  const cap = 1_000;
+  const policy = makePolicy({
+    tokens: { resource: "tokens", cap },
+  });
+  const { ledger, sm } = await makeLedger(policy);
+  const session = makeSession(makeStats(0, 0));
+  installBudgetEventHooks(session, ledger, policy, sm, new AbortController());
+
+  // Cumulative hits the cap exactly → exhausted.
+  session.stats = makeStats(cap, 0);
+  const abortBefore = session.abortCallCount;
+  session.emit({ type: "message_end" });
+
+  // One ledger entry with marker "exhausted".
+  const exhaustedEntries = allLedgerEntries(sm).filter((d) => d.marker === "exhausted");
+  assert.equal(exhaustedEntries.length, 1, "one ledger CustomEntry with marker:'exhausted'");
+  assert.equal(exhaustedEntries[0]!.cumulative.tokens, cap);
+
+  // One CustomMessageEntry of type "budget_exhausted".
+  const exhaustedMessages = messagesOfType(sm, "budget_exhausted");
+  assert.equal(exhaustedMessages.length, 1, "one budget_exhausted CustomMessageEntry");
+  const exhaustedEntry = exhaustedMessages[0] as { details?: { scope?: string; resource?: string; remaining?: number; interventionAvailable?: boolean } };
+  assert.equal(exhaustedEntry.details?.scope, "worker");
+  assert.equal(exhaustedEntry.details?.resource, "tokens");
+  assert.equal(exhaustedEntry.details?.remaining, 0);
+  assert.equal(exhaustedEntry.details?.interventionAvailable, false, "exhaustion has no intervention");
+
+  // session.abort() was called exactly once.
+  assert.equal(session.abortCallCount, abortBefore + 1, "session.abort() called for exhaustion");
+
+  // Subsequent message_end does NOT re-emit (controller is aborted + dedup
+  // key recorded). Tests determinism under repeated firings.
+  session.stats = makeStats(cap, 0);
+  session.emit({ type: "message_end" });
+  assert.equal(
+    allLedgerEntries(sm).filter((d) => d.marker === "exhausted").length,
+    1,
+    "second message_end at the cap must NOT re-emit exhausted (dedup key recorded)",
+  );
+  assert.equal(
+    session.abortCallCount,
+    abortBefore + 1,
+    "session.abort() not called a second time",
+  );
+});
+
+// ── Case 17 (T3.4 tool_call blocking — bash): returns BudgetBlock as reason ─
+
+test("createBudgetToolCallGuard: T3.4 blocks 'bash' when budget is exhausted (BudgetBlock JSON as reason)", async () => {
+  const cap = 1_000;
+  const policy = makePolicy({
+    tokens: { resource: "tokens", cap },
+  });
+  const { ledger, sm } = await makeLedger(policy);
+  const controller = new AbortController();
+  const guard = createBudgetToolCallGuard(
+    ledger,
+    policy,
+    sm,
+    controller,
+    () => 1, // current delegation depth
+  );
+
+  // Seed cumulative so checkBudgetPolicy returns a block.
+  ledger.recordEvent("message_end", { tokens: cap, costUsd: 0, runs: 1 }, controller.signal);
+
+  const result = await guard({ toolName: "bash", input: { command: "echo hi" } });
+  assert.ok(result, "guard returned a non-undefined result");
+  assert.equal(result!.block, true);
+  assert.equal(result!.terminate, false);
+  // The reason is the JSON-serialized BudgetBlock discriminated union.
+  const block = JSON.parse(result!.reason) as BudgetBlock;
+  assert.equal(block.scope, "worker");
+  assert.equal(block.resource, "tokens");
+  assert.equal(block.remaining.tokens, 0);
+  assert.equal(block.limit.tokens, cap);
+  assert.match(block.reason, /exhausted/i);
+});
+
+// ── Case 18 (T3.4 tool_call blocking — edit/write/read): all four targets ─
+
+test("createBudgetToolCallGuard: T3.4 blocks edit, write, read; passes through grep/ls/custom tools", async () => {
+  const cap = 1_000;
+  const policy = makePolicy({
+    tokens: { resource: "tokens", cap },
+  });
+  const { ledger, sm } = await makeLedger(policy);
+  const controller = new AbortController();
+  ledger.recordEvent("message_end", { tokens: cap, costUsd: 0, runs: 1 }, controller.signal);
+  const guard = createBudgetToolCallGuard(ledger, policy, sm, controller, () => 1);
+
+  // The four blocking targets — each must return a block.
+  for (const tool of ["bash", "edit", "write", "read"] as const) {
+    const r = await guard({ toolName: tool, input: {} });
+    assert.ok(r, `${tool}: guard returned a block result`);
+    assert.equal(r!.block, true);
+    const parsed = JSON.parse(r!.reason) as BudgetBlock;
+    assert.equal(parsed.scope, "worker");
+    assert.equal(parsed.resource, "tokens");
+  }
+
+  // Non-target tools — pass through (return undefined).
+  for (const tool of ["grep", "ls", "delegate_agent"]) {
+    const r = await guard({ toolName: tool, input: {} });
+    assert.equal(r, undefined, `${tool}: non-blocking tool returns undefined`);
+  }
+});
+
+// ── Case 19 (T3.4 tool_call no-block): guard is a no-op when budget is fine ─
+
+test("createBudgetToolCallGuard: T3.4 returns undefined (allow) when budget is within caps", async () => {
+  const policy = makePolicy();
+  const { ledger, sm } = await makeLedger(policy);
+  const controller = new AbortController();
+  // Cumulative below cap (100 < 100_000) → no block.
+  ledger.recordEvent("message_end", { tokens: 100, costUsd: 0.01, runs: 1 }, controller.signal);
+  const guard = createBudgetToolCallGuard(ledger, policy, sm, controller, () => 1);
+
+  const r = await guard({ toolName: "bash", input: {} });
+  assert.equal(r, undefined, "under-budget tool calls pass through");
+});
+
+// ── Case 20 (T3.4 aborted controller short-circuit): guard is a no-op ────
+
+test("createBudgetToolCallGuard: T3.4 short-circuits when the controller is already aborted", async () => {
+  const policy = makePolicy();
+  const { ledger, sm } = await makeLedger(policy);
+  const controller = new AbortController();
+  controller.abort();
+  // Cumulative at the cap — would normally block, but the abort short-circuit
+  // lets the in-flight call resolve so the agent can finish settling.
+  ledger.recordEvent("message_end", { tokens: 1_000_000, costUsd: 0, runs: 1 }, controller.signal);
+  const guard = createBudgetToolCallGuard(ledger, policy, sm, controller, () => 1);
+
+  const r = await guard({ toolName: "bash", input: {} });
+  assert.equal(r, undefined, "aborted controller skips the gate");
+});
+
+// ── Case 21 (T4.1 agent_settled — final snapshot): exact ledger shape ───
+
+test("agent_settled: T4.1 writes a single checkpoint CustomEntry (F4 sole finalization path)", async () => {
+  const policy = makePolicy();
+  const { ledger, sm } = await makeLedger(policy);
+  const session = makeSession(makeStats(7500, 0.75));
+  installBudgetEventHooks(session, ledger, policy, sm, new AbortController());
+
+  // Fire several message_end events first to seed the ledger with throttled snapshots.
+  for (let i = 0; i < THROTTLE_MESSAGE_INTERVAL; i++) {
+    session.stats = makeStats(i * 10, i * 0.001);
+    session.emit({ type: "message_end" });
+  }
+  const beforeAgentSettled = allLedgerEntries(sm).length;
+
+  // agent_settled fires the canonical checkpoint.
+  session.stats = makeStats(1234, 0.25);
+  session.emit({ type: "agent_settled" });
+
+  const after = allLedgerEntries(sm);
+  assert.equal(after.length, beforeAgentSettled + 1, "exactly one new entry (the checkpoint)");
+  const last = after[after.length - 1]!;
+  assert.equal(last.marker, "checkpoint");
+  assert.equal(last.cumulative.tokens, 1234);
+  assert.equal(last.cumulative.costUsd, 0.25);
+  assert.equal(last.kind, undefined, "no specific kind — sentinel means 'canonical end-of-run'");
 });
