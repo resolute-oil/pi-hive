@@ -255,11 +255,17 @@ export async function dispatchAgent(
   // runCount, startedAt, elapsedMs, the token baselines — is touched for a run
   // that never happens (M-misc), so the previous run's stats stay intact.
   let resolvedModel: any;
-  try { resolvedModel = resolveModel(ctx, model); } catch { resolvedModel = undefined; }
+  let resolveModelError: unknown;
+  try { resolvedModel = resolveModel(ctx, model); } catch (err) { resolvedModel = undefined; resolveModelError = err; }
   if (!resolvedModel) {
     runtime.status = "error";
     releaseWorkerSlot(state);
-    return { output: `Cannot resolve model "${model}" for ${runtime.config.name}.`, exitCode: 1, elapsed: 0 };
+    // Audit B8: bind the error and include it in the user-facing message so
+    // transient provider / API-key / registry failures are actionable.
+    const detail = resolveModelError instanceof Error
+      ? resolveModelError.message
+      : resolveModelError ? String(resolveModelError) : "";
+    return { output: `Cannot resolve model "${model}" for ${runtime.config.name}.${detail ? ` (${detail})` : ""}`, exitCode: 1, elapsed: 0 };
   }
 
   const resolvedModelKey = modelKey(resolvedModel, model);
