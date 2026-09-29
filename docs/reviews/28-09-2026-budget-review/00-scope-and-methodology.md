@@ -37,8 +37,8 @@ The actual refactor is **out of scope** for this branch. The user explicitly ask
 |---|---|
 | Implementing the refactor in this branch | The user asked for a plan; the implementation lives in follow-up branches. |
 | Changing PR #54 directly | PR #54 is "awaiting user merge" per HANDOFF.md. The review's recommendation may supersede it; that decision belongs to the user. |
-| Dashboard UI work | The dashboard's intervention UI (the "End / Compact / Respawn" buttons) is already flagged as "out of scope for PR #54" in `tmp/budget-strategy-plan.md`. The review notes this as a downstream dependency but does not design the UI. |
-| Respawn strategy (third strategy) | Already dropped from `feat/budget-strategy` per `tmp/budget-strategy-plan.md#why-respawn-was-dropped`. The review's options keep that decision and do not revisit it unless an option requires it. |
+| Dashboard UI work | The dashboard's intervention UI (the "End / Compact / Respawn" buttons) is already flagged as "out of scope for PR #54" in `raw-evidence/budget-strategy-plan.md`. The review notes this as a downstream dependency but does not design the UI. |
+| Respawn strategy (third strategy) | Already dropped from `feat/budget-strategy` per `raw-evidence/budget-strategy-plan.md#why-respawn-was-dropped`. The review's options keep that decision and do not revisit it unless an option requires it. |
 | New Pi SDK API adoption | The review reads what Pi documents at `/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/docs/`. It does not propose new Pi APIs that are not in those docs. |
 | Cross-project budget APIs (multi-hive, billing) | Out of scope; budget is per-`pi-hive` session. |
 
@@ -66,7 +66,7 @@ These were produced by parallel `Agent` invocations from `@tintinweb/pi-subagent
   - `tests/governance.test.ts` (167 LOC)
   - `tests/budget-strategy.test.ts` (667 LOC, new in `feat/budget-strategy`)
   - `tests/dispatch-usage.test.ts` (835 LOC; includes the Bug 1 regression test at line 385 and the `W1.1` fresh-delta test at line 489)
-- **Bug-history reading** of `tmp/2025-09-28-fresh-true-budget-bug-unresolved.md` and the relevant HANDOFF sections.
+- **Bug-history reading** of `raw-evidence/2025-09-28-fresh-true-budget-bug-unresolved.md` and the relevant HANDOFF sections.
 
 Outputs:
 
@@ -113,14 +113,14 @@ HTML is hand-written with inline Mermaid for diagrams; self-contained, no extern
 ## Conventions used throughout this review
 
 - **Code citations:** `src/engine/dispatch.ts:252` = line 252 of `src/engine/dispatch.ts` in the `feat/budget-strategy` HEAD. The review branch has the same code (the review is read-only).
-- **Strategy names:** `default` and `compact` are the two strategies shipped in `feat/budget-strategy`. The third, `respawn`, was dropped per `tmp/budget-strategy-plan.md` and is not reconsidered.
+- **Strategy names:** `default` and `compact` are the two strategies shipped in `feat/budget-strategy`. The third, `respawn`, was dropped per `raw-evidence/budget-strategy-plan.md` and is not reconsidered.
 - **Run states:** `idle`, `running`, `done`, `error`, `queued` — from `AgentStatus` in `src/core/types.ts:13`.
 - **Budget scopes:** `worker` (one agent) and `team` (sum of all non-orchestrator runtimes).
 - **Resources:** `runs`, `tokens`, `cost`, `depth`, `queue` — the five resources the budget layer tracks.
 - **"Fresh"** = `delegate_agent(..., fresh: true)`, which reloads config and resets counters.
 - **"Bug 1"** = the reset-after-budget-check ordering bug, fixed in commit `081380a`.
 - **"Bug 2"** = the mid-run budget check seeing stale `governanceTokens=0`, fixed in `3be33f6`.
-- **"Bug 3" / "third mystery"** = the unresolved post-test symptom — `runtime.*=0` but `governanceTokens=15134` after a fresh=true abort. Documented in `tmp/2025-09-28-fresh-true-budget-bug-unresolved.md`.
+- **"Bug 3" / "third mystery"** = the unresolved post-test symptom — `runtime.*=0` but `governanceTokens=15134` after a fresh=true abort. Documented in `raw-evidence/2025-09-28-fresh-true-budget-bug-unresolved.md`.
 
 ## Process
 

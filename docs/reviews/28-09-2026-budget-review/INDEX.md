@@ -36,7 +36,7 @@ Total reading time: ~2.5 hours. The synthesis is in `01-current-state-analysis.m
 
 - **The budget system has three counters per runtime** (`runtime.*` SDK-reported session-lifetime, `governanceTokens` frozen-at-run-end, `effectiveTokens` current-context-load). Three write sites (per-message `message_end`, per-run `agent_end`, per-compaction `compaction_end`). Three read sites (`checkDispatchBudgets`, `workerConsumedTokens`, `budgetRemaining`). The `??` fallthroughs in the read sites paper over the inconsistency.
 
-- **Three bugs have hit the `fresh=true` path** in the past week. Bug 1 (ordering) and Bug 2 (mid-run check) are fixed in `feat/budget-strategy` at `9f950fb`. Bug 3 (post-abort end-of-run math) is unresolved per `tmp/2025-09-28-fresh-true-budget-bug-unresolved.md`.
+- **Three bugs have hit the `fresh=true` path** in the past week. Bug 1 (ordering) and Bug 2 (mid-run check) are fixed in `feat/budget-strategy` at `9f950fb`. Bug 3 (post-abort end-of-run math) is unresolved per `raw-evidence/2025-09-28-fresh-true-budget-bug-unresolved.md`.
 
 - **The bug class lives in the dual-counter system.** Every fix so far has been a defensive guard in the read sites. A structural fix would collapse the counters to one source of truth.
 

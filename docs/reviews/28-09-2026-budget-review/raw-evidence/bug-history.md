@@ -67,7 +67,7 @@ Chronological log of every budget-related bug the project has hit, with fix refe
 - orchestrator (me): remaining.tokens=3500 (unchanged, full budget)
 ```
 
-**Top hypothesis (per `tmp/2025-09-28-fresh-true-budget-bug-unresolved.md`):**
+**Top hypothesis (per `2025-09-28-fresh-true-budget-bug-unresolved.md`):**
 
 > "the end-of-run `governanceTokens` accumulation at line ~868 reads `runtime.*` BEFORE the `getSessionStats` overwrite (or uses a cached delta). If `runtime.*=15134` at that point, `delta=15134`, `governanceTokens = 0 + 15134 = 15134`. Then the getSessionStats overwrite happens, setting `runtime.*=0`. Result: `governanceTokens=15134`, `runtime.*=0` — exactly the symptom."
 

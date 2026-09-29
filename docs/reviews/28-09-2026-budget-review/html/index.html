@@ -69,7 +69,7 @@
       <h2>Key findings</h2>
       <ol>
         <li><strong>Three counters, three write sites, three read sites.</strong> The dual/triple counter system encodes a state machine in source code via <code>??</code> fallthroughs. Every bug in the timeline is a consequence of this design.</li>
-        <li><strong>Three <code>fresh=true</code> bugs in five commits.</strong> Bug 1 (ordering), Bug 2 (mid-run check) fixed. Bug 3 (post-abort end-of-run math) unresolved per <code>tmp/2025-09-28-fresh-true-budget-bug-unresolved.md</code>.</li>
+        <li><strong>Three <code>fresh=true</code> bugs in five commits.</strong> Bug 1 (ordering), Bug 2 (mid-run check) fixed. Bug 3 (post-abort end-of-run math) unresolved per <code>../raw-evidence/2025-09-28-fresh-true-budget-bug-unresolved.md</code>.</li>
         <li><strong>Test coverage is strong on deterministic paths, weak on races.</strong> The fake-session pattern catches what it covers; it doesn't cover <code>runController.abort()</code> racing <code>getSessionStats()</code>.</li>
         <li><strong>Pi-docs alignment has four gaps.</strong> State in closure not in <code>CustomEntry</code>; no <code>ctx.signal</code> propagation; no <code>UsageEntry</code> for worker spend; pre-dispatch check not <code>tool_call</code> blocking.</li>
         <li><strong>Operator intervention is wired before the UI exists.</strong> Three dispatch commands are correct and tested; the dashboard's intervention buttons are missing.</li>

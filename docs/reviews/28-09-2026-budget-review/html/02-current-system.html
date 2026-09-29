@@ -114,7 +114,7 @@ graph LR
           <h3 class="issue-title">Operator intervention is wired before the dashboard UI exists</h3>
           <span class="issue-severity">Medium</span>
         </div>
-        <p>The three dispatch commands (<code>endWorkerSession</code>, <code>compactWorkerSession</code>, <code>respawnWorkerSession</code>) are in <code>src/engine/dispatch.ts:929-1099</code> and fully tested in <code>tests/budget-strategy.test.ts</code>. The dashboard UI to invoke them is "out of scope for PR #54" per <code>tmp/budget-strategy-plan.md</code>.</p>
+        <p>The three dispatch commands (<code>endWorkerSession</code>, <code>compactWorkerSession</code>, <code>respawnWorkerSession</code>) are in <code>src/engine/dispatch.ts:929-1099</code> and fully tested in <code>tests/budget-strategy.test.ts</code>. The dashboard UI to invoke them is "out of scope for PR #54" per <code>../raw-evidence/budget-strategy-plan.md</code>.</p>
         <p>The engine commands are correct in isolation but unusable from the UI surface the user interacts with.</p>
         <p class="cite">Pi-docs alignment: <code>extensions.md#custom-ui</code> recommends <code>setWidget</code> (RPC-friendly) and <code>custom()</code> (TUI-only). The engine is mode-independent (correct), but the UI surface is missing.</p>
         <div class="issue-evidence">
@@ -229,7 +229,7 @@ graph LR
           <div class="timeline-date">2025-09-28</div>
           <div class="timeline-title">Bug 3 / third mystery <span class="tag status-unresolved">UNRESOLVED</span></div>
           <div class="timeline-detail">
-            User re-tests; bug persists. Top hypothesis: end-of-run <code>governanceTokens += delta</code> reads pre-overwrite <code>runtime.*</code>. Documented in <code>tmp/2025-09-28-fresh-true-budget-bug-unresolved.md</code>.
+            User re-tests; bug persists. Top hypothesis: end-of-run <code>governanceTokens += delta</code> reads pre-overwrite <code>runtime.*</code>. Documented in <code>../raw-evidence/2025-09-28-fresh-true-budget-bug-unresolved.md</code>.
           </div>
         </div>
 
