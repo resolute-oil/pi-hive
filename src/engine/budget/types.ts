@@ -40,6 +40,22 @@ export interface AgentBudgetsOverride {
 // ---------------------------------------------------------------------------
 
 export type UsageKey = "input" | "output" | "cacheRead" | "cacheWrite" | "reasoning";
+
+/**
+ * Flat-string window consumed by the F1 runtime layer (BudgetLedger,
+ * checkBudgetPolicy, installBudgetEventHooks, delegateAgent).
+ *
+ * Contract-drift reconciliation (Wave 2 / F2):
+ *
+ *   Wave 0 declared this flat-string shape at the resolved-policy layer.
+ *   Wave 1B declared a richer object shape (`BudgetWindowSpec` in
+ *   `src/core/types.ts`) so a future `duration?` axis can attach without a
+ *   schema break. The two coexist via the resolver at
+ *   `src/engine/budget/window-resolver.ts` — `resolveWindow(spec)` flattens
+ *   the object form to one of these strings before any runtime primitive
+ *   sees it. New consumers SHOULD read the object form and call the
+ *   resolver; legacy / F1 callers may keep reading the flat string.
+ */
 export type BudgetWindow = "per-session" | "per-run" | "per-day" | "per-team-lifetime" | "per-hour";
 
 export interface TokensCap {
@@ -292,6 +308,12 @@ export interface DelegateAgentResult {
   sessionId: string;
   session: AgentSession;
   ledger: BudgetLedger;
+  /**
+   * Wave 2 / F2 — controller owned by `delegateAgent` and exposed here so
+   * callers can abort the session mid-run (e.g., parent-tool abort). The
+   * signal is threaded into every ledger write per plan §2.12.
+   */
+  controller: AbortController;
 }
 
 // ---------------------------------------------------------------------------

@@ -118,7 +118,7 @@ test("checkBudgetPolicy: returns undefined when under every worker and team cap"
   // The ledger.snapshot above wrote the worker's own entry; team = that
   // single worker = under all caps too.
   assert.equal(
-    checkBudgetPolicy(ledger, policy, (ledger as unknown as { sessionManager: SessionManager }).sessionManager.getBranch()),
+    checkBudgetPolicy(ledger, policy, (ledger as unknown as { sessionManager: SessionManager }).sessionManager.getBranch(), 0),
     undefined,
   );
 });
@@ -130,7 +130,7 @@ test("checkBudgetPolicy: blocks on worker token cap and returns a worker/tokens 
     worker: { tokens: { resource: "tokens", cap: 100 } },
   });
   const ledger = await ledgerWith({ tokens: 100, costUsd: 0, runs: 0 }, policy);
-  const block = checkBudgetPolicy(ledger, policy, (ledger as unknown as { sessionManager: SessionManager }).sessionManager.getBranch());
+  const block = checkBudgetPolicy(ledger, policy, (ledger as unknown as { sessionManager: SessionManager }).sessionManager.getBranch(), 0);
   assert.ok(block, "must block");
   assert.equal(block.scope, "worker");
   assert.equal(block.resource, "tokens");
@@ -146,7 +146,7 @@ test("checkBudgetPolicy: blocks on worker costUsd cap", async () => {
     worker: { costUsd: { resource: "costUsd", cap: 0.5 } },
   });
   const ledger = await ledgerWith({ tokens: 0, costUsd: 0.5, runs: 0 }, policy);
-  const block = checkBudgetPolicy(ledger, policy, (ledger as unknown as { sessionManager: SessionManager }).sessionManager.getBranch());
+  const block = checkBudgetPolicy(ledger, policy, (ledger as unknown as { sessionManager: SessionManager }).sessionManager.getBranch(), 0);
   assert.ok(block);
   assert.equal(block.scope, "worker");
   assert.equal(block.resource, "costUsd");
@@ -161,7 +161,7 @@ test("checkBudgetPolicy: blocks on worker runs cap", async () => {
     worker: { runs: { resource: "runs", cap: 2 } },
   });
   const ledger = await ledgerWith({ tokens: 0, costUsd: 0, runs: 2 }, policy);
-  const block = checkBudgetPolicy(ledger, policy, (ledger as unknown as { sessionManager: SessionManager }).sessionManager.getBranch());
+  const block = checkBudgetPolicy(ledger, policy, (ledger as unknown as { sessionManager: SessionManager }).sessionManager.getBranch(), 0);
   assert.ok(block);
   assert.equal(block.scope, "worker");
   assert.equal(block.resource, "runs");
@@ -176,7 +176,7 @@ test("checkBudgetPolicy: blocks on team token cap when the worker is under cap",
     team: { tokens: { resource: "tokens", cap: 50_000 } },
   });
   const ledger = await ledgerWith({ tokens: 60_000, costUsd: 0, runs: 0 }, policy);
-  const block = checkBudgetPolicy(ledger, policy, (ledger as unknown as { sessionManager: SessionManager }).sessionManager.getBranch());
+  const block = checkBudgetPolicy(ledger, policy, (ledger as unknown as { sessionManager: SessionManager }).sessionManager.getBranch(), 0);
   assert.ok(block);
   assert.equal(block.scope, "team");
   assert.equal(block.resource, "tokens");
@@ -191,7 +191,7 @@ test("checkBudgetPolicy: blocks on team costUsd cap", async () => {
   });
   // Spend $1.20 — well over the team cap of $1, but well under the worker cap.
   const ledger = await ledgerWith({ tokens: 0, costUsd: 1.2, runs: 0 }, policy);
-  const block = checkBudgetPolicy(ledger, policy, (ledger as unknown as { sessionManager: SessionManager }).sessionManager.getBranch());
+  const block = checkBudgetPolicy(ledger, policy, (ledger as unknown as { sessionManager: SessionManager }).sessionManager.getBranch(), 0);
   assert.ok(block);
   assert.equal(block.scope, "team");
   assert.equal(block.resource, "costUsd");
@@ -296,7 +296,7 @@ test("G-29 checkBudgetPolicy: raises TypeError when `policy` is not a WorkerBudg
     runs: { resource: "runs" as const, cap: 1 },
   };
   assert.throws(
-    () => checkBudgetPolicy(ledger, teamPolicy as unknown as WorkerBudgetPolicy, sm.getBranch()),
+    () => checkBudgetPolicy(ledger, teamPolicy as unknown as WorkerBudgetPolicy, sm.getBranch(), 0),
     /TypeError/,
     "passing a ResolvedTeamBudgets where WorkerBudgetPolicy is expected must raise TypeError (G-29)",
   );
