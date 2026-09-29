@@ -314,17 +314,6 @@ export interface DelegateAgentResult {
 }
 
 // ---------------------------------------------------------------------------
-// §2.11 Worker-facing visibility — typed payload for `appendCustomMessageEntry("budget_warning", ...)`.
-// ---------------------------------------------------------------------------
-
-export interface BudgetWarningDetails {
-  scope: BudgetScope;
-  resource: BudgetResource;
-  remaining: number;
-  cap: number | undefined;
-}
-
-// ---------------------------------------------------------------------------
 // §2.15 `queue` removed — no `queue` cap variant in the union above.
 // ---------------------------------------------------------------------------
 
