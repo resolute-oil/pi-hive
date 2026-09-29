@@ -1,10 +1,13 @@
 # Budget System Refactor — Implementation Plan
 
-**Date:** 2026-09-28
+**Date:** 2026-09-28 (initial); 2026-09-29 SDK 0.99.1 alignment; 2026-09-29 workflow redesign
 **Baseline:** `feat/budget-strategy` at `9f950fb` (PR #54 open, awaiting user merge — disposition in §6)
-**Goal:** Replace pi-hive's budget enforcement layer with a Pi-native design that uses the SDK's built-in session primitives (`appendUsage`, `appendCustomEntry`, `appendCustomMessageEntry`, `getSessionStats`, `getContextUsage`, `session.abort`, `session.compact`, `session.dispose`, `agent_settled`) as the source of truth, eliminating the dual-counter bug class and providing flexible EOL/respawn moments.
+**SDK reference verified against:** `@earendil-works/pi-coding-agent@0.99.1` (commit `ea9c54a` on `refactor/budget`). The earlier draft header said "v0.87.1"; the actual pin is 0.99.1 and that's what's developed against. See `raw-evidence/pi-sdk-session-api.md` §0 for the SDK 0.99.1 vs 0.80.x diff and its impact on this plan's prescriptions.
+**Goal:** Replace pi-hive's budget enforcement layer with a Pi-native design that uses the SDK's built-in session primitives (`appendCustomEntry`, `appendCustomMessageEntry`, `getSessionStats`, `getContextUsage`, `session.abort`, `session.compact`, `session.dispose`, `agent_settled`) as the source of truth, eliminating the dual-counter bug class and providing flexible EOL/respawn moments.
 
 **End state:** Budget-constrained delegated agents with flexible EOL/respawn moments. Pi Best Practices throughout. Single source of truth per concern.
+
+**This is an entirely new rethink of the budget system.** Pre-existing code that does not fit the refactor is **removed**, not layered or aliased. See §0.5 "Removal policy" below.
 
 ---
 
@@ -20,10 +23,38 @@
 
 **Pi Best Practices applied** (from the four source citations):
 
-- *From `pi-sdk-session-api.md` (verified SDK ground-truth):* `getSessionStats()` returns full session lifetime including aborted messages; `getContextUsage()` excludes aborted; `appendCustomEntry(customType, data?)` is the canonical primitive for the ledger (NOT `appendUsage`, which would inflate session totals — see §2.14); `session.abort()` vs `session.dispose()` distinction; `agent_settled` is the canonical "done for good" event.
+- *From `pi-sdk-session-api.md` (verified SDK ground-truth):* `getSessionStats()` in 0.99.1 iterates `getEntries()` and explicitly accumulates `UsageEntry` records (see §2.2 in the SDK reference); `getContextUsage()` excludes aborted; `appendCustomEntry(customType, data?)` is the canonical primitive for the ledger (NOT `appendUsage`, which would inflate session totals — see §2.14); `session.abort()` vs `session.dispose()` distinction; `agent_settled` is the canonical "done for good" event.
 - *From `extension-patterns-reference.md` (verbatim Pi docs):* Four-tier state model (ToolResult Details / `appendEntry` / `sendMessage` / External); `getBranch()` re-derivation at `session_start`; throw-to-refuse for blocked tools; `tool_call` blocking (see F3 T3.4); `agent_before_settle` for end-of-run; idempotent `session_shutdown`; mode-independent behavior.
-- *From local Pi source (`/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/` v0.87.1):* Verified `dist/core/agent-session.d.ts`, `dist/core/agent-session.js`, `dist/core/session-manager.d.ts`, `dist/core/usage-totals.d.ts`, `dist/core/compaction/compaction.d.ts`, `dist/core/extensions/types.d.ts`.
+- *From local Pi source (`node_modules/@earendil-works/pi-coding-agent/dist/core/` @ 0.99.1):* Verified `dist/core/agent-session.d.ts`, `dist/core/agent-session.js`, `dist/core/session-manager.d.ts`, `dist/core/usage-totals.d.ts`, `dist/core/compaction/compaction.d.ts`, `dist/core/extensions/types.d.ts`. See `raw-evidence/pi-sdk-session-api.md` §9 for the full citation map.
 - *From online Pi docs (https://pi.dev/docs/latest/):* `steer()`/`followUp()` return values; `session.systemPrompt` read-only confirmation; `agent_settled` emphasis; latest session-format entry shapes.
+
+## 0.5 Working conventions and removal policy
+
+**Before picking up any task in this plan, read `README.md` (working conventions)** in the parent review directory. The conventions are mandatory: per-phase worktrees under `APP_ROOT/.worktrees/` (NOT one mega-branch), TDD red-green-refactor, regression tests for every bug being fixed, coordinator + worker model, `ask_user` for ambiguous decisions (inline display mode), no defer without user permission, session logs in `docs/reviews/28-09-2026-budget-review/sessions/`.
+
+**Worktree naming pattern:** `refactor/budget-<phase>-<task>` (or `<phase>-<short-name>`). Example: `refactor/budget-f5-eol-commands`, `refactor/budget-t5-3-respawn-dispose`. The branch lives at `.worktrees/refactor-budget-<phase>-<task>/` and the worktree name MUST match the branch.
+
+**Removal policy.** This refactor is not layered over the existing budget system. The following are removed, not deprecated:
+
+- The `governanceTokens`, `governanceCostUsd`, `effectiveTokens`, and run-start-* counter fields on `AgentRuntime` (per §1.1). When a worker removes these, they also remove any defensive guards that existed to keep the dual-counter math consistent (e.g., the `??` fallthroughs in `workerConsumedTokens`).
+- The `freshResetRuntime(...)` function (per §1.2). Old callers are deleted, not redirected.
+- The old `workerConsumedTokens(runtime, scope)` signature (per §1.3). New signature takes a session, not a runtime.
+- The old `worker-budgets` flat config schema (per §2.10). Old configs are not accepted; users manually migrate per `gap-decision G-16`.
+- The existing 3-command operator surface (`endWorkerSession`, `compactWorkerSession`, `respawnWorkerSession` in `src/engine/dispatch.ts`). New 7-command surface in `src/engine/budget/worker-tools.ts`. The old function exports are deleted.
+- The `summarize_progress` failure paths that the refactor simplifies (per T5.7). Old branch logic is removed.
+- The `runtime.progressNotes` string field. Replaced by `appendCustomMessageEntry`.
+
+When a worker finds code outside this list that should be removed, the worker uses `ask_user` to confirm before deleting — do not silently expand the removal scope.
+
+## 0.6 Regression tests for every bug being fixed
+
+The plan's F7 includes regression tests for the three `fresh=true` bugs:
+
+- **Bug 1 (reset order)** — regression test in F7 covers the dispatch with `fresh=true` after a worker has exhausted its budget; asserts exit code 0 and post-run ledger is empty. (T7.6 added 2026-09-29 to capture the user-reported symptom.)
+- **Bug 2 (mid-run check)** — regression test in F7 covers the worker running over budget mid-run; asserts the warning fires and the worker aborts. The T3.1 throttled-write test pins the same path at the unit level.
+- **Bug 3 (post-overwrite mystery)** — T7.1 covers the abort-then-`getSessionStats()` race with 100-consecutive-run stability.
+
+When the implementation session encounters a new bug (not in this plan), it adds a regression test as part of the fix. No fix lands without its regression test.
 
 ---
 
@@ -1178,6 +1209,12 @@ Ready for F7 when: F6 is the only schema-validation path; old format is accepted
 
 - [ ] **T7.4** Add test for `session_start` racing with in-flight `CustomEntry` write.
   - Files: same
+  - Gate: passes 100 consecutive runs
+
+- [ ] **T7.6** (added 2026-09-29) Add `fresh=true` regression test pinning the user-reported symptom: dispatch with `fresh=true` after a worker has exhausted its budget → assert exit code 0 (dispatch is NOT blocked) and post-run ledger is empty (no carry-over from the prior session). This is the Bug 1 regression test in its user-visible form. The earlier T5.3 unit test asserts the `session.dispose()` call; T7.6 asserts the end-to-end orchestrator flow.
+  - Files: same, plus `tests/budget-eol.test.ts` end-to-end section
+  - Gate: passes 100 consecutive runs; assertion holds against both the v0.99.1 SDK and any future SDK that preserves the `SessionManager.create()` semantics
+  - Files: same
   - Gate: read sees write OR pre-write state (never partial)
 
 - [ ] **T7.5** Add test for `/reload` mid-budget (F8's regression test, written here for sequencing).
@@ -1567,20 +1604,30 @@ A future session picking up this work should:
 3. **Read this file (`04-refactor-plan.md`)** (the plan — what to do).
 4. **Read `pi-docs/extension-patterns-reference.md` and `raw-evidence/pi-sdk-session-api.md`** as references when implementing individual tasks.
 5. **If running multi-agent**: also read `05-parallelization-analysis.md` — establishes the wave structure, agent roster, and file-partition strategy. Decide whether to use the parallelized form (§11) or the sequential Phase 1-4 form (this section).
-6. **Open a fresh worktree** off `main` (PR #54 will be closed per §6 default; the implementation branch starts clean from `main`).
-   ```sh
-   APP_ROOT=/Users/cgrant/.pi/agent/git/github.com/demetere/pi-hive
-   git worktree add .worktrees/refactor-budget-pi-native -b refactor/budget-pi-native main
-   ln -s "$APP_ROOT/node_modules" "$APP_ROOT/.worktrees/refactor-budget-pi-native/node_modules"
-   ln -s "$APP_ROOT/ui/web/node_modules" "$APP_ROOT/.worktrees/refactor-budget-pi-native/ui/web/node_modules"
-   ```
-7. **Pick a phase to start** (Phase 1, 2, 3, or 4). Each task within a phase is self-contained. **Or**, if multi-agent, follow the Wave 0 → 1 → 2 → 3 → 4 → 5 structure from §11.
-8. **Follow the per-task test plan and gate.** Don't move to the next task until the gate passes.
-9. **Restart the running server** after editing budget modules (stale-process trap).
-10. **Open one PR per phase** (or one PR for the whole refactor — preference per user).
-11. **Wait for user merge** per AGENTS.md.
+6. **Open a per-phase worktree** under `APP_ROOT/.worktrees/` — NOT a single mega-branch. The base is the **current HEAD of the local `refactor-budget` branch** (the staging branch for this work), NOT `main` and NOT a remote ref. As `refactor-budget` advances with doc/SDK fixes, those advances flow into every new phase worktree.
 
-If blocked, surface the blocker to the user via `ask_user` (inline mode, AGENTS.md-compliant). Do not invent workarounds.
+   ```sh
+   # From APP_ROOT, with the user-confirmed base.
+   git fetch origin refactor/budget
+   git worktree add .worktrees/refactor-budget-<phase>-<task> -b refactor/budget-<phase>-<task> origin/refactor/budget
+   cd .worktrees/refactor-budget-<phase>-<task>
+   ln -s ../../node_modules node_modules   # two levels under APP_ROOT/ — see AGENTS.md
+   ```
+
+   Naming pattern (per `README.md` §1):
+   - Coordinator (Wave 0): `refactor/budget-f0-contracts`
+   - Worker (F1 primitives): `refactor/budget-f1-primitives`
+   - Worker (F5 T5.3 alone): `refactor/budget-t5-3-respawn-dispose`
+   - Worker (F13 dashboard): `refactor/budget-f13-dashboard`
+   - etc.
+
+7. **Pick a phase to start** (Phase 1, 2, 3, or 4). Each task within a phase is self-contained. **Or**, if multi-agent, follow the Wave 0 → 1 → 2 → 3 → 4 → 5 structure from §11. The coordinator owns the wave sequencing.
+8. **Follow the per-task TDD plan and gate.** Write the test first (red), implement (green), refactor. Don't move to the next task until the gate passes. Regression tests required for any bug being fixed (see §0.6).
+9. **Restart the running server** after editing budget modules (stale-process trap).
+10. **Open one PR per phase or task** from the per-phase branch — NEVER a single PR from a mega-branch. PR title follows Conventional Commits. Wait for coordinator + user approval before merge per AGENTS.md.
+11. **Write a session log** in `sessions/<date>-<your-role>-<phase>.md` before ending the session per the template in `sessions/README.md`.
+
+If blocked, surface the blocker to the user via `ask_user` (inline mode, AGENTS.md-compliant). Do not invent workarounds. Do not defer — if you can't decide, ask.
 
 ---
 
@@ -1709,14 +1756,27 @@ See `05-parallelization-analysis.md` §11 for the full risk register. Key items:
 
 - **File-collision in Wave 3** (3 agents editing `worker-tools.ts`) — mitigated by line-range partition.
 - **Schema-evolution drift** (Agent 1A's checker vs. Agent 1B's resolved type) — mitigated by Wave 0 contract lock.
-- **SDK-chain research for T5.6** — Agent 3C must read local SDK d.ts at `/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.d.ts` before implementing `restoreWorkerSession`.
+- **SDK-chain research for T5.6** — Agent 3C must read local SDK d.ts at `node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.d.ts` (within their per-phase worktree) before implementing `restoreWorkerSession`. The SDK version pinned in `refactor-budget`'s `package.json` (currently `0.99.1`) is the source of truth.
 - **Test-fixture determinism for F7** — Agent 4A must use fake-session factories, not real SDK timing.
 - **Stale-process trap** — every Wave 3+ agent that touches budget modules / dispatch.ts must restart the running server per AGENTS.md / HANDOFF pitfall #1.
 - **PR #54 disposition** — close PR #54 between Wave 0 and Wave 1 (user action) so the refactor branch is uncontaminated.
 
 ### 11.12 Wave-by-wave commit policy
 
-Each agent commits its work to the same branch (`refactor/budget-pi-native`). The user opens one PR at Wave 5 end. Per-agent commit messages follow Conventional Commits (per AGENTS.md):
+**Each worker has its own per-phase branch.** Per `README.md` §1 and the coordinator + worker model in `05-parallelization-analysis.md` §0.5, there is no shared mega-branch. Wave 0 → 5 work happens across distinct per-phase worktrees, each with its own branch and PR.
+
+| Wave | Per-phase branches | Typical worktree paths |
+|---|---|---|
+| Wave 0 | `refactor/budget-f0-contracts` | `.worktrees/refactor-budget-f0-contracts/` |
+| Wave 1 | `refactor/budget-f1-primitives`, `refactor/budget-f6-schema` (parallel) | respective worktree dirs |
+| Wave 2 | `refactor/budget-f2-delegate` | `.worktrees/refactor-budget-f2-delegate/` |
+| Wave 3 | `refactor/budget-f3-live-tracking`, `refactor/budget-f4-end-of-run`, `refactor/budget-f5-eol-commands`, `refactor/budget-f13-dashboard` (parallel) | respective worktree dirs |
+| Wave 4 | `refactor/budget-f7-races`, `refactor/budget-f8-reload` (parallel) | respective worktree dirs |
+| Wave 5 | `refactor/budget-f9-legacy-cleanup`, `refactor/budget-f10-reviews`, `refactor/budget-f12-migration-guide` (parallel) | respective worktree dirs |
+
+The base for every per-phase worktree is the **current HEAD of `refactor-budget`** (the local staging branch), NOT `main` and NOT a remote ref. As `refactor-budget` advances (documentation, SDK bumps, test fixes), every new phase worktree picks up the latest state.
+
+Per-task commit messages follow Conventional Commits (per AGENTS.md). Examples:
 
 - Wave 0: `chore(refactor): add budget module stubs and interface contracts`
 - Wave 1: `feat(budget): add primitives`, `feat(config): add nested schema with kebab-case keys`, `docs: add budget-config-v2 migration guide`, `refactor(summarize-progress): use appendCustomMessageEntry`
@@ -1724,6 +1784,8 @@ Each agent commits its work to the same branch (`refactor/budget-pi-native`). Th
 - Wave 3: `feat(budget): wire live tracking and end-of-run finalization`, `feat(budget): add 5 stop/pause/resume operator commands`, `feat(budget): add 3 branch/clone operator commands`, `feat(budget): add 3 cooperative shutdown tools`
 - Wave 4: `test(budget): pin race-condition paths`, `test(budget): pin reload-stable behavior`
 - Wave 5: `chore(refactor): delete legacy governance and budget-strategy modules`, `chore(refactor): apply reviewer sign-off fixes`, `chore(refactor): open PR and wait for user merge`
+
+The coordinator ticks `[ ]` to `[x]` in this plan as each worker's PR merges. Worker session logs in `sessions/` track day-by-day progress; the coordinator's session log tracks phase state across the wave structure.
 
 ---
 

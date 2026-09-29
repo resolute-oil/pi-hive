@@ -1,33 +1,36 @@
 # 00 — Scope and methodology
 
-**Review:** Budget strategies redesign
-**Date:** 2026-09-28
+**Review + active refactor:** Budget strategies redesign
+**Date:** 2026-09-28 (initial review); 2026-09-29 (refactor plan + workflow redesign)
 **Author branch:** `review/budget-redesign-2026-09-28`
-**Baseline:** `feat/budget-strategy` at `9f950fb` (PR #54 open)
-**Reviewer:** Pi-hive redesign review session
+**Baseline:** `feat/budget-strategy` at `9f950fb` (PR #54 open, recommended for closure)
+**SDK reference verified against:** `@earendil-works/pi-coding-agent@0.99.1`
+**Implementation:** per-phase worktrees under `APP_ROOT/.worktrees/` — see `README.md` and `05-parallelization-analysis.md`. NO mega-branch. Each per-phase worktree is based off the **current HEAD of the local `refactor-budget` staging branch** (NOT `main` and NOT a remote ref). As `refactor-budget` advances with doc/SDK fixes, those advances flow into every new phase worktree.
 
 ## Goal
 
-Produce a **plan**, not code. The deliverable is a structured set of documents and HTML reports describing:
+This deliverable is **a structured set of documents** that:
 
-1. How the current budget enforcement code works, end to end.
-2. Why the `fresh=true` budget-reset bug has resisted several rounds of fixes.
-3. How the current design aligns with or diverges from Pi-documented patterns.
-4. Multiple refactor options with explicit trade-offs.
-5. A single recommended path with a sequenced implementation plan, including migration strategy and test strategy.
+1. Describes how the current budget enforcement code works, end to end.
+2. Diagnoses why the `fresh=true` budget-reset bug has resisted several rounds of fixes.
+3. Audits how the current design aligns with or diverges from Pi-documented patterns.
+4. Specifies a single recommended refactor path — a sequenced implementation plan (`04-refactor-plan.md`) that the coordinator + worker sessions execute per the working conventions in `README.md`.
+5. Documents the multi-agent execution strategy — coordinator + worker model, per-phase worktrees, wave structure (`05-parallelization-analysis.md`).
 
-The actual refactor is **out of scope** for this branch. The user explicitly asked for "a different approach" after three sessions of incremental fixes on `feat/budget-strategy`; the review treats that branch as data, not as the destination.
+The actual refactor is implemented by **worker sessions** picking up individual phases or tasks from the plan. The review branch `review/budget-redesign-2026-09-28` is for documentation only and is NOT pushed.
+
+The user explicitly asked for "a different approach" after three sessions of incremental fixes on `feat/budget-strategy`; the refactor treats that branch as data, not as the destination, and replaces the budget system entirely.
 
 ## What is in scope
 
-| Area | Question this review answers |
+| Area | Question this review + refactor answers |
 |---|---|
 | Current code | What does the budget system do today, line by line? |
 | Bug analysis | Why does the third-mystery `fresh=true` bug persist despite Bug 1 + Bug 2 fixes? |
 | Pi-docs alignment | Does the current design follow Pi's documented extension patterns? |
-| Compound-engineering skills | Which skills are the highest-leverage inputs to a redesign? |
-| Refactor options | What are 3–4 distinct ways to redesign the budget layer? |
-| Recommendation | Which option best fits the project's constraints? |
+| Refactor plan | What does the new budget system look like? What gets removed, what replaces it? |
+| Working conventions | How do coordinator + worker sessions coordinate? Where do worktrees live? What's the TDD + regression-test discipline? |
+| Multi-agent execution | How does the work parallelize across 6 waves? Which agent works which task? |
 | Migration plan | How do we get from here to there without breaking the codebase? |
 | Test strategy | How do we keep the budget guarantees testable after the redesign? |
 

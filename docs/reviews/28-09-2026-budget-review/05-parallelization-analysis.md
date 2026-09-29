@@ -1,10 +1,10 @@
 # Parallelization analysis — budget system refactor
 
-**Date:** 2026-09-28
+**Date:** 2026-09-28 (initial); 2026-09-29 (workflow redesign — coordinator + worker model, per-phase worktrees)
 **Companion to:** `04-refactor-plan.md`
-**Question:** How can the refactor's 13 features (F1-F13, 69 task checkboxes) be split across `Agent` subagents for parallel execution, given that function/interface contracts can be agreed upon before implementation begins?
+**Question:** How can the refactor's 13 features (F1-F13, 69+ task checkboxes) be split across `Agent` subagents for parallel execution, given that function/interface contracts can be agreed upon before implementation begins?
 
-**Answer:** The 13 features decompose into **16 sub-agent invocations across 6 waves**, with wall-clock roughly 5-7 waves deep. The plan's narrative Phase 1 → 4 ordering understates the parallelization potential — about 70% of the work can run concurrently if Wave 0 contract agreement lands first.
+**Answer:** The 13 features decompose into **16 sub-agent invocations across 6 waves**, executed by one coordinator session and a stream of worker sessions, each working in a per-phase worktree under `APP_ROOT/.worktrees/`. Wall-clock roughly 5-7 waves deep. The plan's narrative Phase 1 → 4 ordering understates the parallelization potential — about 70% of the work can run concurrently if Wave 0 contract agreement lands first.
 
 ---
 
@@ -12,36 +12,87 @@
 
 **The dependency graph is sparser than the plan's narrative order suggests.** Many tasks labeled "Phase 2" only need their *interface* to be agreed upon — once the Wave 0 stubs exist with correct TypeScript signatures, four parallel tracks can split the work.
 
+**Coordination model:** **one coordinator session** owns `04-refactor-plan.md` and `sessions/`. **Worker sessions** pick up individual phases or tasks and work in **per-phase worktrees** (e.g., `.worktrees/refactor-budget-f5-eol-commands/`, branch `refactor/budget-f5-eol-commands`). Sub-agents within a worker session follow the same conventions.
+
 **Wall-clock:** ~5-7 waves deep instead of 13 sequential features.
-**Sub-agents:** 16 invocations across 6 waves.
-**Critical prerequisite:** Wave 0 (a single ~30 min sub-agent that defines all interface contracts as `throw new Error("not implemented")` stubs that pass typecheck).
-**Hard-sequential bottlenecks:** Wave 2 (F2 `delegateAgent` spine), Wave 5 cleanup + reviews.
-**Out-of-band:** F13 dashboard UI can run fully parallel to backend work.
+**Sub-agents:** 16 invocations across 6 waves, plus the coordinator session that owns the plan and tracks progress.
+**Critical prerequisite:** Wave 0 (a single ~30 min sub-agent that defines all interface contracts as `throw new Error("not implemented")` stubs that pass typecheck). Coordinator MUST tick the Wave 0 boxes in the plan before any worker session starts.
+**Hard-sequential bottlenecks:** Wave 2 (F2 `delegateAgent` spine), Wave 5 cleanup + reviews. Between waves, coordinator reviews merged work before opening the next wave.
+**Out-of-band:** F13 dashboard UI can run fully parallel to backend work, in its own worktree.
+**No mega-branch.** Implementation does NOT happen on a single `refactor/budget-pi-native` branch. Each phase or task gets its own worktree, branch, and PR per the working conventions in `README.md`.
 
 ---
 
+## 0.5 Coordinator + worker model
+
+The refactor runs as **one coordinator session** that owns the plan and `sessions/`, plus a stream of **worker sessions** that pick up individual phases or tasks. Sub-agents within a worker session follow the same conventions.
+
+**Coordinator session** (one at a time, owns the plan):
+
+- Maintains `04-refactor-plan.md` checkboxes. When a worker reports a task complete (with passing gate and PR opened), the coordinator ticks `[ ]` to `[x]`.
+- Maintains `sessions/` directory. Each session writes a log per the template in `sessions/README.md`. The coordinator's own log tracks phase completion, escalations, and worker handoff notes.
+- Reviews worker PR diffs before opening the next phase. If a worker's PR has issues, the coordinator routes them back to the worker (does NOT silently fix or silently accept).
+- Escalates ambiguous decisions to the user via `ask_user` (inline mode). Never defers without permission.
+- Owns the worktree-creation pattern (below) and verifies each new worker is in a correctly-named per-phase worktree before opening their first PR.
+
+**Worker session** (one per phase or task, owns that work):
+
+- Picks up a phase from the plan based on coordinator's handoff.
+- Creates a per-phase worktree under `APP_ROOT/.worktrees/` with the naming convention from §0.5 in `README.md` (e.g., `.worktrees/refactor-budget-f5-eol-commands/`, branch `refactor/budget-f5-eol-commands`).
+- TDD throughout (red-green-refactor per `README.md` §2). Test first, then implement.
+- Adds regression tests for every bug fixed (T7.6 captures the user-reported fresh=true symptom).
+- Removes pre-existing conflicting code per `04-refactor-plan.md` §0.5 removal policy. When in doubt, `ask_user`.
+- Commits per task. Pushes to `origin` (never `upstream` per AGENTS.md). Opens a PR. Does NOT merge — waits for coordinator + user.
+- Writes a session log in `sessions/<date>-<agent>-<phase>.md` per the template.
+- Uses `ask_user` for ambiguous decisions. Never defers — if blocked, asks.
+
+**Sub-agent invocations within a worker session** (per §2-§4 below):
+
+- Follow the same TDD / regression-test / no-defer / ask_user / session-log conventions.
+- The invoking worker session writes the sub-agent invocation summary into its session log.
+- Sub-agents do NOT push branches or open PRs directly; the parent worker session owns the branch.
+
+**Worktree creation pattern (the canonical command):**
+
+```sh
+# From APP_ROOT, with the user-confirmed base.
+# Base is the current HEAD of the local `refactor-budget` staging branch
+# (NOT main, NOT a remote ref) — see README.md §1.
+git fetch origin refactor/budget
+REFACTOR_BUDGET=$(git rev-parse origin/refactor/budget)
+git worktree add .worktrees/refactor-budget-<phase>-<task> \
+  -b refactor/budget-<phase>-<task> "$REFACTOR_BUDGET"
+cd .worktrees/refactor-budget-<phase>-<task>
+ln -s ../../node_modules node_modules   # two levels under APP_ROOT/ — see AGENTS.md
+# work happens here; commits land on this branch; PR opened from here
+```
+
+After the PR merges, `git worktree remove .worktrees/refactor-budget-<phase>-<task>` per AGENTS.md. The coordinator ticks the corresponding `[ ]` in `04-refactor-plan.md` to `[x]`, and `refactor-budget` advances (the merged work becomes part of the base for the next phase worktree).
+
 ## 1. Dependency graph (derived from the plan)
 
-| Task | Hard dependencies | Touched files |
-|---|---|---|
-| T1.1 module skeleton | none | `src/engine/budget/{ledger,policy,strategy,events,worker-tools,index}.ts` (stubs) |
-| T1.2 BudgetLedger | T1.1 (interface stub) | `src/engine/budget/ledger.ts`, `tests/budget-ledger.test.ts` |
-| T1.3 BudgetPolicy | T1.1 | `src/engine/budget/policy.ts`, `tests/budget-policy.test.ts` |
-| T1.4 WorkerBudgetStrategy | T1.1 | `src/engine/budget/strategy.ts` |
-| T2.1 installBudgetEventHooks | T1.2, T1.3 | `src/engine/budget/events.ts` |
-| T2.2 delegateAgent | T2.1, F6 schema (resolved policy type) | `src/engine/budget/worker-tools.ts`, `src/engine/dispatch.ts` |
-| T2.3 depth cap | T1.3, T2.2 | `src/engine/budget/policy.ts` |
-| T3.x (live tracking) | T2.1 (subscribed events) | `src/engine/budget/events.ts` |
-| T4.x (end-of-run) | T2.1 | `src/engine/budget/events.ts`, `src/engine/dispatch.ts` |
-| T5.1-T5.12 (operator commands + cooperative tools) | T1.2, T1.3, T2.1 | `src/engine/budget/worker-tools.ts`, `src/agents/tools/summarize-progress.ts` |
-| T6.1-T6.10 (config schema) | none within itself | `src/core/{types,schema,config-validation}.ts`, `src/agents/frontmatter.ts` |
-| T7.x (race tests) | T2.2, T3.x, T4.x — **can be authored against interfaces** | `tests/budget-races.test.ts` |
-| T8.x (reload tests) | same as T7.x | `tests/budget-reload.test.ts` |
-| T9.x (legacy cleanup) | every consumer of `governance.ts` updated | `git rm src/engine/governance.ts`, `git rm src/engine/budget-strategy.ts`, dispatch.ts slimming |
-| T10.x (reviewer sign-off) | full diff complete | reviewer outputs |
-| T11.x (PR merge) | all the above | `gh pr` actions |
-| T12.x (migration guide) | F6 spec finalized | `docs/migrations/budget-config-v2.md` |
-| T13.x (dashboard UI) | F5 commands spec'd (already done in §2.8 of plan) | `ui/web/src/**` |
+Each task belongs to a phase (F1-F13). Per the working conventions, each phase or task runs in **its own per-phase worktree** with its own branch. The dependency graph below tracks which phases can run in parallel; within a phase, tasks with no internal dependency can also parallelize but typically run in sequence within the same worker session.
+
+| Phase | Hard dependencies | Touched files | Worktree branch |
+|---|---|---|---|
+| Wave 0 (T1.1) module skeleton + interface contracts | none | `src/engine/budget/{ledger,policy,strategy,events,worker-tools,index}.ts` (stubs) | `refactor/budget-f0-contracts` |
+| F1 (T1.2-T1.4) Budget primitives | Wave 0 | `src/engine/budget/{ledger,policy,strategy}.ts`, `tests/budget-{ledger,policy,strategy}.test.ts` | `refactor/budget-f1-primitives` |
+| F2 (T2.1-T2.3) `delegateAgent` spine + hooks | F1, F6 | `src/engine/budget/{events,worker-tools}.ts`, `src/engine/dispatch.ts` | `refactor/budget-f2-delegate` |
+| F3 (T3.1-T3.6) Live tracking + `tool_call` blocking + `agent_before_settle` | F2 | `src/engine/budget/events.ts`, tests | `refactor/budget-f3-live-tracking` |
+| F4 (T4.1-T4.x) End-of-run on `agent_settled` | F2 | `src/engine/budget/events.ts`, `src/engine/dispatch.ts` | `refactor/budget-f4-end-of-run` |
+| F5 (T5.1-T5.12) Six EOL/respawn commands + cooperative tools | F2, F3, F4 | `src/engine/budget/worker-tools.ts`, `src/agents/tools/summarize-progress.ts` | `refactor/budget-f5-eol-commands` |
+| F5 T5.3 alone | F2, F3, F4 | `src/engine/budget/worker-tools.ts`, `tests/budget-eol.test.ts` | `refactor/budget-t5-3-respawn-dispose` |
+| F5 T5.6 alone (restoreWorkerSession SDK chain) | F2, F3, F4 | `src/engine/budget/worker-tools.ts` | `refactor/budget-t5-6-restore-chain` |
+| F6 (T6.1-T6.10) Config schema + migration | none within itself | `src/core/{types,schema,config-validation}.ts`, `src/agents/frontmatter.ts` | `refactor/budget-f6-schema` |
+| F7 (T7.1-T7.6) Race-safe accounting + regression tests | F2-F5 | `tests/budget-races.test.ts`, `tests/budget-eol.test.ts` | `refactor/budget-f7-races` |
+| F8 (T8.x) Reload-stable | F2-F5 | `tests/budget-reload.test.ts` | `refactor/budget-f8-reload` |
+| F9 (T9.x) Legacy cleanup | every consumer of `governance.ts` updated | `git rm src/engine/governance.ts`, `git rm src/engine/budget-strategy.ts`, dispatch.ts slimming | `refactor/budget-f9-legacy-cleanup` |
+| F10 (T10.x) Reviewer sign-off | full diff complete | reviewer outputs | `refactor/budget-f10-reviews` |
+| F11 (T11.x) PR merge | F10 | `gh pr` actions | (coordinator opens, never merges alone — user merges per AGENTS.md) |
+| F12 (T12.x) Migration guide | F6 spec finalized | `docs/migrations/budget-config-v2.md` | `refactor/budget-f12-migration-guide` |
+| F13 (T13.x) Dashboard intervention UI | F5 commands spec'd (already done in §2.8 of plan) | `ui/web/src/**` | `refactor/budget-f13-dashboard` |
+
+**Each row is its own worktree.** The worktree lives at `APP_ROOT/.worktrees/refactor-budget-<phase-or-task>/` and the branch name MUST match. Coordinator opens each phase's PR; user merges after coordinator + reviewer sign-off.
 
 **Key insight from §2.3, §2.8, §2.10 of `04-refactor-plan.md`:** every operator command, every cooperative tool, and the config schema already have *specified signatures*. The plan describes the wire contract. The interfaces are the only thing blocking parallel implementation.
 
@@ -390,11 +441,11 @@ The plan's gate-after-every-task discipline is preserved: each agent's tasks hav
 
 ## 14. What this analysis assumes
 
-1. **AGENTS.md file-edits-in-worktree rule applies** — every agent works in the same worktree (`refactor/budget-pi-native` off `main`) but on disjoint files. The user opens one PR at Wave 5 end.
+1. **AGENTS.md file-edits-in-worktree rule applies** — but per-phase worktrees, NOT one mega-branch. Each worker has its own worktree under `APP_ROOT/.worktrees/refactor-budget-<phase>-<task>/`, each based off the **current HEAD of the local `refactor-budget` staging branch** (NOT `main` and NOT a remote ref). Each worker opens its own PR. The coordinator reviews PRs as they land.
 2. **Each sub-agent has Bash + Read + Edit + Write** (general-purpose subagent type, per AGENTS.md tool selection).
-3. **The Wave 0 contract-agreement is its own sub-agent task** — short, focused, single file set. Should not exceed 30 min.
+3. **The Wave 0 contract-agreement is its own sub-agent task** — short, focused, single file set. Should not exceed 30 min. Lives on branch `refactor/budget-f0-contracts`.
 4. **The plan's interface specifications are accurate** — §2.3, §2.5, §2.8, §2.10, §2.13 of `04-refactor-plan.md` are the source of truth for what each Wave 0 stub must declare. If anything in those sections is wrong, Wave 0 is the place to catch it (via typecheck), before downstream agents depend on it.
-5. **The plan's F1-F13 narrative is faithful to the SDK reality** — `appendCustomEntry`, `appendCustomMessageEntry`, `getBranch()`, `session.abort()`, `session.dispose()`, `session.compact()`, `session.abortCompaction()`, `session.waitForIdle()`, `branchWithSummary()`, `createBranchedSession()` all behave as the SDK reference doc (`raw-evidence/pi-sdk-session-api.md`) describes. If a future SDK release changes behavior, T5.x commands will need SDK-chain research before implementation.
+5. **The plan's F1-F13 narrative is faithful to the SDK reality** — `appendCustomEntry`, `appendCustomMessageEntry`, `getBranch()`, `session.abort()`, `session.dispose()`, `session.compact()`, `session.abortCompaction()`, `session.waitForIdle()`, `branchWithSummary()`, `createBranchedSession()` all behave as the SDK reference doc (`raw-evidence/pi-sdk-session-api.md`) describes. SDK version pinned: `@earendil-works/pi-coding-agent@0.99.1`. If a future SDK release changes behavior, T5.x commands will need SDK-chain research before implementation.
 
 ---
 
@@ -402,36 +453,41 @@ The plan's gate-after-every-task discipline is preserved: each agent's tasks hav
 
 A future session picking up this work and running it in parallel-agent mode should:
 
-1. **Read `04-refactor-plan.md` first** (the implementation plan).
-2. **Read this file** (parallelization analysis) — establishes the wave structure and agent roster.
-3. **Decide on T6.9 (C5 structured strategies)** — confirm with user before Wave 1 starts (or accept the default: defer to v3).
-4. **Close PR #54** before Wave 0 (user action per plan §6.2).
-5. **Open a fresh worktree** off `main`:
+1. **Read `README.md` first** — working conventions (worktree naming, TDD, no-defer, ask_user, removal policy, session logs).
+2. **Read `04-refactor-plan.md`** — the implementation plan; §0.5 working conventions, §0.6 regression-test policy.
+3. **Read this file** (parallelization analysis) — establishes the wave structure, agent roster, and per-phase worktree naming.
+4. **Decide on T6.9 (C5 structured strategies)** — confirm with user before Wave 1 starts (or accept the default: defer to v3).
+5. **Close PR #54** before Wave 0 (user action per plan §6.2).
+6. **Coordinator opens the Wave 0 contracts worktree** based off the current HEAD of `refactor-budget`:
    ```sh
    APP_ROOT=/Users/cgrant/.pi/agent/git/github.com/demetere/pi-hive
-   git worktree add .worktrees/refactor-budget-pi-native -b refactor/budget-pi-native main
-   ln -s "$APP_ROOT/node_modules" "$APP_ROOT/.worktrees/refactor-budget-pi-native/node_modules"
-   ln -s "$APP_ROOT/ui/web/node_modules" "$APP_ROOT/.worktrees/refactor-budget-pi-native/ui/web/node_modules"
+   cd "$APP_ROOT"
+   git fetch origin refactor/budget
+   git worktree add .worktrees/refactor-budget-f0-contracts -b refactor/budget-f0-contracts origin/refactor/budget
+   cd .worktrees/refactor-budget-f0-contracts
+   ln -s ../../node_modules node_modules   # two levels under APP_ROOT/ — see AGENTS.md
    ```
-6. **Run Wave 0** (1 sub-agent, ~30 min) — locks all interface contracts.
-7. **Run Wave 1** (4 sub-agents in parallel) — F1, F6, F12, T5.7 in disjoint files.
-8. **Run Wave 2** (1 sub-agent) — F2 spine. Sequential after Wave 1.
-9. **Run Wave 3** (4 sub-agents in parallel) — F3+F4, three F5 sub-tracks.
-10. **Run Wave 4** (2 sub-agents in parallel) — F7 races, F8 reload. (Or earlier, in parallel with Waves 1-3.)
-11. **Run Wave 5** (3 sequential sub-agents) — F9 cleanup, F10 reviews, F11 merge.
-12. **Out-of-band:** Agent 6 (F13 dashboard) runs anytime after Wave 0, recommended after Wave 3.
-13. **Commit per agent** to the same branch; the user opens one PR at Wave 5 end.
-14. **Wait for user merge** per AGENTS.md.
+7. **Run Wave 0** (coordinator as 1 sub-agent, ~30 min) — locks all interface contracts. PR opens from the worktree, lands to `refactor-budget` after user merge per AGENTS.md.
+8. **Run Wave 1** (coordinator spawns 4 worker sub-agents in parallel) — F1, F6, F12, T5.7 in disjoint files. Each worker opens its own per-phase worktree based off the post-Wave-0 `refactor-budget` HEAD.
+10. **Run Wave 2** (1 worker sub-agent) — F2 spine. Sequential after Wave 1.
+11. **Run Wave 3** (4 worker sub-agents in parallel) — F3+F4, three F5 sub-tracks.
+12. **Run Wave 4** (2 worker sub-agents in parallel) — F7 races, F8 reload. (Or earlier, in parallel with Waves 1-3.)
+13. **Run Wave 5** (3 sequential worker sub-agents) — F9 cleanup, F10 reviews, F11 merge.
+14. **Out-of-band:** Worker for F13 dashboard runs anytime after Wave 0, recommended after Wave 3, in its own per-phase worktree (`refactor/budget-f13-dashboard`).
+15. **Each worker commits per task to its own per-phase branch** and opens a PR. The coordinator reviews and ticks `[ ]` to `[x]` in `04-refactor-plan.md` as PRs merge.
+16. **Wait for user merge** per AGENTS.md. The coordinator NEVER merges alone.
 
 ---
 
 ## 16. Cross-references
 
+- **`README.md`** — working conventions (worktree naming, TDD, no-defer, ask_user, removal policy, session logs)
 - **`04-refactor-plan.md`** — the implementation plan this analysis decomposes
 - **`01-current-state-analysis.md`** — the 9 structural issues the plan addresses
-- **`raw-evidence/pi-sdk-session-api.md`** — verified SDK reference for every interface contract
+- **`raw-evidence/pi-sdk-session-api.md`** — verified SDK reference for every interface contract (validated against 0.99.1)
 - **`pi-docs/extension-patterns-reference.md`** — Pi patterns applied across the plan
 - **`review-runs/spec-flow-review.md`** — 30 gaps + 18 questions driving the plan's correctness
+- **`sessions/`** — session logs for every coordinator + worker session
 - **`AGENTS.md`** — worktree rule, `ask_user` discipline, no-upstream-push rule
 
 ---
