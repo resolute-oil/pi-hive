@@ -70,12 +70,14 @@ import {
 import type { AgentConfig, HiveState } from "../../core/types";
 import { agentSlug } from "../../core/utils";
 import { currentDelegationDepth } from "../session";
+import type { CompactionResult } from "@earendil-works/pi-coding-agent";
 import { resolveRuntime } from "../agent-lookup";
 import { BUDGET_LEDGER_CUSTOM_TYPE, BudgetLedger } from "./ledger";
 import { checkBudgetPolicy } from "./policy";
 import { resolveWindow } from "./window-resolver";
 import { installBudgetEventHooks } from "./events";
 import type {
+  BudgetLedgerEntry,
   BudgetExhaustedError as _BudgetExhaustedError,
   DelegateAgentResult,
   RequestCompactionArgs,
@@ -564,44 +566,232 @@ export async function delegateAgent(
 }
 
 // ---------------------------------------------------------------------------
-// §2.8 Operator commands (7 total: end, compact, respawn, pause, snapshot,
-//      restore, resume) + abortWorkerCompaction.
-// ---------------------------------------------------------------------------
-// These belong to Wave 5 / F5, not F2. The stubs throw "not implemented"
-// until F5 lands. They are kept here so the Wave 0 export surface stays
-// stable (downstream code imports them but never calls them in F2).
+// §2.8 Operator commands — Wave 3B implementations (F5 stop/pause/resume).
+//
+// Wave 3B owns five of the seven operator commands. Each operates on a
+// single EXISTING session (no branching): `end`, `compact`, `pause`,
+// `resume`, `abortWorkerCompaction`. The other six commands (respawn,
+// snapshot, restore, plus the three cooperative tools) remain stubs until
+// Wave 3C / 3D land.
+//
+// Source of truth: docs/reviews/28-09-2026-budget-review/04-refactor-plan.md
+//   §2.8 — operator command wire contracts
+//   §3.5 — F5 details (T5.1, T5.2, T5.4, T5.8, T5.9)
+//   §6.2 — `session.dispose()` NOT called by `endWorkerSession` (G-06);
+//           `resumeWorkerSession` added per G-04; `abortWorkerCompaction`
+//           added per G-05.
 // ---------------------------------------------------------------------------
 
-/** `session.abort() + appendCustomEntry` — graceful stop, slot released. */
+/**
+ * Bundle of live state for an in-flight worker session. Each operator
+ * command receives the same handle: the live `AgentSession` (for SDK
+ * lifecycle calls), the worker's `BudgetLedger` (for snapshot writes),
+ * and the resolved `WorkerBudgetPolicy` (for snapshot signatures).
+ *
+ * The session manager lives inside the `BudgetLedger` (`ledger`'s
+ * constructor captures it) — callers do NOT need to pass it again.
+ */
+export interface WorkerSessionHandle {
+  session: AgentSession;
+  ledger: BudgetLedger;
+  policy: WorkerBudgetPolicy;
+}
+
+/** Returned by every Wave 3B operator command. */
+export interface OperatorCommandResult {
+  sessionId: string;
+  ledgerSnapshot: BudgetLedgerEntry;
+}
+
+/**
+ * T5.1 — `endWorkerSession(agent, reason)` (plan §3.5).
+ *
+ * Calls `session.abort()` and writes a ledger snapshot with
+ * `kind: "end"`. Per plan §6.2, the session is NOT disposed — the
+ * reference is preserved so a follow-up `resumeWorkerSession` can re-attach
+ * the event hooks and continue from where it left off.
+ *
+ * Returns the session id and the snapshot entry that was just written.
+ * The session reference is left to the caller; `endWorkerSession` does not
+ * invalidate it.
+ */
 export async function endWorkerSession(
   _args: WorkerOperatorArgs,
-  _ctx: ExtensionContext,
-): Promise<{ ok: true; ledger: BudgetLedger }> {
-  throw new Error("not implemented");
+  ctx: ExtensionContext,
+  handle: WorkerSessionHandle,
+): Promise<OperatorCommandResult> {
+  // Plan §6.2: do NOT dispose. The session reference stays valid; a later
+  // `resumeWorkerSession` call re-attaches event hooks on the SAME session.
+  await handle.session.abort();
+  const stats = handle.session.getSessionStats();
+  handle.ledger.snapshot(stats, handle.policy, "end", ctx.signal);
+  return {
+    sessionId: handle.session.sessionId,
+    ledgerSnapshot: lastLedgerEntry(handle.ledger, "end"),
+  };
 }
 
-/** `session.compact(customInstructions?)` — SDK compaction; slot preserved. */
+/**
+ * T5.2 — `compactWorkerSession(agent, reason, customInstructions?)`.
+ *
+ * Calls `session.compact(customInstructions)`, writes a ledger snapshot
+ * with `kind: "compact"`, and returns the compaction result alongside the
+ * snapshot. If the SDK compaction throws (e.g., policy rejected the
+ * summary), the error propagates and no ledger snapshot is written — the
+ * ledger stays at its pre-call state so the caller can decide whether to
+ * retry or fall back to `abortWorkerCompaction`.
+ */
+export interface CompactWorkerSessionResult extends OperatorCommandResult {
+  compaction: CompactionResult;
+}
+
 export async function compactWorkerSession(
   _args: WorkerOperatorArgs,
-  _ctx: ExtensionContext,
-  _customInstructions?: string,
-): Promise<{ ok: true; ledger: BudgetLedger }> {
-  throw new Error("not implemented");
+  ctx: ExtensionContext,
+  handle: WorkerSessionHandle,
+  customInstructions?: string,
+): Promise<CompactWorkerSessionResult> {
+  const compaction = await handle.session.compact(customInstructions);
+  // Snapshot AFTER compact completes — `getSessionStats()` now reflects the
+  // post-compaction token total. The earlier `recordCompaction` handler in
+  // events.ts already updated the in-memory cumulative from the
+  // `compaction_end` event, so the snapshot records the new baseline.
+  const stats = handle.session.getSessionStats();
+  handle.ledger.snapshot(stats, handle.policy, "compact", ctx.signal);
+  return {
+    sessionId: handle.session.sessionId,
+    ledgerSnapshot: lastLedgerEntry(handle.ledger, "compact"),
+    compaction,
+  };
 }
+
+/**
+ * T5.4 — `pauseWorkerSession(agent, reason)`.
+ *
+ * Calls `session.waitForIdle()` and writes a ledger snapshot with
+ * `kind: "pause"`. The session stays open but is now idle — a follow-up
+ * `resumeWorkerSession` re-attaches the event hooks and the next
+ * `session.prompt(...)` continues from where it paused.
+ *
+ * Wait ordering: the snapshot is written AFTER `waitForIdle()` so the
+ * ledger's `cumulative.tokens` reflects the final pre-pause total
+ * (`getSessionStats()` returns the post-final-message state).
+ */
+export async function pauseWorkerSession(
+  _args: WorkerOperatorArgs,
+  ctx: ExtensionContext,
+  handle: WorkerSessionHandle,
+): Promise<OperatorCommandResult> {
+  await handle.session.waitForIdle();
+  const stats = handle.session.getSessionStats();
+  handle.ledger.snapshot(stats, handle.policy, "pause", ctx.signal);
+  return {
+    sessionId: handle.session.sessionId,
+    ledgerSnapshot: lastLedgerEntry(handle.ledger, "pause"),
+  };
+}
+
+/**
+ * T5.8 — `resumeWorkerSession(agent)` (G-04).
+ *
+ * Counterpart to `pauseWorkerSession`. Re-attaches the budget event hooks
+ * on the existing session reference and writes a ledger snapshot with
+ * `kind: "resume"`. The session continues from where it paused.
+ *
+ * This MUST work even if the session has been idle for hours — the new
+ * hooks consult `getSessionStats()` on each event, so any `message_end`
+ * fired after `resume` reads the current authoritative totals.
+ *
+ * The new hooks are an ADDITIONAL subscriber alongside any pre-pause
+ * subscription. After a long pause the SDK's pre-pause listeners may have
+ * been torn down by the session lifecycle; in either case, `resume` adds
+ * a fresh subscription so future events are observed.
+ */
+export async function resumeWorkerSession(
+  _args: WorkerOperatorArgs,
+  ctx: ExtensionContext,
+  handle: WorkerSessionHandle,
+): Promise<OperatorCommandResult> {
+  // Re-attach on the existing session reference. The fresh controller is
+  // owned by this command and is unused by the F2 spine (events.ts ignores
+  // it after wiring the listeners) but is required by the signature.
+  const controller = new AbortController();
+  installBudgetEventHooks(
+    handle.session,
+    handle.ledger,
+    handle.policy,
+    // events.ts takes the SessionManager for F3 wiring (warning emit via
+    // `appendCustomMessageEntry`); the F2 spine ignores it. Resume uses
+    // `handle.session.sessionManager` because the SDK exposes that
+    // reference publicly on AgentSession — no extra getter on the ledger
+    // is needed.
+    handle.session.sessionManager,
+    controller,
+  );
+  const stats = handle.session.getSessionStats();
+  handle.ledger.snapshot(stats, handle.policy, "resume", ctx.signal);
+  return {
+    sessionId: handle.session.sessionId,
+    ledgerSnapshot: lastLedgerEntry(handle.ledger, "resume"),
+  };
+}
+
+/**
+ * T5.9 — `abortWorkerCompaction(agent)` (G-05).
+ *
+ * Cancels in-flight compaction (manual or auto) via `session.abortCompaction()`.
+ * Writes a ledger snapshot with `kind: "compact-aborted"`. The session
+ * continues; aborted compactions do NOT release a slot.
+ */
+export async function abortWorkerCompaction(
+  _args: WorkerOperatorArgs,
+  ctx: ExtensionContext,
+  handle: WorkerSessionHandle,
+): Promise<OperatorCommandResult> {
+  handle.session.abortCompaction();
+  // After `abortCompaction()` returns, the SDK is back to a non-compacting
+  // state. `getSessionStats()` reflects the pre-compaction totals because
+  // the aborted compaction did not rewrite the branch.
+  const stats = handle.session.getSessionStats();
+  handle.ledger.snapshot(stats, handle.policy, "compact-aborted", ctx.signal);
+  return {
+    sessionId: handle.session.sessionId,
+    ledgerSnapshot: lastLedgerEntry(handle.ledger, "compact-aborted"),
+  };
+}
+
+/**
+ * Pull the most recent ledger entry written for the given `kind`. Throws
+ * if the ledger has no entries (which would indicate the snapshot write
+ * silently failed — an invariant violation the tests guard against).
+ */
+function lastLedgerEntry(ledger: BudgetLedger, kind: string): BudgetLedgerEntry {
+  const entries = ledger.entries();
+  const latest = entries[entries.length - 1];
+  if (!latest) {
+    throw new Error(`expected ledger entry for kind="${kind}" but ledger is empty`);
+  }
+  if (latest.data.kind !== kind) {
+    throw new Error(
+      `expected latest ledger entry to have kind="${kind}" but got "${String(latest.data.kind)}"`,
+    );
+  }
+  return latest;
+}
+
+// ---------------------------------------------------------------------------
+// §2.8 Operator commands — Wave 3C STUBS (F5 branch/clone).
+//
+// These three stubs (respawn, snapshot, restore) belong to Wave 3C. They
+// are kept here so the Wave 0 export surface stays stable for downstream
+// importers (3C will replace them in place).
+// ---------------------------------------------------------------------------
 
 /** `session.dispose() + SessionManager.create() + branchWithSummary(...)`. */
 export async function respawnWorkerSession(
   _args: RespawnWorkerArgs,
   _ctx: ExtensionContext,
 ): Promise<{ ok: true; sessionId: string; ledger: BudgetLedger }> {
-  throw new Error("not implemented");
-}
-
-/** `session.waitForIdle() + appendCustomEntry("pause", ...)` — resumable. */
-export async function pauseWorkerSession(
-  _args: WorkerOperatorArgs,
-  _ctx: ExtensionContext,
-): Promise<{ ok: true; ledger: BudgetLedger }> {
   throw new Error("not implemented");
 }
 
@@ -618,22 +808,6 @@ export async function restoreWorkerSession(
   _args: RestoreWorkerArgs,
   _ctx: ExtensionContext,
 ): Promise<{ ok: true; sessionId: string; ledger: BudgetLedger }> {
-  throw new Error("not implemented");
-}
-
-/** Counterpart to `pauseWorkerSession` — restores worker activity after a pause. */
-export async function resumeWorkerSession(
-  _args: WorkerOperatorArgs,
-  _ctx: ExtensionContext,
-): Promise<{ ok: true; ledger: BudgetLedger }> {
-  throw new Error("not implemented");
-}
-
-/** `session.abortCompaction()` — cancel in-progress compaction (manual or auto). */
-export async function abortWorkerCompaction(
-  _args: WorkerOperatorArgs,
-  _ctx: ExtensionContext,
-): Promise<{ ok: true; aborted: boolean }> {
   throw new Error("not implemented");
 }
 
