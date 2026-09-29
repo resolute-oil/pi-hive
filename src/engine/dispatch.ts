@@ -1,4 +1,4 @@
-import { type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import { existsSync, readdirSync, renameSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -13,7 +13,7 @@ import { emitHiveEvent, runtimeSummary, writeHiveStateSnapshot } from "./observa
 import { buildHiveTools } from "../agents/tools";
 import { normalizeWorkerSkillPaths } from "./worker-extension";
 import { isExecutionGateOpen, isAwaitingHumanApproval } from "./openspec";
-import { agentRoster, resolveRuntime } from "./agent-lookup";
+import { agentRoster, resolveRuntime, runtimeKey } from "./agent-lookup";
 import { addHiveActivity } from "../ui/tui/activity";
 import { resolveConfiguredPath } from "../core/safe-path";
 import { acquireWorkerSlot, releaseWorkerSlot } from "./worker-queue";
@@ -27,6 +27,7 @@ import { emitDelegationEnd } from "./delegation-end";
 import { isPendingArtifactRevisionTask } from "./dispatch-helpers";
 import { modelKey, resolveModel } from "./model-resolution";
 import { BUDGET_EXHAUSTED_ERROR_NAME, runBudgetPreflight } from "./budget/worker-tools";
+import { makeFreshRuntime } from "./worker-runtime";
 // Hard cap to keep shared telemetry rows from blowing up on accidental
 // multi-hundred-KB worker dumps. 64 KB is high enough that normal review
 // verdicts are not middle-elided in the web UI.
@@ -99,7 +100,12 @@ export async function dispatchAgent(
 ): Promise<{ output: string; exitCode: number; elapsed: number }> {
   if (!state.config || !state.session) throw new Error("hive is not initialized");
   const caller = currentAgentName();
-  const runtime = resolveRuntime(state, agentName);
+  // `let` rather than `const`: the fresh=true block (Move 2) replaces the
+  // runtime in `state.runtimes` with a fresh factory and rebinds the local
+  // pointer so every subsequent line in this dispatch operates on the new
+  // object instead of the orphaned one. Source: tmp/2025-09-29-fresh-true-rebuild-runtime.md
+  // Move 2.
+  let runtime = resolveRuntime(state, agentName);
   if (!runtime) {
     const available = agentRoster(state);
     return { output: `Unknown agent "${agentName}". Available: ${available}`, exitCode: 1, elapsed: 0 };
@@ -117,6 +123,62 @@ export async function dispatchAgent(
   // (and the frozen config is still valid; the user can restart the session).
   if (fresh) {
     reloadAgentConfig(state, ctx, runtime);
+
+    // ─── fresh=true rebuild (Moves 1+2, source: tmp/2025-09-29-fresh-true-rebuild-runtime.md) ──
+    //
+    // The legacy design partially reset runtime counters in a silent try/catch
+    // that absorbed archive errors. That left three coupled bugs in place:
+    //   (a) The prior `setInterval` timer (closure-captured over `runtime`)
+    //       kept firing on the orphan, wasting publishes.
+    //   (b) The prior SDK session reference (`runtime.session`) survived the
+    //       reset, so `applySessionStatsToRuntime(session, runtime)` at end of
+    //       run overwrote the counters from the OLD session's getSessionStats
+    //       — restoring the user's 15,332-token lifetime after a fresh dispatch.
+    //   (c) Many runtime fields were never reset (runCount, task, lastWork,
+    //       status, contextPct, baselines) so the next dispatch inherited
+    //       stale state.
+    //
+    // The fix is a coupled teardown + replace that runs BEFORE any other work
+    // for the new dispatch. We archive the prior transcript (best-effort
+    // failure surfaces a clear error rather than silently resuming) so the
+    // dashboard keeps a numbered history, then build a fresh AgentRuntime
+    // from `makeFreshRuntime(...)` and swap it into `state.runtimes`. Every
+    // closure that captured the old runtime reference keeps writing to the
+    // orphan, which is harmless because `state.runtimes.get(agentName)` is
+    // the single source of truth readers use.
+
+    // Move 1: tear down the prior runtime.
+    if (runtime.timer) {
+      clearInterval(runtime.timer);
+      runtime.timer = undefined;
+    }
+    try { runtime.session?.dispose?.(); } catch { /* best-effort */ }
+    runtime.session = undefined;
+
+    // Archive the prior transcript to a numbered `.run-N.jsonl` so the
+    // dashboard can show every run. Errors are NOT swallowed: a silent
+    // failure here is exactly what caused the original Bug 3 (the
+    // try/catch around archivePriorRun used to absorb the throw and skip
+    // the counter resets). The user sees a clear dispatch error instead of
+    // a stale-session resume. archivePriorRun is a simple renameSync;
+    // failures are rare and indicate real filesystem problems.
+    if (existsSync(runtime.sessionFile)) {
+      archivePriorRun(runtime.sessionFile);
+    }
+
+    // Move 2: replace the runtime in the registry with a fresh factory.
+    // Preserves `config` and `sessionFile` so the dispatcher keeps the
+    // same reload + permission policy identity and the dashboard's "view
+    // session" link stays valid until Move 3 updates it from the new SM.
+    const newRuntime = makeFreshRuntime(runtime.config, runtime.sessionFile);
+    // Use the lowercase slug as the key — `state.runtimes` is keyed by slug
+    // (see resolveRuntime's `raw.toLowerCase()` lookup and session.ts's
+    // `runtimeKey(runtime)` setter). Using `agentName` directly would create
+    // a parallel entry at the original (possibly capitalized) name and leave
+    // the old runtime orphaned at its slug key, which is exactly the test
+    // bug we just hit.
+    state.runtimes.set(runtimeKey(newRuntime), newRuntime);
+    runtime = newRuntime;
   }
   // Plan mode delegates to planners, leads, AND reviewers (Phase 5.1 decision):
   // reviewers give plan-phase feedback but stay read-only on files via the type
@@ -152,155 +214,83 @@ export async function dispatchAgent(
     return { output: `${runtime.config.name} is already running.`, exitCode: 1, elapsed: runtime.elapsedMs };
   }
   const delegationDepth = currentDelegationDepth() + 1;
-  // Wave 2 / F2 — new budget pre-flight via `runBudgetPreflight`. Honors
-  // the new F6 nested `budgets:` shape (per-agent + per-worker/per-team
-  // settings). Throws `BudgetExhaustedError` on block; translated to the
-  // existing `{ output, exitCode: 1 }` envelope so the tool harness keeps
-  // its contract.
-  let preflightPolicy;
-  try {
-    const preflight = await runBudgetPreflight(state, agentName, ctx);
-    preflightPolicy = preflight.policy;
-  } catch (error: any) {
-    if (error?.name === BUDGET_EXHAUSTED_ERROR_NAME) {
-      emitHiveEvent(state, "budget_exhausted", {
-        agent: runtime.config.name,
-        resource: error.resource,
-        scope: error.scope,
-        remaining: budgetRemaining(state, runtime),
-      }, caller);
-      return { output: `Delegation blocked: ${error?.message || String(error)}`, exitCode: 1, elapsed: 0 };
-    }
-    throw error;
-  }
-  const willQueue = state.config.settings.maxParallel !== undefined
-    && state.activeRuns >= state.config.settings.maxParallel
-    && state.config.settings.queueSize !== undefined;
-  const slotPromise = acquireWorkerSlot(state, abortSignal);
-  if (willQueue) emitHiveEvent(state, "queue_update", { workerQueue: state.workerQueue?.length || 0, agent: runtime.config.name, phase: "queued" }, caller);
-  const slot = await slotPromise;
-  if (willQueue) emitHiveEvent(state, "queue_update", { workerQueue: state.workerQueue?.length || 0, agent: runtime.config.name, phase: slot }, caller);
-  if (slot !== "acquired") {
-    const reason = slot === "parallel"
-      ? `Max parallel agent runs reached (${state.config.settings.maxParallel}); configure queue-size to enable fair waiting.`
-      : slot === "queue-full"
-        ? `Worker queue is full (${state.config.settings.queueSize}).`
-        : "Delegation cancelled while waiting for a worker slot.";
-    return { output: reason, exitCode: 1, elapsed: 0 };
-  }
-  // A queued request can become stale while waiting: another request may have
-  // started the same worker or consumed its remaining budget.
-  if ((runtime.status as AgentRuntime["status"]) === "running") {
-    releaseWorkerSlot(state);
-    return { output: `${runtime.config.name} is already running.`, exitCode: 1, elapsed: runtime.elapsedMs };
-  }
-  // Re-run the budget pre-flight after slot acquisition. Another delegation
-  // (or a ledger write from a settled worker) may have drained the budget
-  // while we were queued; the pre-flight must run against the current
-  // branch, not the snapshot we read above.
-  try {
-    await runBudgetPreflight(state, agentName, ctx);
-  } catch (error: any) {
-    releaseWorkerSlot(state);
-    if (error?.name === BUDGET_EXHAUSTED_ERROR_NAME) {
-      emitHiveEvent(state, "budget_exhausted", {
-        agent: runtime.config.name,
-        resource: error.resource,
-        scope: error.scope,
-        remaining: budgetRemaining(state, runtime),
-      }, caller);
-      return { output: `Delegation blocked: ${error?.message || String(error)}`, exitCode: 1, elapsed: 0 };
-    }
-    throw error;
-  }
-
-  let prompt: string;
-  try {
-    prompt = buildWorkerPrompt(state, ctx, runtime, task);
-  } catch (error: any) {
-    releaseWorkerSlot(state);
-    return { output: `Cannot prepare ${runtime.config.name}: ${error?.message || String(error)}`, exitCode: 1, elapsed: 0 };
-  }
+  // ─── fresh-rebuild preflight + session creation (Moves 3-5) ─────────────
+  //
+  // The legacy order was: preflight → slot → re-preflight → prompt →
+  // createWorkerSession → installWorkerBudgetHooks → session.prompt. The
+  // fresh=true bug class had two compounding flaws in that order:
+  //
+  //   (a) createWorkerSession ignored the `fresh` flag and always opened
+  //       runtime.sessionFile via SessionManager.open. On a fresh dispatch
+  //       that file still held the prior run's transcript (or was the same
+  //       path the archive was meant to retire), so the new session was a
+  //       continuation and `getSessionStats()` returned the OLD lifetime
+  //       totals — which `applySessionStatsToRuntime` then wrote back to
+  //       runtime.*, undoing any counter reset the fresh block did.
+  //
+  //   (b) The preflight read `ctx.sessionManager` (the orchestrator's
+  //       read-only SM, no worker budget CustomEntries) so it always
+  //       returned "pass". The worker's own SM was only created later in
+  //       the dispatch, never seen by the preflight.
+  //
+  // Fix: create the worker SM FIRST (Move 3), then run BOTH preflights
+  // against it (Moves 4+5). Move 3's `SessionManager.create(cwd)` for
+  // fresh=true guarantees an empty branch; Move 4's ledger-restore against
+  // that branch is the authoritative per-worker cumulative.
+  //
+  // Model resolution happens here (vs. the legacy post-prompt position) so
+  // createWorkerSession has the resolved model. The "resolve the model
+  // FIRST, before mutating any per-run state" invariant still holds —
+  // failure here returns a `{ output, exitCode: 1 }` envelope without
+  // touching any per-run field on the new runtime.
   const model = modelFrom(ctx, runtime.config.model);
   const tools = normalizeWorkerTools(runtime.config.tools, state.config.settings.defaultTools);
   const thinking = runtime.config.thinking!;
-  // Fix #3: capture whether a prior transcript exists BEFORE the archive step.
-  // This determines whether this dispatch is a new session (no prior transcript)
-  // or a resume (existing transcript the SDK will replay on prompt()). The value
-  // is used below to decide which input to pass to session.prompt(): the full
-  // assembled worker context (new/fresh) or the lean task alone (resume).
-  const sessionFileExisted = existsSync(runtime.sessionFile);
-  // fresh=true starts this agent's conversation clean. Rather than DELETE the
-  // prior session (which would lose the transcript of earlier runs while their
-  // token/cost still count), ARCHIVE it to a numbered run file so the dashboard
-  // can show every run. The live sessionFile always holds the current run.
-  //
-  // Archiving means end-of-run getSessionStats() covers ONLY the fresh session
-  // (the prior transcript is no longer attached), so runtime.* will be overwritten
-  // with just-this-run totals — but the run-start baselines below would still hold
-  // the prior lifetime aggregates, making `runOnly − priorLifetime` go negative and
-  // silently clamp to 0 (the fresh-archive under-count). Reset the lifetime
-  // counters to 0 here so the baselines captured below are 0 and the per-run delta
-  // equals the fresh session's real usage.
-  if (fresh && existsSync(runtime.sessionFile)) {
-    try {
-      archivePriorRun(runtime.sessionFile);
-      runtime.inputTokens = 0;
-      runtime.outputTokens = 0;
-      runtime.cacheReadTokens = 0;
-      runtime.cacheWriteTokens = 0;
-      runtime.reasoningTokens = 0;
-      runtime.costUsd = 0;
-    } catch { /* noop */ }
-  }
-
-  // Resolve the model FIRST, before mutating any per-run state. This is the
-  // J4/Decision-5 reorder (the session is the only authoritative source of
-  // getAvailableThinkingLevels(), so it must exist before delegation_start), and
-  // it also means an unresolvable model aborts cleanly: no run-start field —
-  // runCount, startedAt, elapsedMs, the token baselines — is touched for a run
-  // that never happens (M-misc), so the previous run's stats stay intact.
   let resolvedModel: any;
   try { resolvedModel = resolveModel(ctx, model); } catch { resolvedModel = undefined; }
   if (!resolvedModel) {
     runtime.status = "error";
-    releaseWorkerSlot(state);
     return { output: `Cannot resolve model "${model}" for ${runtime.config.name}.`, exitCode: 1, elapsed: 0 };
   }
-
   const resolvedModelKey = modelKey(resolvedModel, model);
 
-  runtime.status = "running";
-  runtime.task = task;
-  runtime.lastWork = task;
-  runtime.toolCount = 0;
-  runtime.elapsedMs = 0;
-  runtime.runCount++;
-  runtime.startedAt = Date.now();
+  // toolNames/hiveTools/allToolNames/skillPaths are inputs to
+  // createWorkerSession (they shape the SDK session's function-definitions
+  // block and skill loader).
+  const toolNames = tools.split(",").map((t) => t.trim()).filter(Boolean);
+  // Type-scoped tools (e.g. submit_review_verdict) are granted by agent type,
+  // not the tools list, so keep them even when the agent does not enumerate
+  // them. buildHiveTools only emits them for the eligible type.
+  const hiveTools = buildHiveTools(state, runtime.config.name).filter((t) => toolNames.includes(t.name) || TYPE_SCOPED_TOOL_NAMES.has(t.name));
+  // The SDK treats `tools` as authoritative for the function-definitions
+  // block — a customTool whose name isn't in `tools` is silently dropped from
+  // the model's view, even though its implementation is in customTools.
+  // Without this union, a type-scoped tool the agent didn't enumerate (e.g.
+  // submit_review_verdict on a reviewer whose frontmatter only lists read/grep/
+  // find/ls/bash/team_conversation) never reaches the function-definitions
+  // block. The agent's prompt claims the tool is auto-injected; this is the
+  // half of that contract that lived only in the comment until now.
+  const allToolNames = dispatchToolNames(toolNames, hiveTools);
+  const skillPaths = resolveWorkerSkillPaths(ctx.cwd, runtime.config.skills as unknown[]);
+
+  // runController + lifecycle must exist BEFORE any code path that creates a
+  // session — that way the BIG try-finally below always has a lifecycle to
+  // close (the close() disposes the session + releases the worker slot).
   // Wave 5 / F9 — the legacy `WorkerGovernance.timeoutMs` per-worker
-  // timeout was removed by Wave 1B's hard cutover (G-16). The `timeout`
-  // mechanism that used to live here is gone along with the dead
-  // `governance` local.
+  // timeout was removed by Wave 1B's hard cutover (G-16).
   const runController = new AbortController();
   const abortFromParent = () => runController.abort(abortSignal?.reason);
   if (abortSignal?.aborted) abortFromParent();
   else abortSignal?.addEventListener("abort", abortFromParent, { once: true });
   const lifecycle = new WorkerRunLifecycle(state, runtime, runController.signal);
-  // Run-start baselines (J8/Decision 4 + Decision 1): capture the current
-  // lifetime counters as the per-run baseline so `delegation_end` can
-  // subtract them and emit per-run deltas.
-  runtime.runStartInputTokens = runtime.inputTokens;
-  runtime.runStartOutputTokens = runtime.outputTokens;
-  runtime.runStartCacheReadTokens = runtime.cacheReadTokens;
-  runtime.runStartCacheWriteTokens = runtime.cacheWriteTokens;
-  runtime.runStartReasoningTokens = runtime.reasoningTokens;
-  runtime.runStartCostUsd = runtime.costUsd;
 
+  // Streaming/state variables for the run + end-of-run.
   const chunks: string[] = [];
   // The streaming snapshot is now tracked exclusively on `sub.streamedSnapshot`
   // (see WorkerSubscriptionState). The post-extraction dispatchAgent reads
   // it from the WorkerSubscriptionState object the handler updates.
   let session: any;
+  let sessionManager: SessionManager | undefined;
   let abortedByParent = false;
   let errorMessage: string | undefined;
   const modelsSeen = new Set<string>();
@@ -336,193 +326,298 @@ export async function dispatchAgent(
   };
 
   try {
-  const toolNames = tools.split(",").map((t) => t.trim()).filter(Boolean);
-  // Type-scoped tools (e.g. submit_review_verdict) are granted by agent type,
-  // not the tools list, so keep them even when the agent does not enumerate
-  // them. buildHiveTools only emits them for the eligible type.
-  const hiveTools = buildHiveTools(state, runtime.config.name).filter((t) => toolNames.includes(t.name) || TYPE_SCOPED_TOOL_NAMES.has(t.name));
-  // The SDK treats `tools` as authoritative for the function-definitions
-  // block — a customTool whose name isn't in `tools` is silently dropped from
-  // the model's view, even though its implementation is in customTools.
-  // Without this union, a type-scoped tool the agent didn't enumerate (e.g.
-  // submit_review_verdict on a reviewer whose frontmatter only lists read/grep/
-  // find/ls/bash/team_conversation) never reaches the function-definitions
-  // block. The agent's prompt claims the tool is auto-injected; this is the
-  // half of that contract that lived only in the comment until now.
-  const allToolNames = dispatchToolNames(toolNames, hiveTools);
-  const skillPaths = resolveWorkerSkillPaths(ctx.cwd, runtime.config.skills as unknown[]);
+    // Move 3: createWorkerSession. For `fresh=true` this uses
+    // SessionManager.create(ctx.cwd), producing a brand-new empty SM in
+    // the default session directory. For `fresh=false` it keeps opening
+    // runtime.sessionFile (the existing file). The session-file pointer
+    // on the runtime is updated below so the dashboard's "view session"
+    // link follows the swap.
+    const created = await createWorkerSession({
+      state,
+      ctx,
+      runtime,
+      resolvedModel,
+      thinking,
+      allToolNames,
+      hiveTools,
+      skillPaths,
+      preflightPolicy: undefined,
+      runController,
+      createSession,
+      fresh,
+    });
+    session = created.session;
+    sessionManager = created.sessionManager;
+    const newSessionFile = sessionManager.getSessionFile();
+    if (newSessionFile) runtime.sessionFile = newSessionFile;
+    lifecycle.attachSession(session);
 
-  const { session: createdSession, sessionManager } = await createWorkerSession({
-    state,
-    ctx,
-    runtime,
-    resolvedModel,
-    thinking,
-    allToolNames,
-    hiveTools,
-    skillPaths,
-    preflightPolicy,
-    runController,
-    createSession,
-  });
-  session = createdSession;
-  lifecycle.attachSession(session);
+    // Fix #3: capture whether a prior transcript exists for `isNewSession`.
+    // After Move 3, runtime.sessionFile points at the NEW path (for fresh)
+    // or the existing path (for non-fresh). For fresh=true the new SM file
+    // is not yet on disk (SDK writes it on first assistant message), so
+    // `sessionFileExisted === false`. The `isNewSession` formula still
+    // evaluates correctly: `fresh || !sessionFileExisted === true` for
+    // fresh runs.
+    const sessionFileExisted = existsSync(runtime.sessionFile);
 
-  // Wave 2 / F2 — install the new mid-run budget event hooks AFTER attaching
-  // the session to the lifecycle. If `installBudgetEventHooks` throws (e.g.
-  // `session.subscribe(...)` rejects), the lifecycle already owns the
-  // session, so `close(failed=true)` aborts and disposes it cleanly.
-  //
-  // Wave 5 / F3 — also wires the budget tool_call guard on
-  // `session.agent.beforeToolCall`. Pass `currentDelegationDepth: () => delegationDepth`
-  // so checkBudgetPolicy sees the per-call depth captured at this dispatch's
-  // start (events.ts / G-29 contract — `currentDelegationDepth() + 1`).
-  await installWorkerBudgetHooks({
-    runtime,
-    session,
-    sessionManager,
-    preflightPolicy,
-    runController,
-    currentDelegationDepth: () => delegationDepth,
-  });
+    // Wave 2 / F2 — preflight #1. Honors the F6 nested `budgets:` shape.
+    // Throws `BudgetExhaustedError` on block; translated to the existing
+    // `{ output, exitCode: 1 }` envelope. Moves 4+5: preflight reads the
+    // WORKER's `sessionManager` (the SM just created above), so the
+    // ledger's cumulative reflects the worker's actual history rather
+    // than the orchestrator's empty read-only branch.
+    let preflightPolicy;
+    try {
+      const preflight = await runBudgetPreflight(state, agentName, ctx, sessionManager);
+      preflightPolicy = preflight.policy;
+    } catch (error: any) {
+      if (error?.name === BUDGET_EXHAUSTED_ERROR_NAME) {
+        emitHiveEvent(state, "budget_exhausted", {
+          agent: runtime.config.name,
+          resource: error.resource,
+          scope: error.scope,
+          remaining: budgetRemaining(state, runtime),
+        }, caller);
+        return { output: `Delegation blocked: ${error?.message || String(error)}`, exitCode: 1, elapsed: 0 };
+      }
+      throw error;
+    }
+    const willQueue = state.config.settings.maxParallel !== undefined
+      && state.activeRuns >= state.config.settings.maxParallel
+      && state.config.settings.queueSize !== undefined;
+    const slotPromise = acquireWorkerSlot(state, abortSignal);
+    if (willQueue) emitHiveEvent(state, "queue_update", { workerQueue: state.workerQueue?.length || 0, agent: runtime.config.name, phase: "queued" }, caller);
+    const slot = await slotPromise;
+    if (willQueue) emitHiveEvent(state, "queue_update", { workerQueue: state.workerQueue?.length || 0, agent: runtime.config.name, phase: slot }, caller);
+    if (slot !== "acquired") {
+      const reason = slot === "parallel"
+        ? `Max parallel agent runs reached (${state.config.settings.maxParallel}); configure queue-size to enable fair waiting.`
+        : slot === "queue-full"
+          ? `Worker queue is full (${state.config.settings.queueSize}).`
+          : "Delegation cancelled while waiting for a worker slot.";
+      return { output: reason, exitCode: 1, elapsed: 0 };
+    }
+    // A queued request can become stale while waiting: another request may
+    // have started the same worker or consumed its remaining budget.
+    if ((runtime.status as AgentRuntime["status"]) === "running") {
+      releaseWorkerSlot(state);
+      return { output: `${runtime.config.name} is already running.`, exitCode: 1, elapsed: runtime.elapsedMs };
+    }
+    // Re-run the budget pre-flight after slot acquisition. Moves 4+5:
+    // reads the WORKER's SM, so the cumulative reflects any concurrent
+    // delegateAgent the same worker just finished.
+    try {
+      await runBudgetPreflight(state, agentName, ctx, sessionManager);
+    } catch (error: any) {
+      releaseWorkerSlot(state);
+      if (error?.name === BUDGET_EXHAUSTED_ERROR_NAME) {
+        emitHiveEvent(state, "budget_exhausted", {
+          agent: runtime.config.name,
+          resource: error.resource,
+          scope: error.scope,
+          remaining: budgetRemaining(state, runtime),
+        }, caller);
+        return { output: `Delegation blocked: ${error?.message || String(error)}`, exitCode: 1, elapsed: 0 };
+      }
+      throw error;
+    }
 
-  const abortWorker = (): void => {
-    abortedByParent = true;
-    runtime.lastWork = "cancelling";
-    addHiveActivity(state, { kind: "delegation_end", parent: caller, agent: runtime.config.name, status: "error", text: "cancel requested" });
-    void session.abort?.().catch((): undefined => undefined);
-  };
-  lifecycle.watchParentAbort(abortWorker);
+    let prompt: string;
+    try {
+      prompt = buildWorkerPrompt(state, ctx, runtime, task);
+    } catch (error: any) {
+      releaseWorkerSlot(state);
+      return { output: `Cannot prepare ${runtime.config.name}: ${error?.message || String(error)}`, exitCode: 1, elapsed: 0 };
+    }
 
-  // Authoritative per-model thinking levels for this worker's effective model.
-  // This is the SDK's own answer — no ModelRegistry plumbing needed (A10).
-  try {
-    const levels = session.getAvailableThinkingLevels?.();
-    if (Array.isArray(levels) && levels.length) runtime.thinkingLevels = levels.map(String);
-  } catch { /* capability probe is best-effort */ }
+    // Set up per-run state on the NEW runtime (Move 2's fresh factory
+    // means everything is zero; we set runCount=1, status=running, etc.).
+    runtime.status = "running";
+    runtime.task = task;
+    runtime.lastWork = task;
+    runtime.toolCount = 0;
+    runtime.elapsedMs = 0;
+    runtime.runCount++;
+    runtime.startedAt = Date.now();
+    // Run-start baselines (J8/Decision 4 + Decision 1): capture the
+    // current lifetime counters as the per-run baseline so
+    // `delegation_end` can subtract them and emit per-run deltas.
+    runtime.runStartInputTokens = runtime.inputTokens;
+    runtime.runStartOutputTokens = runtime.outputTokens;
+    runtime.runStartCacheReadTokens = runtime.cacheReadTokens;
+    runtime.runStartCacheWriteTokens = runtime.cacheWriteTokens;
+    runtime.runStartReasoningTokens = runtime.reasoningTokens;
+    runtime.runStartCostUsd = runtime.costUsd;
 
-  logRecord(state, { from: caller, to: runtime.config.name, type: "delegation", message: task });
-  addHiveActivity(state, { kind: "delegation_start", parent: caller, agent: runtime.config.name, status: "running", text: task });
-  emitHiveEvent(state, "delegation_start", {
-    from: caller,
-    to: runtime.config.name,
-    task,
-    fresh,
-    // Store the effective model key, not the raw config value (which may be
-    // "inherit") or the full SDK object, so telemetry stays JSON/SQLite-safe.
-    model: resolvedModelKey,
-    configuredModel: model,
-    tools,
-    thinking,
-    // Authoritative per-model thinking levels, captured from the session created
-    // above (A10). Now populated on the FIRST run too (J4); the topology_nodes
-    // sidecar fills in from this.
-    thinkingLevels: runtime.thinkingLevels,
-    runtime: runtimeSummary(state, runtime),
-  }, caller);
-  publishRuntimeUpdate(state);
-  writeHiveStateSnapshot(state);
+    // Wave 2 / F2 — install the new mid-run budget event hooks AFTER
+    // attaching the session to the lifecycle. If `installBudgetEventHooks`
+    // throws (e.g. `session.subscribe(...)` rejects), the lifecycle
+    // already owns the session, so `close(failed=true)` aborts and
+    // disposes it cleanly.
+    //
+    // Wave 5 / F3 — also wires the budget tool_call guard on
+    // `session.agent.beforeToolCall`. Pass `currentDelegationDepth: () =>
+    // delegationDepth` so checkBudgetPolicy sees the per-call depth
+    // captured at this dispatch's start (events.ts / G-29 contract —
+    // `currentDelegationDepth() + 1`).
+    await installWorkerBudgetHooks({
+      runtime,
+      session,
+      sessionManager: sessionManager!,
+      preflightPolicy: preflightPolicy!,
+      runController,
+      currentDelegationDepth: () => delegationDepth,
+    });
 
-  // Every nesting level shares one process and one state.runtimes Map now, so
-  // a nested delegation already mutates the same AgentRuntime the top-level
-  // status modal reads directly — no cross-process mirroring needed. This
-  // timer keeps elapsedMs ticking and polls the live context-window fill via
-  // runtime.session (assigned above) — the same underlying data
-  // ctx.getContextUsage() exposes for the top-level session's own TUI footer,
-  // now readable per-worker since it's in-process.
-  runtime.timer = setInterval(() => {
-    runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : runtime.elapsedMs;
-    // percent is null right after compaction until a fresh assistant response
-    // provides usage data again — keep the last known value rather than
-    // flashing to 0 during that transient window.
-    const usage = runtime.session?.getContextUsage?.();
-    if (usage?.percent != null) runtime.contextPct = usage.percent;
-    // Phase 4.7: keep raw tokens/contextWindow too, not just the percent.
-    if (usage?.tokens != null) runtime.contextTokens = usage.tokens;
-    if (usage?.contextWindow != null) runtime.contextWindow = usage.contextWindow;
+    const abortWorker = (): void => {
+      abortedByParent = true;
+      runtime.lastWork = "cancelling";
+      addHiveActivity(state, { kind: "delegation_end", parent: caller, agent: runtime.config.name, status: "error", text: "cancel requested" });
+      void session.abort?.().catch((): undefined => undefined);
+    };
+    lifecycle.watchParentAbort(abortWorker);
+
+    // Authoritative per-model thinking levels for this worker's effective
+    // model. This is the SDK's own answer — no ModelRegistry plumbing
+    // needed (A10).
+    try {
+      const levels = session.getAvailableThinkingLevels?.();
+      if (Array.isArray(levels) && levels.length) runtime.thinkingLevels = levels.map(String);
+    } catch { /* capability probe is best-effort */ }
+
+    logRecord(state, { from: caller, to: runtime.config.name, type: "delegation", message: task });
+    addHiveActivity(state, { kind: "delegation_start", parent: caller, agent: runtime.config.name, status: "running", text: task });
+    emitHiveEvent(state, "delegation_start", {
+      from: caller,
+      to: runtime.config.name,
+      task,
+      fresh,
+      // Store the effective model key, not the raw config value (which
+      // may be "inherit") or the full SDK object, so telemetry stays
+      // JSON/SQLite-safe.
+      model: resolvedModelKey,
+      configuredModel: model,
+      tools,
+      thinking,
+      // Authoritative per-model thinking levels, captured from the
+      // session created above (A10). Now populated on the FIRST run too
+      // (J4); the topology_nodes sidecar fills in from this.
+      thinkingLevels: runtime.thinkingLevels,
+      runtime: runtimeSummary(state, runtime),
+    }, caller);
     publishRuntimeUpdate(state);
     writeHiveStateSnapshot(state);
-  }, 1000);
-  runtime.timer.unref?.();
 
-  // Distinct actual models seen across this run's assistant messages (A3).
-  // Per-message identity the SDK exposes on AssistantMessage (Item 9 / R3-1.4):
-  // `.provider`, `.api`, `.responseId?`, `.diagnostics?` all ride the same
-  // message_end object. Capture the distinct providers/apis, the first+last
-  // responseId (bookends of the run), and a bounded set of diagnostics.
-  // toolCallId → startedAt, for per-call durationMs (A4). Bounded by in-flight
-  // calls: deleted on tool_execution_end. Retry metadata is retained only for
-  // this reserved run and cleared by the outer lifecycle cleanup.
-  // `sub` is declared at function scope above so the post-`finally` output
-  // computation can read sub.streamedSnapshot.
-  const handleEvent = createWorkerSubscriptionHandler({
-    state,
-    runtime,
-    sub,
-    publishRuntimeUpdate,
-    maxDiagnostics: MAX_DIAGNOSTICS,
-  });
-  const unsubscribe = session.subscribe(handleEvent);
-  lifecycle.attachSubscription(unsubscribe);
+    // Every nesting level shares one process and one state.runtimes Map
+    // now, so a nested delegation already mutates the same AgentRuntime
+    // the top-level status modal reads directly — no cross-process
+    // mirroring needed. This timer keeps elapsedMs ticking and polls the
+    // live context-window fill via runtime.session (assigned above) —
+    // the same underlying data ctx.getContextUsage() exposes for the
+    // top-level session's own TUI footer, now readable per-worker since
+    // it's in-process.
+    runtime.timer = setInterval(() => {
+      runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : runtime.elapsedMs;
+      // percent is null right after compaction until a fresh assistant
+      // response provides usage data again — keep the last known value
+      // rather than flashing to 0 during that transient window.
+      const usage = runtime.session?.getContextUsage?.();
+      if (usage?.percent != null) runtime.contextPct = usage.percent;
+      // Phase 4.7: keep raw tokens/contextWindow too, not just the percent.
+      if (usage?.tokens != null) runtime.contextTokens = usage.tokens;
+      if (usage?.contextWindow != null) runtime.contextWindow = usage.contextWindow;
+      publishRuntimeUpdate(state);
+      writeHiveStateSnapshot(state);
+    }, 1000);
+    runtime.timer.unref?.();
 
-  try {
-    // Scoped so currentAgentName() resolves to this worker for everything
-    // causally downstream of prompt() — subscribed event handlers, tool
-    // execute() calls (including a nested delegate_agent recursing into
-    // dispatchAgent again), and enforceDomainForTool's lookup. Workers can run
-    // concurrently now that there's no process boundary between them, so this
-    // can no longer be a shared/global value (see currentAgentStorage in
-    // session.ts) — each concurrent call gets its own isolated context.
-    //
-    // prompt() throws synchronously for pre-acceptance failures (no model, no
-    // API key); a failure mid-run instead surfaces via session.state.errorMessage.
-    //
-    // The active change-id is scoped alongside the agent name so the worker's
-    // plan/review tools resolve currentChangeId()
-    // to the selected change. A nested delegation inherits the caller's change-id
-    // unless a more specific one is set. state.activeChangeId is the persistent
-    // selection; currentChangeId() carries an already-scoped value into nesting.
-    const scopedChangeId = currentChangeId() ?? state.activeChangeId;
-    if (abortedByParent) throw new Error("aborted");
-    // Fix #3: inject the assembled worker context on new/fresh session starts.
-    // fresh=true always starts clean (prior transcript archived above, if any).
-    // A first-ever session for this agent (no prior transcript file) also needs
-    // the full context so shared_context and the domain boundary reach the worker.
-    // Resumed sessions (fresh=false, existing transcript) receive the lean task
-    // only — pi-hive's native transcript persistence already carries the context
-    // forward, so re-injecting would duplicate it on every resumed delegation.
-    // Deliberate non-goal: distiller re-injection into resumed workers (P4).
-    const isNewSession = fresh || !sessionFileExisted;
-    await runAtDelegationDepth(delegationDepth, () => runAsAgent(runtime.config.name, () => runWithChange(scopedChangeId, () => session.prompt(isNewSession ? prompt : task))));
-    errorMessage = abortedByParent
-      ? "aborted"
-      : state.shuttingDown
-        ? "aborted during session shutdown"
-        : session.state.errorMessage;
-    // The 1s timer polls this too, but relying on it alone can miss the final,
-    // most accurate reading if the last tick landed moments before completion.
-    // Refresh the raw tokens/window alongside the percent (Phase 4.7) so the
-    // final snapshot carries the last context fill, not just its percentage.
-    const finalUsage = session.getContextUsage?.();
-    if (finalUsage?.percent != null) runtime.contextPct = finalUsage.percent;
-    if (finalUsage?.tokens != null) runtime.contextTokens = finalUsage.tokens;
-    if (finalUsage?.contextWindow != null) runtime.contextWindow = finalUsage.contextWindow;
+    // Distinct actual models seen across this run's assistant messages
+    // (A3). Per-message identity the SDK exposes on AssistantMessage
+    // (Item 9 / R3-1.4): `.provider`, `.api`, `.responseId?`,
+    // `.diagnostics?` all ride the same message_end object. Capture the
+    // distinct providers/apis, the first+last responseId (bookends of
+    // the run), and a bounded set of diagnostics. toolCallId → startedAt,
+    // for per-call durationMs (A4). Bounded by in-flight calls: deleted
+    // on tool_execution_end. Retry metadata is retained only for this
+    // reserved run and cleared by the outer lifecycle cleanup.
+    // `sub` is declared at function scope above so the post-`finally`
+    // output computation can read sub.streamedSnapshot.
+    const handleEvent = createWorkerSubscriptionHandler({
+      state,
+      runtime,
+      sub,
+      publishRuntimeUpdate,
+      maxDiagnostics: MAX_DIAGNOSTICS,
+    });
+    const unsubscribe = session.subscribe(handleEvent);
+    lifecycle.attachSubscription(unsubscribe);
+
+    try {
+      // Scoped so currentAgentName() resolves to this worker for
+      // everything causally downstream of prompt() — subscribed event
+      // handlers, tool execute() calls (including a nested
+      // delegate_agent recursing into dispatchAgent again), and
+      // enforceDomainForTool's lookup. Workers can run concurrently now
+      // that there's no process boundary between them, so this can no
+      // longer be a shared/global value (see currentAgentStorage in
+      // session.ts) — each concurrent call gets its own isolated context.
+      //
+      // prompt() throws synchronously for pre-acceptance failures (no
+      // model, no API key); a failure mid-run instead surfaces via
+      // session.state.errorMessage.
+      //
+      // The active change-id is scoped alongside the agent name so the
+      // worker's plan/review tools resolve currentChangeId() to the
+      // selected change. A nested delegation inherits the caller's
+      // change-id unless a more specific one is set. state.activeChangeId
+      // is the persistent selection; currentChangeId() carries an
+      // already-scoped value into nesting.
+      const scopedChangeId = currentChangeId() ?? state.activeChangeId;
+      if (abortedByParent) throw new Error("aborted");
+      // Fix #3: inject the assembled worker context on new/fresh session
+      // starts. fresh=true always starts clean (prior transcript archived
+      // above, if any). A first-ever session for this agent (no prior
+      // transcript file) also needs the full context so shared_context
+      // and the domain boundary reach the worker. Resumed sessions
+      // (fresh=false, existing transcript) receive the lean task only —
+      // pi-hive's native transcript persistence already carries the
+      // context forward, so re-injecting would duplicate it on every
+      // resumed delegation. Deliberate non-goal: distiller re-injection
+      // into resumed workers (P4).
+      const isNewSession = fresh || !sessionFileExisted;
+      await runAtDelegationDepth(delegationDepth, () => runAsAgent(runtime.config.name, () => runWithChange(scopedChangeId, () => session.prompt(isNewSession ? prompt : task))));
+      errorMessage = abortedByParent
+        ? "aborted"
+        : state.shuttingDown
+          ? "aborted during session shutdown"
+          : session.state.errorMessage;
+      // The 1s timer polls this too, but relying on it alone can miss
+      // the final, most accurate reading if the last tick landed moments
+      // before completion. Refresh the raw tokens/window alongside the
+      // percent (Phase 4.7) so the final snapshot carries the last
+      // context fill, not just its percentage.
+      const finalUsage = session.getContextUsage?.();
+      if (finalUsage?.percent != null) runtime.contextPct = finalUsage.percent;
+      if (finalUsage?.tokens != null) runtime.contextTokens = finalUsage.tokens;
+      if (finalUsage?.contextWindow != null) runtime.contextWindow = finalUsage.contextWindow;
+    } catch (error: any) {
+      errorMessage = error?.message || String(error);
+    }
+
+    // Authoritative usage: overwrite the incremental live-display
+    // counters with the SDK's session-lifetime aggregate (includes cache
+    // splits). This kills the double-count and any accumulation drift in
+    // one move (Decision 1). If stats throws, the incremental values
+    // already on the runtime are kept. Item 9: SessionStats also carries
+    // authoritative message/tool counts — preferred over the hand-tallied
+    // toolCount so the numbers match the SDK's own.
+    try {
+      sdkCounts = applySessionStatsToRuntime(session, runtime);
+    } catch { /* keep incremental values if stats is unavailable */ }
+
   } catch (error: any) {
     errorMessage = error?.message || String(error);
-  }
-
-  // Authoritative usage: overwrite the incremental live-display counters with
-  // the SDK's session-lifetime aggregate (includes cache splits). This kills
-  // the double-count and any accumulation drift in one move (Decision 1). If
-  // stats throws, the incremental values already on the runtime are kept.
-  // Item 9: SessionStats also carries authoritative message/tool counts —
-  // preferred over the hand-tallied toolCount so the numbers match the SDK's own.
-  try {
-    sdkCounts = applySessionStatsToRuntime(session, runtime);
-  } catch { /* keep incremental values if stats is unavailable */ }
-
-  } catch (error: any) {
-    errorMessage = errorMessage || error?.message || String(error);
   } finally {
     toolStartedAt.clear();
     abortSignal?.removeEventListener("abort", abortFromParent);

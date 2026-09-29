@@ -46,9 +46,18 @@ export interface CreateWorkerSessionOptions {
   allToolNames: string[];
   hiveTools: ToolDefinition[];
   skillPaths: string[];
-  preflightPolicy: WorkerBudgetPolicy;
-  runController: AbortController;
+  preflightPolicy: WorkerBudgetPolicy | undefined;
+  runController: AbortController | undefined;
   createSession: (options: Record<string, unknown>) => Promise<{ session: unknown }>;
+  /**
+   * When true, the worker gets a brand-new `SessionManager` via
+   * `SessionManager.create(ctx.cwd)` instead of opening the existing
+   * `runtime.sessionFile`. The dispatch caller updates `runtime.sessionFile`
+   * from the returned SM's `getSessionFile()` so the dashboard's "view
+   * session" link stays valid. Source: tmp/2025-09-29-fresh-true-rebuild-runtime.md
+   * Move 3.
+   */
+  fresh?: boolean;
 }
 
 export interface CreateWorkerSessionResult {
@@ -67,9 +76,18 @@ export interface CreateWorkerSessionResult {
  * abort the partially-created session.
  */
 export async function createWorkerSession(opts: CreateWorkerSessionOptions): Promise<CreateWorkerSessionResult> {
-  const { state, ctx, runtime, resolvedModel, thinking, allToolNames, hiveTools, skillPaths, createSession } = opts;
+  const { state, ctx, runtime, resolvedModel, thinking, allToolNames, hiveTools, skillPaths, createSession, fresh } = opts;
 
-  const sessionManager = SessionManager.open(runtime.sessionFile);
+  // Move 3 (tmp/2025-09-29-fresh-true-rebuild-runtime.md): `fresh=true` MUST
+  // produce a brand-new `SessionManager` so `getSessionStats()` covers only
+  // the new run — otherwise the end-of-run overwrite restores the OLD
+  // lifetime totals (the user-visible bug). `SessionManager.create(cwd)`
+  // creates an empty SM in the default directory; the caller updates
+  // `runtime.sessionFile` from `sessionManager.getSessionFile()` so the
+  // dashboard's "view session" link stays valid across the swap.
+  const sessionManager = fresh
+    ? SessionManager.create(ctx.cwd)
+    : SessionManager.open(runtime.sessionFile);
 
   // createAgentSession only calls reload() when it creates its own resource
   // loader (sdk.js). When a loader is supplied by the caller, the SDK skips
