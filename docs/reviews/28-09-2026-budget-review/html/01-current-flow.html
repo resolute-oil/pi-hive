@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Current Flow — Budget Strategies Review</title>
+  <link rel="stylesheet" href="assets/review.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>mermaid.initialize({ startOnLoad: true, theme: 'neutral', securityLevel: 'loose' });</script>
+</head>
+<body>
+  <header class="hero">
+    <div class="container">
+      <p class="eyebrow">Report 1 · 2026-09-28</p>
+      <h1>Current flow — delegation, budget check, accumulation</h1>
+      <p class="subtitle">Four diagrams showing what happens between <code>delegate_agent(...)</code> invocation and the worker's last model call. Every step has a code citation.</p>
+      <p class="meta">Source: <code>current-flow/delegation-flow.md</code> · <code>budget-check-flow.md</code> · <code>accumulation-flow.md</code> · <code>fresh-true-bug-timeline.md</code></p>
+    </div>
+  </header>
+
+  <nav class="container">
+    <ul class="report-nav">
+      <li><a href="index.html">Overview</a></li>
+      <li><a href="01-current-flow.html">Current flow</a></li>
+      <li><a href="02-current-system.html">Current system</a></li>
+      <li><a href="03-pi-docs-alignment.html">Pi-docs alignment</a></li>
+      <li><a href="04-test-coverage.html">Test coverage</a></li>
+    </ul>
+  </nav>
+
+  <main class="container">
+    <section>
+      <h2>1.1 · Delegation flow</h2>
+      <p>From <code>delegate_agent</code> invocation to the worker's first model call. The first budget check is at step 11; the worker slot is acquired at step 10. The fresh-reset path (steps 2-3) is the Bug 1 fix location.</p>
+
+      <div class="flow-diagram">
+        <pre class="mermaid">
+sequenceDiagram
+    autonumber
+    participant Caller as Orchestrator
+    participant Tool as delegate_agent
+    participant Dispatch as dispatchAgent
+    participant Lookup as resolveRuntime
+    participant Reload as reloadAgentConfig
+    participant Reset as freshResetRuntime
+    participant Gate as checkDispatchBudgets
+    participant Slot as acquireWorkerSlot
+    participant SDK as Pi createAgentSession
+
+    Caller->>Tool: delegate_agent(name, task, ctx, fresh)
+    Tool->>Dispatch: dispatchAgent(state, name, task, ctx, fresh)
+    Dispatch->>Lookup: resolveRuntime(state, name)
+    alt fresh === true
+        Dispatch->>Reload: reloadAgentConfig(state, ctx, runtime)
+        Note over Reload: re-reads YAML + agent .md<br/>replaces runtime.config in place
+        Dispatch->>Reset: freshResetRuntime(runtime)
+        Note over Reset: archives prior session<br/>zeros runtime.* + governance* + effectiveTokens
+    end
+    Dispatch->>Dispatch: plan-mode guard
+    Dispatch->>Dispatch: hive-mode execution-gate check
+    Dispatch->>Dispatch: canDelegateTo(caller, agent)
+    Dispatch->>Gate: checkDispatchBudgets(state, runtime, depth)
+    alt budget exhausted
+        Gate-->>Dispatch: GovernanceBlock
+        Dispatch-->>Tool: { output: "Delegation blocked: ..." }
+    else budget ok
+        Dispatch->>Slot: acquireWorkerSlot(state, abortSignal)
+        Dispatch->>Gate: checkDispatchBudgets again (post-queue)
+        Dispatch->>Dispatch: buildWorkerPrompt
+        Dispatch->>Dispatch: resolveModel + capture run-start baselines
+        Dispatch->>SDK: createSession({ tools, customTools })
+        Dispatch->>SDK: session.subscribe(...)
+        Dispatch->>SDK: session.prompt(prompt)
+    end
+        </pre>
+      </div>
+
+      <div class="callout">
+        <strong>Where Bug 1 was fixed:</strong> The <code>reloadAgentConfig</code> + <code>freshResetRuntime</code> pair (steps 2-3) was originally placed AFTER <code>checkDispatchBudgets</code>, so an exhausted worker could never be respawned. Commit <code>081380a</code> (refined in <code>3be33f6</code>) moved the pair to its current location — before every guard and before the budget check. See <code>src/engine/dispatch.ts:213-214</code>.
+      </div>
+    </section>
+
+    <section>
+      <h2>1.2 · Budget check timing</h2>
+      <p>Three events touch the budget: <code>dispatchAgent</code> pre-flight (twice), every <code>message_end</code> (mid-run), and <code>compaction_end</code> (token recalculation). Plus three operator commands for dashboard-driven intervention.</p>
+
+      <div class="flow-diagram">
+        <pre class="mermaid">
+flowchart TB
+    subgraph Pre-flight
+        A[dispatchAgent start] --> B[checkDispatchBudgets<br/>dispatch.ts:252]
+        B --> C{block?}
+        C -- yes --> D[budget_exhausted event<br/>'Delegation blocked: ...']
+        C -- no --> E[acquireWorkerSlot]
+        E --> F[checkDispatchBudgets again<br/>dispatch.ts:302]
+        F --> G{still ok?}
+        G -- no --> H[releaseWorkerSlot + blocked]
+        G -- yes --> I[buildWorkerPrompt + createSession]
+    end
+    subgraph Mid-run
+        J[message_end event] --> K[increment runtime.*]
+        K --> L{budgetRemaining ≤ 0?}
+        L -- yes --> M[budget_exhausted event<br/>+ runController.abort]
+        L -- no --> N{budgetRemaining ≤ 20%?}
+        N -- yes --> O[emitBudgetWarning<br/>+ state.budgetWarnings dedup]
+        N -- no --> P[continue]
+        O --> P
+        M --> Q[end-of-run code runs<br/>see accumulation-flow]
+        P --> R[next message]
+    end
+    subgraph Compaction
+        S[compaction_end event] --> T{tokensBefore &gt; estimatedAfter?}
+        T -- yes --> U[effectiveTokens -= savings<br/>emit team_budget_recalculated]
+        T -- no --> V[no-op]
+        U --> W[team total now reflects freed budget]
+    end
+        </pre>
+      </div>
+
+      <h3>Pre-flight — <code>checkDispatchBudgets</code></h3>
+      <p>Eight sequential checks in <code>src/engine/governance.ts:73-104</code>:</p>
+      <table>
+        <thead>
+          <tr><th>#</th><th>Check</th><th>Scope</th><th>Resource</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>1</td><td><code>maxDelegationDepth</code></td><td>worker</td><td>depth</td></tr>
+          <tr><td>2</td><td><code>maxRuns</code></td><td>worker</td><td>runs</td></tr>
+          <tr><td>3</td><td><code>tokenBudget</code></td><td>worker</td><td>tokens</td></tr>
+          <tr><td>4</td><td><code>costBudgetUsd</code></td><td>worker</td><td>cost</td></tr>
+          <tr><td>5</td><td><code>maxRuns</code></td><td>team</td><td>runs</td></tr>
+          <tr><td>6</td><td><code>tokenBudget</code></td><td>team</td><td>tokens</td></tr>
+          <tr><td>7</td><td><code>costBudgetUsd</code></td><td>team</td><td>cost</td></tr>
+        </tbody>
+      </table>
+      <p>The function returns the FIRST blocking condition in declaration order. The second call at <code>dispatch.ts:302</code> handles the case where queueing invalidated the budget between calls.</p>
+
+      <h3>Mid-run — <code>message_end</code></h3>
+      <p>Every assistant message triggers the handler at <code>src/engine/dispatch.ts:646-708</code>. Three effects:</p>
+      <ol>
+        <li><strong>Live accumulation</strong> — <code>runtime.inputTokens += u.input</code> etc. (read by <code>workerConsumedTokens</code> when <code>status === "running"</code>).</li>
+        <li><strong>Warning</strong> at ≤20% remaining, deduped by <code>${scope}:${resource}:${agent|team}</code>.</li>
+        <li><strong>Abort</strong> at 0% remaining via <code>runController.abort(...)</code>.</li>
+      </ol>
+
+      <h3>Compaction — <code>compaction_end</code></h3>
+      <p>Debits <code>runtime.effectiveTokens</code> by the savings (<code>tokensBefore - estimatedTokensAfter</code>). Emits <code>team_budget_recalculated</code>. Cost is NOT recalculated.</p>
+    </section>
+
+    <section>
+      <h2>1.3 · Accumulation flow</h2>
+      <p>The dual/triple counter system is the heart of the budget layer's complexity. Three counters, three write sites, three read sites.</p>
+
+      <div class="flow-diagram">
+        <pre class="mermaid">
+flowchart TB
+    Start([dispatchAgent start]) --> Init[resolveRuntime<br/>fresh=true: reloadAgentConfig + freshResetRuntime]
+    Init --> Baseline[Capture runStart* baselines<br/>= runtime.* current values]
+    Baseline --> Prompt[session.prompt]
+    Prompt --> Msg1[message_end #1]
+    Msg1 --> Live1[increment runtime.* from usage.input/output/cache/cost]
+    Live1 --> MidCheck1{remaining ≤ 0?}
+    MidCheck1 -- yes --> Abort1[runController.abort]
+    MidCheck1 -- no --> More[continue]
+    More --> Msg2[message_end #2]
+    Msg2 --> Live2[increment runtime.*]
+    Live2 -.-> MidCheck1
+    Compact[compaction_end] --> Recalc[effectiveTokens -= savings]
+    Recalc --> More
+    Abort1 --> End([end of run])
+    More --> End
+    End --> Stats[getSessionStats overwrite]
+    Stats --> Over[overwrite runtime.inputTokens/outputTokens/cacheRead/cacheWrite/cost from stats]
+    Over --> Reasoning{runtime.reasoningTokens > 0?}
+    Reasoning -- yes --> KeepR[keep accumulated reasoningTokens]
+    Reasoning -- no --> SetR[set reasoningTokens = stats.reasoning]
+    KeepR --> Delta
+    SetR --> Delta
+    Delta[Compute delta = runtime.* - runStart*]
+    Delta --> Accum[governanceTokens += delta]
+    Accum --> Telemetry[emit delegation_end event]
+        </pre>
+      </div>
+
+      <h3>The three counters</h3>
+      <table>
+        <thead>
+          <tr><th>Counter</th><th>Source</th><th>Lifetime</th><th>Read by</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>runtime.inputTokens</code> + <code>outputTokens</code> + <code>cacheReadTokens</code> + <code>cacheWriteTokens</code> + <code>costUsd</code></td>
+            <td>SDK <code>usage.*</code> per <code>message_end</code>; overwritten by <code>getSessionStats()</code> at run end</td>
+            <td>Session-lifetime (single run)</td>
+            <td><code>workerConsumedTokens</code> when <code>status === "running"</code></td>
+          </tr>
+          <tr>
+            <td><code>runtime.governanceTokens</code> + <code>governanceCostUsd</code></td>
+            <td><code>governanceTokens += delta</code> at run end</td>
+            <td>Monotonic across runs (frozen)</td>
+            <td><code>workerConsumedTokens</code> post-run (Bug 2 fix)</td>
+          </tr>
+          <tr>
+            <td><code>runtime.effectiveTokens</code></td>
+            <td>Refreshed from <code>runtime.contextTokens</code> at <code>message_end</code>; debited by <code>compaction_end</code></td>
+            <td>Current context load</td>
+            <td>Team total recompute after compaction</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>The <code>workerConsumedTokens</code> choice</h3>
+      <p><code>src/engine/governance.ts:33-58</code> picks one of three counters based on lifecycle:</p>
+      <pre><code>if (runtime.status === "running") {
+  return runtimeTokens(runtime, scope);  // live path
+}
+return runtime.governanceTokens ?? runtime.effectiveTokens ?? runtimeTokens(runtime, scope);</code></pre>
+
+      <div class="callout critical">
+        <strong>The bug class lives here.</strong> The <code>??</code> fallthroughs encode a state machine in source code. Every consumer has to trust the picker; tests need the fake-session pattern to exercise the transitions. The third-mystery bug is a case where the picker returns a stale frozen value after an aborted fresh run.
+      </div>
+    </section>
+
+    <section>
+      <h2>1.4 · <code>fresh=true</code> bug timeline</h2>
+      <p>Three bugs in five commits. Bug 1 and Bug 2 are fixed in <code>feat/budget-strategy</code> at <code>9f950fb</code>. Bug 3 is unresolved.</p>
+
+      <div class="timeline">
+        <div class="timeline-item">
+          <div class="timeline-date">2025-09-27</div>
+          <div class="timeline-title">Bug 1 — fresh=true doesn't reset budget <span class="tag status-fixed">FIXED</span></div>
+          <div class="timeline-detail">
+            <code>freshResetRuntime</code> ran AFTER <code>checkDispatchBudgets</code>; an exhausted worker could never be respawned. Fix in commits <code>081380a</code> + <code>3be33f6</code>: move <code>freshResetRuntime</code> before every guard.
+          </div>
+        </div>
+
+        <div class="timeline-item">
+          <div class="timeline-date">2025-09-27</div>
+          <div class="timeline-title">Bug 2 — mid-run budget check sees stale governanceTokens <span class="tag status-fixed">FIXED</span></div>
+          <div class="timeline-detail">
+            <code>workerConsumedTokens</code> preferred <code>governanceTokens</code>, which is only written at <code>agent_end</code>. Mid-run it was 0; worker overran by 26x. Fix in <code>3be33f6</code>: return <code>runtimeTokens(runtime, scope)</code> when <code>status === "running"</code>.
+          </div>
+        </div>
+
+        <div class="timeline-item">
+          <div class="timeline-date">2025-09-28</div>
+          <div class="timeline-title">Bug 3 — third mystery, post-test residual <span class="tag status-unresolved">UNRESOLVED</span></div>
+          <div class="timeline-detail">
+            After Bug 1 + Bug 2 fixes, fresh=true still aborts with <code>tokens=0</code> but <code>remaining.tokens=0</code>. Top hypothesis: the end-of-run <code>governanceTokens += delta</code> accumulation at <code>dispatch.ts:~868</code> reads pre-overwrite <code>runtime.*</code> values. Three plausible root causes ranked in <code>tmp/2025-09-28-fresh-true-budget-bug-unresolved.md</code>.
+          </div>
+        </div>
+      </div>
+
+      <div class="callout critical">
+        <strong>Why incremental fixes haven't closed it.</strong> Three structural reasons: (1) the dual-counter system is the bug class — every counter-renaming, counter-resetting, or counter-source-changing refactor reintroduces Bug 3. (2) The end-of-run order is implicit, not explicit — the current code's sequence (stats overwrite → delta → accumulation) is correct IF <code>getSessionStats()</code> returns the full session-lifetime total for aborted sessions; the order is WRONG if it doesn't. (3) There is no single source of truth — even if Bug 3 is fixed, the next bug class is one step away.
+      </div>
+
+      <p>See <code>current-flow/fresh-true-bug-timeline.md</code> for the full analysis and <code>raw-evidence/bug-history.md</code> for the chronological log with commit references.</p>
+    </section>
+
+    <footer class="container">
+      <p>Next: <a href="02-current-system.html">Current system</a> — seven structural issues ranked by priority.</p>
+    </footer>
+  </main>
+</body>
+</html>

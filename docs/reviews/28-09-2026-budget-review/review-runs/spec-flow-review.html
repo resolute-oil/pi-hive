@@ -1,0 +1,1051 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Spec-flow review — budget refactor plan findings</title>
+  <link rel="stylesheet" href="../presentation/assets/presentation.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    /* Gap cards */
+    .gap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--accent);
+      border-radius: 6px;
+      padding: 18px 22px;
+      margin: 16px 0;
+    }
+    .gap.severity-critical { border-left-color: var(--critical); }
+    .gap.severity-high { border-left-color: var(--error); }
+    .gap.severity-medium { border-left-color: var(--amber); }
+    .gap.severity-low { border-left-color: var(--text-dim); }
+
+    .gap-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .gap-id {
+      font-family: 'SF Mono', Menlo, Monaco, Consolas, monospace;
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--text-muted);
+      background: var(--surface-alt);
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+    .gap-title {
+      font-size: 1.05rem;
+      font-weight: 600;
+      margin: 0;
+      flex: 1;
+      min-width: 200px;
+    }
+    .gap-severity {
+      display: inline-block;
+      padding: 3px 9px;
+      border-radius: 12px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .severity-critical .gap-severity { background: var(--critical); color: white; }
+    .severity-high .gap-severity { background: var(--error); color: white; }
+    .severity-medium .gap-severity { background: var(--amber); color: white; }
+    .severity-low .gap-severity { background: var(--text-dim); color: white; }
+
+    .gap-body { font-size: 0.94rem; }
+    .gap-body dl { margin: 8px 0 0; }
+    .gap-body dt {
+      font-weight: 600;
+      color: var(--text-muted);
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-top: 10px;
+    }
+    .gap-body dd {
+      margin: 4px 0 0 0;
+      padding-left: 0;
+    }
+    .gap-body code { font-size: 0.84em; }
+
+    .gap-goal {
+      display: inline-block;
+      padding: 2px 8px;
+      background: var(--accent-soft);
+      color: var(--accent-strong);
+      border-radius: 4px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      margin: 4px 4px 0 0;
+    }
+
+    /* Question cards */
+    .question {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 18px 22px;
+      margin: 14px 0;
+    }
+    .question-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .question-id {
+      font-family: 'SF Mono', Menlo, Monaco, Consolas, monospace;
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--text-muted);
+    }
+    .question-text {
+      font-size: 1rem;
+      font-weight: 600;
+      margin: 0;
+    }
+    .question-body { font-size: 0.92rem; }
+    .question-body dl { margin: 8px 0 0; }
+    .question-body dt {
+      font-weight: 600;
+      color: var(--text-muted);
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-top: 8px;
+    }
+    .question-body dd { margin: 4px 0 0 0; }
+
+    /* Summary grid */
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin: 20px 0;
+    }
+    .summary-cell {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      text-align: center;
+    }
+    .summary-cell .num {
+      font-size: 2rem;
+      font-weight: 700;
+      line-height: 1;
+    }
+    .summary-cell .label {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-top: 6px;
+    }
+    .summary-cell.critical .num { color: var(--critical); }
+    .summary-cell.high .num { color: var(--error); }
+    .summary-cell.medium .num { color: var(--amber); }
+    .summary-cell.low .num { color: var(--text-dim); }
+
+    /* Top 3 criticals - larger cards */
+    .top-critical {
+      background: linear-gradient(135deg, #fff5f5 0%, #ffffff 100%);
+      border: 2px solid var(--critical);
+      border-radius: 10px;
+      padding: 24px 28px;
+      margin: 20px 0;
+    }
+    .top-critical h3 {
+      color: var(--critical);
+      margin-top: 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <!-- ============================================================
+         SIDEBAR
+         ============================================================ -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <p class="eyebrow">Review findings</p>
+        <h1>Spec-flow walkthrough</h1>
+        <p class="meta">2026-09-28 · 30 gaps · 18 questions</p>
+      </div>
+
+      <ul class="sidebar-nav">
+        <li><a href="#hero"><span class="step-num">1</span>Overview</a></li>
+        <li><a href="#summary"><span class="step-num">2</span>Summary</a></li>
+        <li><a href="#top3"><span class="step-num">3</span>Top 3 critical</a></li>
+        <li><a href="#critical"><span class="step-num">4</span>All critical (4)</a></li>
+        <li><a href="#high"><span class="step-num">5</span>High (7)</a></li>
+        <li><a href="#medium"><span class="step-num">6</span>Medium (10)</a></li>
+        <li><a href="#low"><span class="step-num">7</span>Low (9)</a></li>
+        <li><a href="#q-critical"><span class="step-num">8</span>Q critical (4)</a></li>
+        <li><a href="#q-important"><span class="step-num">9</span>Q important (8)</a></li>
+        <li><a href="#q-nice"><span class="step-num">10</span>Q nice (6)</a></li>
+        <li><a href="#surprising"><span class="step-num">11</span>Surprising</a></li>
+        <li><a href="#next"><span class="step-num">12</span>Next steps</a></li>
+      </ul>
+    </aside>
+
+    <main>
+      <!-- ============================================================
+           PAGE 1 — OVERVIEW
+           ============================================================ -->
+      <section id="hero" class="hero">
+        <p class="eyebrow">Review findings · 2026-09-28</p>
+        <h1>Spec-flow walkthrough</h1>
+        <p class="subtitle">
+          The <code>spec-flow-analyzer</code> skill reviewed the budget refactor plan for completeness against the
+          user's stated goals: Pi Best Practices, budget-constrained delegated agents, flexibility in EOL/respawn,
+          eliminating the bug class, and config-shape changes. This walkthrough surfaces every finding.
+        </p>
+        <div class="meta">
+          <span class="meta-item"><strong>Skill:</strong>&nbsp;<code>spec-flow-analyzer</code></span>
+          <span class="meta-item"><strong>Artifacts reviewed:</strong>&nbsp;<code>04-refactor-plan.md</code> + <code>presentation/index.html</code></span>
+          <span class="meta-item"><strong>Result:</strong>&nbsp;<strong>30 gaps</strong> · <strong>18 questions</strong></span>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           PAGE 2 — SUMMARY
+           ============================================================ -->
+      <section id="summary" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 2 · At a glance</p>
+          <h2>Summary</h2>
+          <p class="subtitle">Severity distribution of gaps and questions.</p>
+        </header>
+
+        <h3>Gap inventory — 30 total</h3>
+        <div class="summary-grid">
+          <div class="summary-cell critical">
+            <div class="num">4</div>
+            <div class="label">Critical</div>
+          </div>
+          <div class="summary-cell high">
+            <div class="num">7</div>
+            <div class="label">High</div>
+          </div>
+          <div class="summary-cell medium">
+            <div class="num">10</div>
+            <div class="label">Medium</div>
+          </div>
+          <div class="summary-cell low">
+            <div class="num">9</div>
+            <div class="label">Low</div>
+          </div>
+        </div>
+
+        <h3>Clarifying questions — 18 total</h3>
+        <div class="summary-grid">
+          <div class="summary-cell critical">
+            <div class="num">4</div>
+            <div class="label">Critical</div>
+          </div>
+          <div class="summary-cell high">
+            <div class="num">8</div>
+            <div class="label">Important</div>
+          </div>
+          <div class="summary-cell medium">
+            <div class="num">6</div>
+            <div class="label">Nice-to-have</div>
+          </div>
+        </div>
+
+        <h3>Refactor goals × how the gaps threaten them</h3>
+        <table>
+          <thead>
+            <tr><th>Refactor goal</th><th>Gaps threatening it</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>1. Pi Best Practices</td>
+              <td><span class="tag critical">G-01</span> <span class="tag high">G-05</span> <span class="tag high">G-06</span> <span class="tag high">G-11</span> <span class="tag medium">G-21</span></td>
+            </tr>
+            <tr>
+              <td>2. Budget-constrained delegated agents</td>
+              <td><span class="tag high">G-09</span> <span class="tag medium">G-13</span> <span class="tag medium">G-17</span></td>
+            </tr>
+            <tr>
+              <td>3. Flexibility in EOL/respawn</td>
+              <td><span class="tag critical">G-04</span> <span class="tag high">G-05</span> <span class="tag high">G-07</span></td>
+            </tr>
+            <tr>
+              <td>4. Eliminate the bug class</td>
+              <td><span class="tag critical">G-02</span> <span class="tag critical">G-03</span></td>
+            </tr>
+            <tr>
+              <td>5. Config-shape changes in scope</td>
+              <td><span class="tag high">G-08</span> <span class="tag high">G-10</span> <span class="tag medium">G-14</span> <span class="tag medium">G-16</span> <span class="tag medium">G-18</span> <span class="tag medium">G-19</span></td>
+            </tr>
+            <tr>
+              <td>(scope/quality)</td>
+              <td><span class="tag medium">G-12</span> <span class="tag medium">G-15</span> <span class="tag medium">G-20</span> <span class="tag medium">G-22</span> + low-severity G-23..G-30</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout error">
+          <div class="callout-title">Headline finding</div>
+          <p>Every one of the five stated refactor goals is threatened by at least one critical or high-severity gap. The plan is internally consistent on three goals but inconsistent on its own fourth goal (config shape).</p>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           PAGE 3 — TOP 3 CRITICAL
+           ============================================================ -->
+      <section id="top3" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 3 · Most important</p>
+          <h2>Top 3 critical gaps</h2>
+          <p class="subtitle">The three findings the user should decide on before any implementation begins.</p>
+        </header>
+
+        <div class="top-critical">
+          <h3>G-01 — <code>tool_call</code> blocking is claimed but not implemented</h3>
+          <p>The plan's TL;DR (§0:22) says the refactor uses Pi's <code>tool_call</code> blocking primitive per <code>extension-patterns-reference.md:158-160</code>, but <strong>F2 T2.1 only wires <code>message_end</code>, <code>compaction_end</code>, <code>agent_settled</code></strong>. No task installs a <code>tool_call</code> handler.</p>
+          <p>The plan uses throw-to-refuse in <code>delegate_agent.execute()</code> — but this is the pre-dispatch equivalent, not mid-run gating. The headline Pi Best Practice is sold but not delivered.</p>
+          <p><strong>Resolution options:</strong> (a) add F3 T3.4 wiring <code>tool_call</code> handler that returns block result when <code>workerTokensRemaining &lt;= 0</code>, or (b) revise TL;DR to remove the claim.</p>
+          <p><span class="gap-goal">Threatens: Pi Best Practices (1)</span> <span class="gap-goal">Should be owned by: F3</span></p>
+        </div>
+
+        <div class="top-critical">
+          <h3>G-04 — <code>pauseWorkerSession</code> exists without <code>resumeWorkerSession</code></h3>
+          <p>The plan introduces 6 EOL commands; the 6th (<code>pause</code>) has no complement, making it a dead-end. Open question #5 defaults to "all 6 commands" but lists only end/compact/respawn/pause/snapshot/restore — no resume.</p>
+          <p>This directly undermines the user's stated goal of "flexibility in EOL/respawn moments." The literal plan delivers 4 fully-wired commands (end, compact, respawn, snapshot) plus 2 partially-wired (pause, restore).</p>
+          <p><strong>Resolution options:</strong> (a) add <code>resumeWorkerSession(agent)</code> as a 7th command, or (b) redefine <code>pauseWorkerSession</code> semantics to be auto-resumed on next prompt.</p>
+          <p><span class="gap-goal">Threatens: Flexibility in EOL (3)</span> <span class="gap-goal">Should be owned by: F5</span></p>
+        </div>
+
+        <div class="top-critical">
+          <h3>G-02 — <code>agent_settled</code> × <code>controller.abort</code> ordering is not pinned</h3>
+          <p>F3 T3.3 emits <code>appendCustomEntry("budget_exhausted")</code> and calls <code>controller.abort(...)</code> in the same <code>message_end</code> tick. If <code>agent_settled</code> fires immediately on abort (which it may per <code>agent-session.d.ts:48</code>), the <code>agent_settled</code> handler will write the final snapshot <em>before</em> the <code>appendCustomEntry("budget_exhausted")</code> lands — meaning the <code>"exhausted"</code> marker comes AFTER the <code>"checkpoint"</code> marker, not before.</p>
+          <p>The plan's F3 completion guard checks the abort and the emit separately but does not test that the exhausted emit precedes the checkpoint write. <strong>This is a fresh ordering dependency the plan introduces while claiming to eliminate one.</strong></p>
+          <p><strong>Resolution:</strong> add a test asserting "After abort-at-0%, the ledger has <code>exhausted</code> marker entry ID earlier in the JSONL than the <code>checkpoint</code> marker."</p>
+          <p><span class="gap-goal">Threatens: Eliminate the bug class (4)</span> <span class="gap-goal">Should be owned by: F3 + F4</span></p>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           PAGE 4 — ALL CRITICAL GAPS (4)
+           ============================================================ -->
+      <section id="critical" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 4 · Critical</p>
+          <h2>All critical gaps (4)</h2>
+          <p class="subtitle">Each one blocks or contradicts a stated refactor goal.</p>
+        </header>
+
+        <p>The three above plus:</p>
+
+        <div class="gap severity-critical">
+          <div class="gap-header">
+            <span class="gap-id">G-03</span>
+            <h3 class="gap-title">No regression test for the original Bug 3 symptom</h3>
+            <span class="gap-severity">Critical</span>
+          </div>
+          <div class="gap-body">
+            <p>The plan claims "Bug 3 is structurally impossible" (§0, completion guard), but no F7 test exercises the specific symptom: fresh=true delegation → abort at 0% → check <code>remaining.tokens</code>.</p>
+            <p>The closest is F7 T7.1 ("abort-then-<code>getSessionStats()</code> race"), but per <code>pi-sdk-session-api.md</code>, the new design reads <code>getSessionStats()</code> for cumulative — not for the abort-side state. The test name implies it tests the old bug, but the new code path doesn't run the old logic.</p>
+            <dl>
+              <dt>Resolution</dt>
+              <dd>Add F7 T7.7 "End-to-end fresh=true → abort → remaining-tokens regression test (reproduces Bug 3 verbatim)."</dd>
+              <dt>Should be owned by</dt>
+              <dd>F7</dd>
+              <dt>Refactor goal threatened</dt>
+              <dd><span class="gap-goal">Eliminate the bug class (4)</span> — without a regression test, future refactors could reintroduce the bug class without detection.</dd>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           PAGE 5 — HIGH-SEVERITY GAPS (7)
+           ============================================================ -->
+      <section id="high" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 5 · High</p>
+          <h2>High-severity gaps (7)</h2>
+          <p class="subtitle">Significant correctness or completeness issues.</p>
+        </header>
+
+        <div class="gap severity-high">
+          <div class="gap-header">
+            <span class="gap-id">G-05</span>
+            <h3 class="gap-title">No <code>session.abortCompaction</code> for cancellation paths</h3>
+            <span class="gap-severity">High</span>
+          </div>
+          <div class="gap-body">
+            <p>F5's <code>compactWorkerSession</code> has no cancel path. Per <code>pi-sdk-session-api.md:48-51</code>, <code>session.abortCompaction()</code> is the documented way to cancel an in-progress compaction.</p>
+            <dl>
+              <dt>Resolution</dt>
+              <dd>Add F5 T5.9 for compaction cancellation.</dd>
+              <dt>Refactor goal threatened</dt>
+              <dd><span class="gap-goal">Pi Best Practices (1)</span> <span class="gap-goal">Flexibility in EOL (3)</span></dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="gap severity-high">
+          <div class="gap-header">
+            <span class="gap-id">G-06</span>
+            <h3 class="gap-title"><code>restoreWorkerSession</code> assumes <code>createBranchedSession</code> returns an <code>AgentSession</code></h3>
+            <span class="gap-severity">High</span>
+          </div>
+          <div class="gap-body">
+            <p>Per <code>pi-sdk-session-api.md:294-296</code>, <code>createBranchedSession(leafId) =&gt; string | undefined</code>. The plan's T5.6 calls <code>installBudgetEventHooks(session, ...)</code> immediately, but no <code>.toAgentSession()</code> call is shown — unlike <code>SessionManager.create()</code> and <code>SessionManager.continueRecent()</code> which the plan correctly calls <code>.toAgentSession()</code> on.</p>
+            <dl>
+              <dt>Resolution</dt>
+              <dd>F5 T5.6 must call <code>createBranchedSession(leafId).toAgentSession()</code> (if that method exists) or fetch the session via <code>findById</code> + <code>open(path).toAgentSession()</code>.</dd>
+              <dt>Refactor goal threatened</dt>
+              <dd><span class="gap-goal">Pi Best Practices (1)</span> — likely implementation error caught only at runtime.</dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="gap severity-high">
+          <div class="gap-header">
+            <span class="gap-id">G-07</span>
+            <h3 class="gap-title">Cooperative tools mentioned but no T5 task implements them</h3>
+            <span class="gap-severity">High</span>
+          </div>
+          <div class="gap-body">
+            <p>The plan mentions <code>request_compaction</code>, <code>request_end_session</code>, <code>request_snapshot</code> at <code>:464</code> as "agent-callable tools" but no T5 task implements them. The completion guard says "verified by a smoke test" but does not name a smoke test file. The guard is unfalsifiable.</p>
+            <dl>
+              <dt>Resolution</dt>
+              <dd>Add F5 tasks T5.10, T5.11, T5.12; new test file <code>tests/cooperative-eol.test.ts</code>.</dd>
+              <dt>Refactor goal threatened</dt>
+              <dd><span class="gap-goal">Flexibility in EOL (3)</span> — agents can't cooperatively end without these tools.</dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="gap severity-high">
+          <div class="gap-header">
+            <span class="gap-id">G-08</span>
+            <h3 class="gap-title">Internal inconsistency: <code>marker</code> schema has 3 values, plan uses 6</h3>
+            <span class="gap-severity">High</span>
+          </div>
+          <div class="gap-body">
+            <p><code>BudgetLedgerEntry.data.marker</code> is defined as <code>"warning" | "exhausted" | "checkpoint"</code>. But the plan uses six <code>kind</code> values inside the <code>"checkpoint"</code> marker: <code>end</code>, <code>compact</code>, <code>respawn</code>, <code>pause</code>, <code>snapshot</code>, <code>restore</code>. The schema doesn't define a <code>kind</code> field at all.</p>
+            <dl>
+              <dt>Resolution</dt>
+              <dd>Schema fix — add <code>kind?: string</code> to <code>BudgetLedgerEntry.data</code> (or replace <code>marker</code> with <code>kind</code>).</dd>
+              <dt>Refactor goal threatened</dt>
+              <dd><span class="gap-goal">Config shape (5)</span> — schema is internally inconsistent.</dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="gap severity-high">
+          <div class="gap-header">
+            <span class="gap-id">G-09</span>
+            <h3 class="gap-title">Team totals under parallel delegation are not pinned</h3>
+            <span class="gap-severity">High</span>
+          </div>
+          <div class="gap-body">
+            <p>F7 T7.2 ("parallel delegation updates (both ledgers intact)") gates per-worker integrity but not team totals. Two workers writing to the same team <code>CustomEntry</code> would race at append time. The plan's per-worker isolation works (via <code>agentSlug</code> per entry) but team totals are derived by summing across <code>agentSlug</code>s — a concurrent write during the sum could land inconsistently.</p>
+            <dl>
+              <dt>Resolution</dt>
+              <dd>Augment T7.2 to assert team totals pre- and post- parallel dispatch.</dd>
+              <dt>Refactor goal threatened</dt>
+              <dd><span class="gap-goal">Budget-constrained delegated agents (2)</span></dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="gap severity-high">
+          <div class="gap-header">
+            <span class="gap-id">G-10</span>
+            <h3 class="gap-title"><code>per-day</code> window accepted by schema but no test exercises cap roll-over</h3>
+            <span class="gap-severity">High</span>
+          </div>
+          <div class="gap-body">
+            <p>F6 T6.8 lists <code>per-day</code> as a valid window for tokens but no test covers day-rollover behavior. C6 is rated "Land" but its behavior is unverified.</p>
+            <dl>
+              <dt>Resolution</dt>
+              <dd>Add F6 task T6.10 "Test <code>per-day</code> window rolls over at UTC midnight."</dd>
+              <dt>Refactor goal threatened</dt>
+              <dd><span class="gap-goal">Config shape (5)</span></dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="gap severity-high">
+          <div class="gap-header">
+            <span class="gap-id">G-11</span>
+            <h3 class="gap-title">No coverage of <code>SessionManager.branch</code> / <code>forkFrom</code></h3>
+            <span class="gap-severity">High</span>
+          </div>
+          <div class="gap-body">
+            <p>F8 covers <code>/reload</code> but not <code>/tree</code> (which calls <code>branch(branchFromId)</code>) or <code>/fork</code> (<code>forkFrom</code>). The plan claims branch-aware ledger but only exercises reload.</p>
+            <dl>
+              <dt>Resolution</dt>
+              <dd>Add F8 T8.5 and T8.6 for tree/fork coverage, or document as out-of-scope for v2.</dd>
+              <dt>Refactor goal threatened</dt>
+              <dd><span class="gap-goal">Pi Best Practices (1)</span></dd>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           PAGE 6 — MEDIUM-SEVERITY GAPS (10)
+           ============================================================ -->
+      <section id="medium" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 6 · Medium</p>
+          <h2>Medium-severity gaps (10)</h2>
+          <p class="subtitle">Missing tasks, scope holes, or behavior preservation issues.</p>
+        </header>
+
+        <div class="gap severity-medium">
+          <div class="gap-header">
+            <span class="gap-id">G-12</span>
+            <h3 class="gap-title">F5 cooperative subset has no task IDs</h3>
+            <span class="gap-severity">Medium</span>
+          </div>
+          <p>See G-07. Cooperative tools referenced in prose but no T5 task IDs.</p>
+        </div>
+
+        <div class="gap severity-medium">
+          <div class="gap-header">
+            <span class="gap-id">G-13</span>
+            <h3 class="gap-title"><code>depth</code> resource has zero test coverage</h3>
+            <span class="gap-severity">Medium</span>
+          </div>
+          <p>Plan keeps <code>depth.cap</code> in schema; no F-task tests it. The cap is unenforced.</p>
+        </div>
+
+        <div class="gap severity-medium">
+          <div class="gap-header">
+            <span class="gap-id">G-14</span>
+            <h3 class="gap-title"><code>queue</code> resource dropped without rationale</h3>
+            <span class="gap-severity">Medium</span>
+          </div>
+          <p>Current-state analysis lists <code>queue</code> as one of five resources; plan silently drops it. Either add back to F6 or add a "What stays" note explaining the removal.</p>
+        </div>
+
+        <div class="gap severity-medium">
+          <div class="gap-header">
+            <span class="gap-id">G-15</span>
+            <h3 class="gap-title">HTML and Markdown disagree on open-question count</h3>
+            <span class="gap-severity">Medium</span>
+          </div>
+          <p>Plan §6 lists 14 open questions; HTML page 11 lists 13. Pick a number, fix both files. Recommend 13 (matches the 13 base + config-shape questions actually enumerated).</p>
+        </div>
+
+        <div class="gap severity-medium">
+          <div class="gap-header">
+            <span class="gap-id">G-16</span>
+            <h3 class="gap-title">No <code>schema_version</code> field for migration cutover</h3>
+            <span class="gap-severity">Medium</span>
+          </div>
+          <p>"One release dual-format, then hard break" without a version marker. Second-release cutover is ambiguous. Add <code>schema_version: 1 | 2</code> discriminator OR rely on key-name presence detection.</p>
+        </div>
+
+        <div class="gap severity-medium">
+          <div class="gap-header">
+            <span class="gap-id">G-17</span>
+            <h3 class="gap-title"><code>summarize_progress</code> × budget warning emit ordering not pinned</h3>
+            <span class="gap-severity">Medium</span>
+          </div>
+          <p>Both write <code>appendCustomMessageEntry</code> in the same tick potentially. Order in worker context depends on which lands last. Pin the order in a test.</p>
+        </div>
+
+        <div class="gap severity-medium">
+          <div class="gap-header">
+            <span class="gap-id">G-18</span>
+            <h3 class="gap-title"><code>max-delegation-depth</code> → <code>depth.cap</code> migration not in F6</h3>
+            <span class="gap-severity">Medium</span>
+          </div>
+          <p>F6 T6.2 covers <code>token-budget</code> and <code>cost-budget-usd</code>; T6.5 covers <code>tokens.include</code>. No T6.x maps <code>max-delegation-depth</code> to <code>depth.cap</code>.</p>
+        </div>
+
+        <div class="gap severity-medium">
+          <div class="gap-header">
+            <span class="gap-id">G-19</span>
+            <h3 class="gap-title"><code>worker-budgets</code> → <code>per-worker</code> rename not in F6 explicit tasks</h3>
+            <span class="gap-severity">Medium</span>
+          </div>
+          <p>C1 describes the rename. F6 T6.1 introduces nested schema but doesn't include the rename; T6.4 covers per-agent rename. Global rename is implicit.</p>
+        </div>
+
+        <div class="gap severity-medium">
+          <div class="gap-header">
+            <span class="gap-id">G-20</span>
+            <h3 class="gap-title"><code>summarize_progress</code> plan does not address the existing <code>compact_failed</code> path</h3>
+            <span class="gap-severity">Medium</span>
+          </div>
+          <p>Existing code has <code>no_runtime / over_cap / compact_failed</code> paths. Plan T5.7 says "preserved" but doesn't mention the failure paths. May regress existing tests.</p>
+        </div>
+
+        <div class="gap severity-medium">
+          <div class="gap-header">
+            <span class="gap-id">G-21</span>
+            <h3 class="gap-title"><code>entry_appended</code> not wired for self-throttling</h3>
+            <span class="gap-severity">Medium</span>
+          </div>
+          <p>Per <code>agent-session.d.ts:62</code>, <code>entry_appended</code> fires for every session entry, including <code>appendCustomEntry</code> itself. Wiring it would let the ledger react to its own writes. Not wired; the simpler <code>message_end</code>-driven model is used.</p>
+        </div>
+
+        <div class="gap severity-medium">
+          <div class="gap-header">
+            <span class="gap-id">G-22</span>
+            <h3 class="gap-title">Telemetry dual-shape emit is in Open Question #7 but no F-task implements it</h3>
+            <span class="gap-severity">Medium</span>
+          </div>
+          <p>Plan claims "telemetry event names unchanged" but the shape changes. Open question #7 recommends "emit both old and new shapes for one release" but no F2/F5 task implements the dual-emit.</p>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           PAGE 7 — LOW-SEVERITY GAPS (9)
+           ============================================================ -->
+      <section id="low" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 7 · Low</p>
+          <h2>Low-severity gaps (9)</h2>
+          <p class="subtitle">Cosmetic, future-proofing, or already-correct-but-mislabeled.</p>
+        </header>
+
+        <div class="gap severity-low">
+          <div class="gap-header">
+            <span class="gap-id">G-23</span>
+            <h3 class="gap-title">No spec for <code>controller.signal.aborted</code> inside <code>appendCustomEntry</code></h3>
+            <span class="gap-severity">Low</span>
+          </div>
+          <p>F2's gate says <code>ctx.signal</code> threaded through every write; F3 doesn't assert abort-mid-write. Edge case.</p>
+        </div>
+
+        <div class="gap severity-low">
+          <div class="gap-header">
+            <span class="gap-id">G-24</span>
+            <h3 class="gap-title">Plan does not address <code>cacheWrite1h</code> and <code>reasoning</code> Usage fields</h3>
+            <span class="gap-severity">Low</span>
+          </div>
+          <p>Some providers populate these; current scope is <code>[input, output, cacheRead, cacheWrite]</code>. Low priority — most providers don't populate.</p>
+        </div>
+
+        <div class="gap severity-low">
+          <div class="gap-header">
+            <span class="gap-id">G-25</span>
+            <h3 class="title"><code>Bun</code>-isolation not enforced as a gate</h3>
+            <span class="gap-severity">Low</span>
+          </div>
+          <p>AGENTS.md requires Bun-specific code to be isolated to dashboard/server paths. F9's gate doesn't include a Bun check. Add <code>grep -r "bun:" src/engine/budget/</code> to F9's gate.</p>
+        </div>
+
+        <div class="gap severity-low">
+          <div class="gap-header">
+            <span class="gap-id">G-26</span>
+            <h3 class="gap-title"><code>appendUsage</code> in TL;DR but never wired</h3>
+            <span class="gap-severity">Low</span>
+          </div>
+          <p>Plan lists <code>appendUsage</code> as a primitive in TL;DR but uses <code>appendCustomEntry</code> throughout. Using <code>appendUsage</code> would inflate the spend the ledger measures — so <code>appendCustomEntry</code> is correct, but the TL;DR is misleading.</p>
+        </div>
+
+        <div class="gap severity-low">
+          <div class="gap-header">
+            <span class="gap-id">G-27</span>
+            <h3 class="gap-title">HTML progress counter starts at "0/0 tasks (0/0 features)"</h3>
+            <span class="gap-severity">Low</span>
+          </div>
+          <p>Initial state is wrong before JS updates it. Cosmetic; the JS does update it correctly on toggle.</p>
+        </div>
+
+        <div class="gap severity-low">
+          <div class="gap-header">
+            <span class="gap-id">G-28</span>
+            <h3 class="gap-title"><code>restoreWorkerSession</code> relies on destination session's hooks</h3>
+            <span class="gap-severity">Low</span>
+          </div>
+          <p>The 6th command's row says "(none — destination session emits)" — the destination session's own event hooks write the snapshot. Correct but couples restore to the destination session's hooks being correctly installed.</p>
+        </div>
+
+        <div class="gap severity-low">
+          <div class="gap-header">
+            <span class="gap-id">G-29</span>
+            <h3 class="gap-title">No test for cap type-mismatch in <code>policy.ts</code></h3>
+            <span class="gap-severity">Low</span>
+          </div>
+          <p>What if a caller passes a TeamBudgetPolicy to a per-worker query? Typebox narrowing should catch it but T1.3 doesn't pin it.</p>
+        </div>
+
+        <div class="gap severity-low">
+          <div class="gap-header">
+            <span class="gap-id">G-30</span>
+            <h3 class="gap-title"><code>interventionAvailable</code> flag referenced in HTML, not in plan §6</h3>
+            <span class="gap-severity">Low</span>
+          </div>
+          <p>HTML page 11 mentions <code>interventionAvailable</code> on <code>budget_warning</code> events. Plan §6 doesn't list this flag. F13 T13.2 covers it. Mismatch.</p>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           PAGE 8 — CRITICAL QUESTIONS (4)
+           ============================================================ -->
+      <section id="q-critical" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 8 · Critical questions</p>
+          <h2>Critical questions (4)</h2>
+          <p class="subtitle">These gate the structural correctness of the refactor. Answer before implementation begins.</p>
+        </header>
+
+        <div class="question">
+          <div class="question-header">
+            <span class="question-id">Q1</span>
+            <h3 class="question-text">Should the plan implement <code>tool_call</code> blocking (Pi docs §5), or is throw-to-refuse in <code>delegate_agent.execute()</code> the only gating point?</h3>
+          </div>
+          <div class="question-body">
+            <p>The plan's TL;DR claims <code>tool_call</code> alignment but no task implements it. <code>tool_call</code> blocking is the documented primitive for "block an expensive call mid-run" per <code>extension-patterns-reference.md:158-160</code>. Without it, the plan is incomplete relative to its stated Pi Best Practices goal.</p>
+            <dl>
+              <dt>What the answer changes</dt>
+              <dd>If yes → add F3 T3.4 wiring <code>tool_call</code> handler that returns block result. If no → revise TL;DR to remove the claim.</dd>
+              <dt>Default if not answered</dt>
+              <dd>Implement <code>tool_call</code> blocking for <code>bash</code>, <code>edit</code>, <code>write</code>, <code>read</code> when <code>workerTokensRemaining &lt;= 0</code>.</dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="question">
+          <div class="question-header">
+            <span class="question-id">Q2</span>
+            <h3 class="question-text">What is the resume path for <code>pauseWorkerSession</code>?</h3>
+          </div>
+          <div class="question-body">
+            <p>Pause without resume is a dead-end. The plan introduces 6 commands; the 6th (<code>pause</code>) has no complement. The "flexibility in EOL/respawn moments" goal requires a clear pause → resume cycle.</p>
+            <dl>
+              <dt>What the answer changes</dt>
+              <dd>Either (a) add <code>resumeWorkerSession(agent)</code> as a 7th command, or (b) redefine <code>pauseWorkerSession</code> semantics to be auto-resumed on next prompt.</dd>
+              <dt>Default if not answered</dt>
+              <dd>Add <code>resumeWorkerSession</code> as a 7th operator command (no new SDK primitive; just remove the pause marker from ledger).</dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="question">
+          <div class="question-header">
+            <span class="question-id">Q3</span>
+            <h3 class="question-text">How should the implementation reproduce Bug 3 to verify the structural fix?</h3>
+          </div>
+          <div class="question-body">
+            <p>The plan claims "Bug 3 is structurally impossible" but provides no regression test that exercises the specific symptom (<code>runtime.* = 0</code> but <code>remaining.tokens = 0</code> after fresh=true abort). Without such a test, the claim is unfalsifiable.</p>
+            <dl>
+              <dt>What the answer changes</dt>
+              <dd>Either (a) add F7 T7.7 reproducing the exact Bug 3 scenario and asserting the new ledger-based math returns correct <code>remaining.tokens</code>, or (b) accept that the structural fix is unverifiable and document the risk.</dd>
+              <dt>Default if not answered</dt>
+              <dd>Add T7.7 — a fresh=true delegation with budget at 99%, manual abort at 0%, then <code>restore</code> and assert <code>remaining.tokens</code> reflects actual spend.</dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="question">
+          <div class="question-header">
+            <span class="question-id">Q4</span>
+            <h3 class="question-text">Should <code>agent_settled</code> snapshot include a final <code>getSessionStats()</code> read or rely on the last <code>message_end</code> snapshot?</h3>
+          </div>
+          <div class="question-body">
+            <p>Per <code>pi-sdk-session-api.md</code>, <code>getSessionStats()</code> returns the full session lifetime including aborted messages. The plan uses <code>getSessionStats()</code> as the source. But the <code>agent_settled</code> handler only calls <code>ledger.snapshot(stats, policy, "checkpoint", signal)</code> — which writes the snapshot, but the read of <code>stats</code> is not specified. Is the read happening at <code>agent_settled</code> time, or is the snapshot just the last throttled write?</p>
+            <dl>
+              <dt>What the answer changes</dt>
+              <dd>If read at <code>agent_settled</code> → <code>getSessionStats()</code> includes the final abort-side usage. If relying on throttled → may miss the final state.</dd>
+              <dt>Default if not answered</dt>
+              <dd>Read <code>getSessionStats()</code> at <code>agent_settled</code> and write the result as the checkpoint.</dd>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           PAGE 9 — IMPORTANT QUESTIONS (8)
+           ============================================================ -->
+      <section id="q-important" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 9 · Important questions</p>
+          <h2>Important questions (8)</h2>
+          <p class="subtitle">Significantly affect UX or maintainability.</p>
+        </header>
+
+        <div class="question">
+          <div class="question-header">
+            <span class="question-id">Q5</span>
+            <h3 class="question-text">How should <code>summarize_progress({ notes, compact? })</code> interact with the 20% budget warning emit?</h3>
+          </div>
+          <div class="question-body">
+            <p>Both write <code>appendCustomMessageEntry</code> in the same tick potentially. The order in the worker's context depends on which lands last.</p>
+            <dl>
+              <dt>What the answer changes</dt>
+              <dd>Either order them deterministically (warning first, then note) or merge them into a single entry.</dd>
+              <dt>Default if not answered</dt>
+              <dd>Warning always emitted before any <code>summarize_progress</code> note for the same tick.</dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="question">
+          <div class="question-header">
+            <span class="question-id">Q6</span>
+            <h3 class="question-text">Should the plan wire <code>entry_appended</code> for self-throttling?</h3>
+          </div>
+          <div class="question-body">
+            <p><code>entry_appended</code> fires for every session entry, including <code>appendCustomEntry</code> itself. Wiring it would let the ledger react to its own writes — useful for "did the warning <code>CustomEntry</code> land?" introspection.</p>
+            <dl>
+              <dt>Default if not answered</dt>
+              <dd>Don't wire <code>entry_appended</code> — keep the simpler design.</dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="question">
+          <div class="question-header">
+            <span class="question-id">Q7</span>
+            <h3 class="question-text">What happens when two parallel <code>delegateAgent</code> calls exceed team budget mid-flight?</h3>
+          </div>
+          <div class="question-body">
+            <p>Per F-N (parallel delegations), team totals are derived by summing across workers. If two workers both write to team ledger simultaneously and the team cap is crossed between the two writes, the second worker may have started already.</p>
+            <dl>
+              <dt>What the answer changes</dt>
+              <dd>Either (a) pre-flight check only (current design), accepting mid-flight overrun, or (b) live team ledger check in <code>message_end</code> handler that aborts the offender.</dd>
+              <dt>Default if not answered</dt>
+              <dd>Pre-flight check only; document the mid-flight overrun as accepted behavior.</dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="question">
+          <div class="question-header">
+            <span class="question-id">Q8</span>
+            <h3 class="question-text">Should <code>request_compaction</code> / <code>request_end_session</code> / <code>request_snapshot</code> be a separate feature (F5.x) or rolled into F5?</h3>
+          </div>
+          <div class="question-body">
+            <p>Per Gap G-07, the cooperative subset is mentioned but not implemented. Three agent-callable tools need their own task IDs and tests.</p>
+            <dl>
+              <dt>Default if not answered</dt>
+              <dd>Expand F5 with three new tasks.</dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="question">
+          <div class="question-header">
+            <span class="question-id">Q9</span>
+            <h3 class="question-text">Should the dashboard migration be part of the refactor PR or separate?</h3>
+          </div>
+          <div class="question-body">
+            <p>Open question #3 defaults to "separate PR after refactor lands." But the dashboard's current code reads old telemetry event shapes; without dual-shape emit during the transition, the dashboard breaks the moment the refactor lands.</p>
+            <dl>
+              <dt>Default if not answered</dt>
+              <dd>Separate PR (per plan); dual-shape emit for one release.</dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="question">
+          <div class="question-header">
+            <span class="question-id">Q10</span>
+            <h3 class="question-text">What is the explicit <code>schema_version</code> field for migration cutover?</h3>
+          </div>
+          <div class="question-body">
+            <p>Per Gap G-16, the plan talks about "one release dual-format" then "hard break" without a version marker.</p>
+            <dl>
+              <dt>What the answer changes</dt>
+              <dd>Either (a) add <code>schema_version: 1 | 2</code> discriminator, or (b) rely on key-name presence (<code>tokens.cap</code> present → v2).</dd>
+              <dt>Default if not answered</dt>
+              <dd>Key-name presence detection.</dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="question">
+          <div class="question-header">
+            <span class="question-id">Q11</span>
+            <h3 class="question-text">Should <code>depth</code> resource have a per-delegation test?</h3>
+          </div>
+          <div class="question-body">
+            <p>Per Gap G-13, depth has no tests in any F-task.</p>
+            <dl>
+              <dt>Default if not answered</dt>
+              <dd>Add depth test to F2 (pre-flight check that <code>currentDepth + 1 &lt;= policy.depth.cap</code>).</dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="question">
+          <div class="question-header">
+            <span class="question-id">Q12</span>
+            <h3 class="question-text">Should the plan address <code>SessionManager.branch</code> and <code>forkFrom</code>?</h3>
+          </div>
+          <div class="question-body">
+            <p>Per Gap G-11, the plan claims branch-aware ledger but only covers <code>/reload</code>. Tree navigation and forking also exercise <code>getBranch()</code>.</p>
+            <dl>
+              <dt>Default if not answered</dt>
+              <dd>Document as out-of-scope for v2.</dd>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           PAGE 10 — NICE-TO-HAVE QUESTIONS (6)
+           ============================================================ -->
+      <section id="q-nice" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 10 · Nice-to-have</p>
+          <h2>Nice-to-have questions (6)</h2>
+          <p class="subtitle">Improve clarity but have reasonable defaults.</p>
+        </header>
+
+        <div class="question">
+          <div class="question-header">
+            <span class="question-id">Q13</span>
+            <h3 class="question-text">Should the HTML's open-questions count (13) be reconciled with the Markdown's (14)?</h3>
+          </div>
+          <p>Cosmetic but user-facing. Pick a number, fix both files.</p>
+        </div>
+
+        <div class="question">
+          <div class="question-header">
+            <span class="question-id">Q14</span>
+            <h3 class="question-text">Should the plan include a Bun-isolation check in the F9 completion guard?</h3>
+          </div>
+          <p>AGENTS.md requires Bun-specific code isolated to dashboard/server paths. Add <code>grep -r "bun:" src/engine/budget/</code> to F9's gate.</p>
+        </div>
+
+        <div class="question">
+          <div class="question-header">
+            <span class="question-id">Q15</span>
+            <h3 class="question-text">Should <code>cacheWrite1h</code> and <code>reasoning</code> be added to the <code>include</code> list?</h3>
+          </div>
+          <p>Some providers populate these. Premature enumeration; leave out.</p>
+        </div>
+
+        <div class="question">
+          <div class="question-header">
+            <span class="question-id">Q16</span>
+            <h3 class="question-text">Should <code>interventionAvailable</code> flag be a single boolean per warning or a per-command array?</h3>
+          </div>
+          <p>Open question on shape. Default: single boolean per warning.</p>
+        </div>
+
+        <div class="question">
+          <div class="question-header">
+            <span class="question-id">Q17</span>
+            <h3 class="question-text">Should the migration guide include rollback instructions that touch running code, or only the schema?</h3>
+          </div>
+          <p>Plan T12.3 says "rollback path is concrete" but doesn't say what code rollback looks like. Default: schema-only rollback (git revert the config-validation.ts change).</p>
+        </div>
+
+        <div class="question">
+          <div class="question-header">
+            <span class="question-id">Q18</span>
+            <h3 class="question-text">Should the plan document the <code>appendUsage</code> vs <code>appendCustomEntry</code> decision explicitly?</h3>
+          </div>
+          <p>Per Gap G-26, TL;DR lists <code>appendUsage</code> but the plan uses <code>appendCustomEntry</code>. Add a §2.14 note explaining: <code>appendUsage</code> participates in session totals (would inflate spend), <code>appendCustomEntry</code> doesn't (correct for ledger).</p>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           PAGE 11 — SURPRISING OBSERVATIONS
+           ============================================================ -->
+      <section id="surprising" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 11 · Surprising</p>
+          <h2>Surprising observations</h2>
+          <p class="subtitle">Findings that didn't fit the gap inventory cleanly.</p>
+        </header>
+
+        <div class="card amber">
+          <h4>1. Plan is inconsistent on its own fourth refactor goal</h4>
+          <p>The plan claims all six C1-C6 land, but the F6 task list (T6.1-T6.9) doesn't explicitly cover <code>max-delegation-depth</code> → <code>depth.cap</code> (G-18), <code>worker-budgets</code> → <code>per-worker</code> (G-19), or <code>schema_version</code> (G-16). The plan sells config-shape completeness but doesn't deliver it in tasks.</p>
+        </div>
+
+        <div class="card amber">
+          <h4>2. Plan is more conservative than the user's stated flexibility goal</h4>
+          <p>The user wants "flexibility in EOL/respawn moments"; the plan delivers 6 commands but pause without resume (G-04) and cooperative tools not implemented (G-07). The literal plan delivers 4 fully-wired commands (end, compact, respawn, snapshot) plus 2 partially-wired (pause, restore).</p>
+        </div>
+
+        <div class="card amber">
+          <h4>3. Plan removes <code>appendUsage</code> from actual implementation despite listing it in TL;DR</h4>
+          <p>Gap G-26 is interesting because the plan does the right thing (uses <code>appendCustomEntry</code> which doesn't inflate session totals) but the TL;DR still lists <code>appendUsage</code> as a primitive used. Future readers will be confused.</p>
+        </div>
+
+        <div class="card amber">
+          <h4>4. Plan's marker schema is internally inconsistent</h4>
+          <p>Gap G-08 (3 marker values vs 6 kinds) suggests the schema was written before the 6-command EOL design. Whoever implements F5 first will hit this immediately.</p>
+        </div>
+
+        <div class="card">
+          <h4>5. More "How do I know" completion guards than verifiable gates</h4>
+          <p>Several guards assert internal consistency (e.g., "verify <code>session.dispose()</code> is called") that can only be tested via spy/mocking, not via real SDK behavior. The plan's quality bar is high but its testing strategy is implementation-aware rather than behavior-aware.</p>
+        </div>
+
+        <div class="card">
+          <h4>6. HTML and Markdown presentations disagree on count</h4>
+          <p>Gap G-15 is small but suggests the documents were not synced after a final edit. Future readers will notice.</p>
+        </div>
+
+        <div class="card error">
+          <h4>7. Plan does not address the bug class for <code>compaction_end</code>-side errors</h4>
+          <p>Per <code>agent-session.d.ts:75-79</code>, <code>compaction_end</code> has <code>aborted: boolean</code> and <code>errorMessage?</code> fields. The plan's F2 T2.1 wires <code>compaction_end</code> but doesn't check <code>event.aborted</code> — meaning a failed compaction triggers the <code>recordCompaction</code> ledger write even though no compaction happened. Bug class lurking.</p>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           PAGE 12 — RECOMMENDED NEXT STEPS
+           ============================================================ -->
+      <section id="next" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 12 · Action</p>
+          <h2>Recommended next steps</h2>
+          <p class="subtitle">For the user, and for the implementation team.</p>
+        </header>
+
+        <h3>For the user (block implementation)</h3>
+        <ol>
+          <li><strong>Answer Q1-Q4 before any implementation begins.</strong> These four critical questions gate the structural correctness of the refactor. The plan as written has a critical gap on each of the four goals.</li>
+          <li><strong>Decide on <code>tool_call</code> blocking (Q1)</strong> before estimating LOC. If yes, add ~150 LOC to F3 and 6+ new tests. If no, remove the TL;DR claim.</li>
+          <li><strong>Decide on <code>resumeWorkerSession</code> (Q2)</strong> before F5 implementation. Either add the 7th command or redefine pause semantics.</li>
+          <li><strong>Adopt the regression-test-for-Bug-3 stance (Q3).</strong> Either add T7.7 or accept the risk.</li>
+          <li><strong>Fix the internal <code>marker</code> schema inconsistency (G-08).</strong> One-line fix; blocks F5 implementation cleanly.</li>
+          <li><strong>Reconcile the open-question count (G-15).</strong> Pick 13 or 14; fix HTML + Markdown to match.</li>
+          <li><strong>Decide on <code>schema_version</code> (Q10).</strong> Without it, the second-release cutover is ambiguous.</li>
+        </ol>
+
+        <h3>For the implementation team</h3>
+        <ol>
+          <li>Wire <code>tool_call</code> blocking (or remove the claim) — per Q1.</li>
+          <li>Add <code>resumeWorkerSession</code> — per Q2.</li>
+          <li>Pin the abort-then-<code>agent_settled</code> ordering — per G-02.</li>
+          <li>Add a Bug 3 regression test — per G-03.</li>
+          <li>Implement cooperative EOL tools — per G-07.</li>
+          <li>Fix the <code>marker</code> schema — per G-08.</li>
+          <li>Address the team-total race in F7 — per G-09.</li>
+          <li>Pin <code>per-day</code> window roll-over — per G-10.</li>
+        </ol>
+
+        <div class="callout success" style="margin-top: 24px;">
+          <div class="callout-title">Recommended path</div>
+          <p>Address the 4 critical gaps (G-01, G-02, G-03, G-04) in the plan as small targeted edits before implementation starts. None requires new design work — they are either add-a-task or remove-a-claim. The 7 high-severity gaps can be absorbed into existing features during F5/F6/F7 implementation.</p>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           FOOTER
+           ============================================================ -->
+      <footer class="page-footer">
+        <p>Spec-flow review walkthrough · 2026-09-28 · review commit <code>f06e3b4</code></p>
+        <p>Generated on the review branch <code>review/budget-redesign-2026-09-28</code> (not pushed). Lives at <code>docs/reviews/28-09-2026-budget-review/review-runs/spec-flow-review.html</code>. The underlying markdown is at <code>spec-flow-review.md</code> in the same directory.</p>
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

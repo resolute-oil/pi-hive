@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pi-docs Alignment — Budget Strategies Review</title>
+  <link rel="stylesheet" href="assets/review.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>mermaid.initialize({ startOnLoad: true, theme: 'neutral', securityLevel: 'loose' });</script>
+</head>
+<body>
+  <header class="hero">
+    <div class="container">
+      <p class="eyebrow">Report 3 · 2026-09-28</p>
+      <h1>Pi-docs alignment audit</h1>
+      <p class="subtitle">What the current budget code follows, what it conflicts with, and what it ignores — verified against Pi's documented extension patterns.</p>
+      <p class="meta">Source: <code>/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/docs/</code> · Distilled in <code>pi-docs/extension-patterns-reference.md</code></p>
+    </div>
+  </header>
+
+  <nav class="container">
+    <ul class="report-nav">
+      <li><a href="index.html">Overview</a></li>
+      <li><a href="01-current-flow.html">Current flow</a></li>
+      <li><a href="02-current-system.html">Current system</a></li>
+      <li><a href="03-pi-docs-alignment.html">Pi-docs alignment</a></li>
+      <li><a href="04-test-coverage.html">Test coverage</a></li>
+    </ul>
+  </nav>
+
+  <main class="container">
+    <section>
+      <h2>3.1 · Three buckets</h2>
+      <p>The pi-docs audit organizes patterns into three buckets: what the current code follows, what it must not violate, and what it ignores. Every quote below is from a specific doc and section anchor at <code>/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/docs/</code>.</p>
+
+      <div class="callout">
+        <strong>Source:</strong> <code>pi-docs/extension-patterns-reference.md</code> — full reference with verbatim quotes and section-anchor citations. The summary on this page is a high-level view; the full reference has the source-of-truth visible.
+      </div>
+    </section>
+
+    <section>
+      <h2>3.2 · Patterns the current code follows</h2>
+
+      <div class="matrix">
+        <div class="matrix-row">
+          <div class="matrix-label">Throw to refuse an expensive tool</div>
+          <div class="matrix-content">
+            <code>extensions.md#custom-tools</code>: "Throw from <code>execute()</code> to produce a failed tool result. Returning an object does not mark it as an error."
+            <br/><br/>
+            The dispatch path returns <code>{ output: "Delegation blocked: ...", exitCode: 1 }</code> for budget blocks. Equivalent to throw-to-refuse in effect.
+            <br/><br/>
+            <span class="tag">FOLLOWED</span>
+          </div>
+        </div>
+
+        <div class="matrix-row">
+          <div class="matrix-label">Mode-independent behavior</div>
+          <div class="matrix-content">
+            <code>extensions.md#ui-and-modes</code>: "Keep tool and event behavior independent from rendering so non-interactive modes remain functional."
+            <br/><br/>
+            The budget layer is mode-independent. Caps apply in print, JSON, and RPC modes just as in TUI mode.
+            <br/><br/>
+            <span class="tag">FOLLOWED</span>
+          </div>
+        </div>
+
+        <div class="matrix-row">
+          <div class="matrix-label">Peer dependencies with "*" ranges</div>
+          <div class="matrix-content">
+            <code>packages.md</code>: "Declare imported Pi packages in <code>peerDependencies</code> with a <code>"*"</code> range and do not bundle them."
+            <br/><br/>
+            pi-hive's <code>package.json</code> follows this. <code>@earendil-works/pi-coding-agent</code>, <code>@earendil-works/pi-tui</code>, and <code>typebox</code> are peers.
+            <br/><br/>
+            <span class="tag">FOLLOWED</span>
+          </div>
+        </div>
+
+        <div class="matrix-row">
+          <div class="matrix-label">Idempotent <code>session_shutdown</code></div>
+          <div class="matrix-content">
+            <code>extensions.md#errors-and-cleanup</code>: "Release resources in <code>session_shutdown</code> even when normal operation attempted cleanup. Keep cleanup idempotent because cancellation, reload, session replacement, and process exit can converge on the same path."
+            <br/><br/>
+            pi-hive's <code>session_shutdown</code> handler in <code>src/integration/hooks.ts:496</code> is idempotent.
+            <br/><br/>
+            <span class="tag">FOLLOWED</span>
+          </div>
+        </div>
+
+        <div class="matrix-row">
+          <div class="matrix-label">Long-lived resources from session_start, not factory</div>
+          <div class="matrix-content">
+            <code>extensions.md#respect-the-runtime-lifecycle</code>: "Do not start processes, sockets, watchers, or timers in the factory ... Start long-lived resources from <code>session_start</code> or from the command or tool that needs them."
+            <br/><br/>
+            The dashboard server is started in <code>session_start</code>. Verified in HANDOFF.md pitfall #1.
+            <br/><br/>
+            <span class="tag">FOLLOWED</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>3.3 · Patterns the current code does not violate</h2>
+
+      <div class="matrix">
+        <div class="matrix-row">
+          <div class="matrix-label">No <code>terminate: true</code> unless the whole batch agrees</div>
+          <div class="matrix-content">
+            <code>extensions.md#custom-tools</code>: "Return <code>terminate: true</code> only when the agent should skip its automatic follow-up after every completed tool in that batch agrees to terminate."
+            <br/><br/>
+            pi-hive doesn't set <code>terminate: true</code> on the <code>summarize_progress</code> tool or any other custom tool.
+            <br/><br/>
+            <span class="tag">NOT VIOLATED</span>
+          </div>
+        </div>
+
+        <div class="matrix-row">
+          <div class="matrix-label">No <code>setActiveTools</code> churn on every run</div>
+          <div class="matrix-content">
+            <code>extensions.md#activate-tools-dynamically</code>: "Pi records the initial prompt and tool set in the transcript's first system message ... Providers that cannot represent the transition receive a complete transcript checkpoint, which can invalidate the cached prefix."
+            <br/><br/>
+            The worker toolset is stable. Budget decisions live in tool results and event handlers, not in tool-set churn.
+            <br/><br/>
+            <span class="tag">NOT VIOLATED</span>
+          </div>
+        </div>
+
+        <div class="matrix-row">
+          <div class="matrix-label">No <code>custom()</code> outside TUI mode</div>
+          <div class="matrix-content">
+            <code>rpc-extension-ui.md</code>: "<code>custom()</code> returns <code>undefined</code> [in RPC mode]."
+            <br/><br/>
+            No budget UI calls <code>custom()</code> at present (the UI is missing entirely; see Issue 4 in Report 2).
+            <br/><br/>
+            <span class="tag">NOT VIOLATED</span>
+          </div>
+        </div>
+
+        <div class="matrix-row">
+          <div class="matrix-label">No <code>ctx.shutdown()</code> on every cap</div>
+          <div class="matrix-content">
+            <code>extensions.md#errors-and-cleanup</code>: "Use <code>ctx.shutdown()</code> to request an orderly process shutdown."
+            <br/><br/>
+            The budget abort uses <code>runController.abort(...)</code>, not <code>ctx.shutdown()</code>. The session continues; only the in-progress turn is cancelled.
+            <br/><br/>
+            <span class="tag">NOT VIOLATED</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>3.4 · Patterns the current code violates (gaps)</h2>
+
+      <div class="matrix">
+        <div class="matrix-row" style="border-left: 4px solid var(--critical); border-radius: 4px; padding-left: 12px;">
+          <div class="matrix-label">State in <code>CustomEntry</code>, not in closure <span class="tag severity-critical">CRITICAL</span></div>
+          <div class="matrix-content">
+            <code>extensions.md#state-management</code>: "Durable data excluded from model context → <code>pi.appendEntry()</code>" (which produces <code>CustomEntry</code>).
+            <br/><br/>
+            The cumulative counter lives in <code>HiveState.runtimes: Map&lt;string, AgentRuntime&gt;</code>, which is a closure-shaped mutable map that dies on <code>/reload</code>. The pi-docs-prescribed place for cumulative counters is <code>CustomEntry</code> with a stable <code>customType</code>.
+            <br/><br/>
+            <strong>Structural fix for the <code>fresh=true</code> bug:</strong> if the budget counter is a <code>CustomEntry</code> and <code>getBranch()</code> re-derives it on <code>session_start</code>, then "fresh" becomes "new session" (no entries) or "continuation" (entries present) and the distinction is enforced by the file, not by a flag that may or may not propagate.
+            <br/><br/>
+            <span class="tag">VIOLATED</span>
+          </div>
+        </div>
+
+        <div class="matrix-row" style="border-left: 4px solid var(--error); border-radius: 4px; padding-left: 12px;">
+          <div class="matrix-label"><code>UsageEntry</code> for worker-attributed spend <span class="tag severity-high">HIGH</span></div>
+          <div class="matrix-content">
+            <code>session-format.md#usageentry</code>: "Records model-attributed usage that is not an assistant message and does not participate in LLM context ... Usage entries contribute to session token and cost totals. Pi hides them from the conversation tree."
+            <br/><br/>
+            Worker spend is summed in <code>governanceTokens</code>; the session file's per-message <code>usage</code> is not the source of truth. A redesign that does not write <code>UsageEntry</code> for nested worker spend is under-counting.
+            <br/><br/>
+            <span class="tag">VIOLATED</span>
+          </div>
+        </div>
+
+        <div class="matrix-row" style="border-left: 4px solid var(--warning); border-radius: 4px; padding-left: 12px;">
+          <div class="matrix-label"><code>ctx.signal</code> propagation <span class="tag severity-medium">MEDIUM</span></div>
+          <div class="matrix-content">
+            <code>extensions.md#events</code>: "Use <code>ctx.signal</code> for nested work owned by an active turn; commands and idle session events often have no operation signal."
+            <br/><br/>
+            The mid-run <code>message_end</code> handler makes telemetry emits; none of them take <code>ctx.signal</code>. The dashboard calls from operator commands likewise. If budget enforcement is abortable on Ctrl+C, the propagation is currently incomplete.
+            <br/><br/>
+            <span class="tag">UNCLEAR</span>
+          </div>
+        </div>
+
+        <div class="matrix-row" style="border-left: 4px solid var(--warning); border-radius: 4px; padding-left: 12px;">
+          <div class="matrix-label"><code>tool_call</code> blocking as the gate primitive <span class="tag severity-medium">MEDIUM</span></div>
+          <div class="matrix-content">
+            <code>extensions.md#work-with-events</code>: <code>tool_call</code> "can mutate input or block execution."
+            <br/><br/>
+            The current design blocks at <code>checkDispatchBudgets</code> in <code>dispatchAgent</code> (pre-session-creation), not at <code>tool_call</code> event time. The <code>tool_call</code> event would be the right place to gate a worker mid-task (e.g., to abort a worker that's still in its budget but is about to make an expensive call), but pi-hive only blocks at delegation time.
+            <br/><br/>
+            <span class="tag">GAP</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>3.5 · Patterns pi documents that pi-hive currently appears to ignore</h2>
+
+      <div class="callout critical">
+        <strong>Three patterns Pi explicitly documents that the current budget code does not use.</strong> These are the structural gaps that any future redesign should address.
+      </div>
+
+      <ol>
+        <li>
+          <strong><code>UsageEntry</code> for worker-attributed spend.</strong> Pi provides a built-in entry type for exactly this. If pi-hive writes a sidecar JSON file for per-worker usage instead, it is duplicating what the session file already supports.
+        </li>
+        <li>
+          <strong><code>CustomEntry</code> for cumulative counters.</strong> The <code>fresh=true</code> reset bug is most likely a counter that lives in closure rather than in a <code>CustomEntry</code> on the active branch. A redesign that uses <code>CustomEntry</code> removes the bug class entirely.
+        </li>
+        <li>
+          <strong>Reload + <code>session_start</code> rebuild from <code>getBranch()</code>.</strong> Per the docs: "Reconstruct branch-sensitive state from <code>ctx.sessionManager.getBranch()</code> during <code>session_start</code>. Do not rebuild it from every file entry because abandoned branches represent alternative histories."
+        </li>
+      </ol>
+    </section>
+
+    <section>
+      <h2>3.6 · Patterns that are ambiguous in Pi docs</h2>
+
+      <table>
+        <thead>
+          <tr><th>Pattern</th><th>Status</th><th>Implication</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Compaction <code>details</code> shape</td>
+            <td><span class="tag">AMBIGUOUS</span></td>
+            <td>Pi says <code>details</code> is "implementation-specific data" but doesn't prescribe a schema. The redesign can document its own shape.</td>
+          </tr>
+          <tr>
+            <td><code>UsageEntry.kind</code> values</td>
+            <td><span class="tag">AMBIGUOUS</span></td>
+            <td>Pi says "Consumers should treat unknown <code>kind</code> values as normal usage." New <code>kind</code> values like <code>"worker_call"</code> are permission, not contract.</td>
+          </tr>
+          <tr>
+            <td>Ordering between extension handlers</td>
+            <td><span class="tag">AMBIGUOUS</span></td>
+            <td>"Handlers run in extension load and registration order." The redesign must control its load order relative to other extensions.</td>
+          </tr>
+          <tr>
+            <td>Branch-aware <code>UsageEntry</code></td>
+            <td><span class="tag">AMBIGUOUS</span></td>
+            <td>Docs say usage entries "contribute to session token and cost totals" but don't say whether totals are branch-aware. May need empirical verification.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>3.7 · 2026-09-28 online SDK refresh — clarifications and additions</h2>
+      <p>Cross-referenced <code>https://pi.dev/docs/latest/sdk</code> against the locally installed <code>/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/docs/</code> (dated Sep 22). The two are substantively identical; this section captures the four clarifications that matter for budget enforcement.</p>
+
+      <div class="callout">
+        <strong>Source:</strong> Full reference with verbatim quotes is in <code>pi-docs/extension-patterns-reference.md#12-2026-09-28-online-sdk-refresh--clarifications-and-additions</code>.
+      </div>
+
+      <h3>3.7.1 <code>steer()</code> and <code>followUp()</code> return values <span class="tag">NEW</span></h3>
+      <p>The online docs document the return contract that local docs omit:</p>
+      <blockquote>"<code>steer()</code> and <code>followUp()</code> expose those behaviors directly and return <code>'queued'</code> if the input was queued (including after an extension transformed it), or <code>'handled'</code> if an extension consumed it."</blockquote>
+      <p><strong>Application:</strong> a future budget feature that calls <code>session.steer()</code> or <code>session.followUp()</code> to redirect a worker mid-task (e.g., a budget-aware "switch to cheaper tools" message) must handle the <code>queued</code> / <code>handled</code> return. If an extension consumed the steered input (the rare <code>handled</code> case), the budget layer's subsequent assumption that "the message reached the worker" is wrong.</p>
+
+      <h3>3.7.2 <code>session.abort()</code> vs <code>session.dispose()</code> <span class="tag">NEW EMPHASIS</span></h3>
+      <p>Both docs have the quotes; the online version emphasizes the distinction by putting each on its own paragraph:</p>
+      <blockquote>"<code>abort()</code> stops the active operation and waits for the session to become idle. <code>waitForIdle()</code> waits without aborting it."</blockquote>
+      <blockquote>"<code>session.dispose()</code> aborts active work, invalidates extension contexts, disconnects from the agent, and removes event listeners. Call it when the session is no longer needed."</blockquote>
+      <p><strong>Three lifecycle primitives, three use cases in budget code:</strong></p>
+      <table>
+        <thead>
+          <tr><th>Primitive</th><th>What it does</th><th>Used in budget code</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>runController.abort(reason)</code> (local)</td>
+            <td>Cancels in-progress run; SDK session stays alive</td>
+            <td>Mid-run budget abort at 0% (<code>src/engine/dispatch.ts:696</code>)</td>
+          </tr>
+          <tr>
+            <td><code>session.abort()</code></td>
+            <td>"Stops the active operation and waits for the session to become idle"</td>
+            <td>Operator commands <code>endWorkerSession</code>, <code>compactWorkerSession</code>, <code>respawnWorkerSession</code></td>
+          </tr>
+          <tr>
+            <td><code>session.dispose()</code></td>
+            <td>"Aborts active work, invalidates extension contexts, disconnects from the agent, and removes event listeners"</td>
+            <td><strong>MISSING</strong> in <code>respawnWorkerSession</code> — see Issue 9 in Report 2</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>3.7.3 <code>agent_settled</code> vs <code>agent_end</code> <span class="tag">NEW EMPHASIS</span></h3>
+      <blockquote>"<code>agent_end</code> contains the authoritative completed message. <code>agent_end</code> marks the end of one low-level agent run, but automatic recovery or queued work can still follow."</blockquote>
+      <blockquote>"Use <code>agent_settled</code> when the host needs to know that Pi will not continue automatically."</blockquote>
+      <p><strong>Application:</strong> the current <code>agent_end</code> handler at <code>src/engine/dispatch.ts:707-714</code> does final-message text accumulation. For the budget layer's purposes — finalizing counters, emitting <code>delegation_end</code>, releasing the worker slot — <code>agent_settled</code> is more correct because any post-<code>agent_end</code> queued work could also consume budget. The current <code>dispatchAgent</code> finalization runs after <code>session.prompt()</code> resolves, which is close to <code>agent_settled</code> but not identical. Tracked as Issue 8 in Report 2.</p>
+
+      <h3>3.7.4 <code>session.systemPrompt</code> is read-only <span class="tag">CONFIRMED</span></h3>
+      <blockquote>"<code>session.systemPrompt</code> is read-only and returns the current effective system prompt, including changes that have not yet been sent to the model."</blockquote>
+      <p><strong>Application:</strong> the budget strategy code's <code>emitBudgetWarning</code> (<code>src/engine/budget-strategy.ts:91-117</code>) mutates <code>runtime.systemPrompt</code> to append the strategy hint. <strong>This is NOT a violation of the read-only <code>session.systemPrompt</code> contract</strong> — <code>runtime.systemPrompt</code> is a field on <code>AgentRuntime</code> (<code>src/core/types.ts:223</code>), not the SDK accessor. pi-hive's copy is assembled by <code>buildWorkerPrompt</code> and passed to <code>session.prompt(...)</code>. The mutation never touches the SDK's read-only accessor.</p>
+      <p>If a future refactor switches to reading <code>session.systemPrompt</code> to inject the hint, it will fail because that accessor is read-only. The Pi-documented alternative is <code>pi.sendMessage({...}, {triggerTurn: false, deliverAs: "followUp"})</code> (CustomMessage) per <code>extensions.md#work-with-events</code>. Tracked in <code>current-flow/budget-check-flow.md</code> Key observation 4.</p>
+    </section>
+
+    <footer class="container">
+      <p>Next: <a href="04-test-coverage.html">Test coverage</a> — what the existing tests pin, where the gaps are.</p>
+    </footer>
+  </main>
+</body>
+</html>

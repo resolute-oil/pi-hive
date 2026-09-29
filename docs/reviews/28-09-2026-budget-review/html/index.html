@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Budget Strategies Review — 2026-09-28</title>
+  <link rel="stylesheet" href="assets/review.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>mermaid.initialize({ startOnLoad: true, theme: 'neutral', securityLevel: 'loose' });</script>
+</head>
+<body>
+  <header class="hero">
+    <div class="container">
+      <p class="eyebrow">pi-hive review · 2026-09-28</p>
+      <h1>Budget strategies review</h1>
+      <p class="subtitle">A thorough review of the current codebase — how the budget system works today, what the structural issues are, and where the bug class lives.</p>
+      <p class="meta">
+        Baseline: <code>feat/budget-strategy</code> at <code>9f950fb</code> ·
+        Branch: <code>review/budget-redesign-2026-09-28</code> ·
+        Trigger: multi-session failure to fix the <code>fresh=true</code> budget-reset bug
+      </p>
+    </div>
+  </header>
+
+  <nav class="container">
+    <ul class="report-nav">
+      <li><a href="01-current-flow.html">Current flow</a></li>
+      <li><a href="02-current-system.html">Current system</a></li>
+      <li><a href="03-pi-docs-alignment.html">Pi-docs alignment</a></li>
+      <li><a href="04-test-coverage.html">Test coverage</a></li>
+    </ul>
+  </nav>
+
+  <main class="container">
+    <section class="summary">
+      <h2>What this review covers</h2>
+      <p>
+        pi-hive's budget enforcement system tracks five resources (<code>runs</code>, <code>tokens</code>, <code>cost</code>, <code>depth</code>, <code>queue</code>) across two scopes
+        (<code>worker</code>, <code>team</code>) using three independent counters per agent. Three bug layers in the <code>fresh=true</code> path have emerged; Bug 1 and Bug 2 are
+        fixed in <code>feat/budget-strategy</code> at <code>9f950fb</code>, Bug 3 is unresolved. This review documents the current state in detail so a future direction can be chosen
+        with full information.
+      </p>
+
+      <div class="cards">
+        <a href="01-current-flow.html" class="card">
+          <h3>1 · Current flow</h3>
+          <p>End-to-end delegation, budget check, accumulation, and the fresh=true bug timeline. Four Mermaid sequence and flow diagrams.</p>
+          <span class="card-meta">delegation-flow.md · budget-check-flow.md · accumulation-flow.md · fresh-true-bug-timeline.md</span>
+        </a>
+        <a href="02-current-system.html" class="card">
+          <h3>2 · Current system</h3>
+          <p>Seven structural issues ranked by priority. Bug timeline with fix references. Lessons learned from each round.</p>
+          <span class="card-meta">01-current-state-analysis.md · raw-evidence/bug-history.md</span>
+        </a>
+        <a href="03-pi-docs-alignment.html" class="card">
+          <h3>3 · Pi-docs alignment</h3>
+          <p>What the current code follows, what it conflicts with, what it ignores — verified against the Pi docs at <code>/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/docs/</code>.</p>
+          <span class="card-meta">pi-docs/extension-patterns-reference.md</span>
+        </a>
+        <a href="04-test-coverage.html" class="card">
+          <h3>4 · Test coverage</h3>
+          <p>What the existing tests pin, where the gaps are, and the architecture that makes some races untestable without redesign.</p>
+          <span class="card-meta">raw-evidence/test-coverage-analysis.md</span>
+        </a>
+      </div>
+    </section>
+
+    <section class="key-findings">
+      <h2>Key findings</h2>
+      <ol>
+        <li><strong>Three counters, three write sites, three read sites.</strong> The dual/triple counter system encodes a state machine in source code via <code>??</code> fallthroughs. Every bug in the timeline is a consequence of this design.</li>
+        <li><strong>Three <code>fresh=true</code> bugs in five commits.</strong> Bug 1 (ordering), Bug 2 (mid-run check) fixed. Bug 3 (post-abort end-of-run math) unresolved per <code>tmp/2025-09-28-fresh-true-budget-bug-unresolved.md</code>.</li>
+        <li><strong>Test coverage is strong on deterministic paths, weak on races.</strong> The fake-session pattern catches what it covers; it doesn't cover <code>runController.abort()</code> racing <code>getSessionStats()</code>.</li>
+        <li><strong>Pi-docs alignment has four gaps.</strong> State in closure not in <code>CustomEntry</code>; no <code>ctx.signal</code> propagation; no <code>UsageEntry</code> for worker spend; pre-dispatch check not <code>tool_call</code> blocking.</li>
+        <li><strong>Operator intervention is wired before the UI exists.</strong> Three dispatch commands are correct and tested; the dashboard's intervention buttons are missing.</li>
+        <li><strong>Two latent SDK issues surfaced in the online SDK refresh.</strong> Issue 8: final-message accumulation uses <code>agent_end</code> instead of <code>agent_settled</code>. Issue 9: <code>session.dispose()</code> is never called on the old runtime during respawn (listener leak). Both are low-severity follow-ups; neither blocks the bug-class fix.</li>
+      </ol>
+    </section>
+
+    <section class="open-questions">
+      <h2>Deferred (per user feedback)</h2>
+      <p>This review is intentionally scoped to the current codebase and how the budget system works. It does not propose refactor options or a recommendation. The user will determine direction after reviewing this report.</p>
+      <ul>
+        <li>Refactor scope (minimal fix / structural simplification / pi-native redesign / feature narrowing)</li>
+        <li>PR #54 disposition (merge as-is / amend / close and start fresh)</li>
+        <li>Dashboard intervention UI timing (out of scope for PR #54 anyway)</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="container">
+    <p>Generated 2026-09-28 from <code>feat/budget-strategy</code> @ <code>9f950fb</code>. Source documents are in <code>docs/reviews/28-09-2026-budget-review/</code>.</p>
+  </footer>
+</body>
+</html>

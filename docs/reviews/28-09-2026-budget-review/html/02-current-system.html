@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Current System — Budget Strategies Review</title>
+  <link rel="stylesheet" href="assets/review.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>mermaid.initialize({ startOnLoad: true, theme: 'neutral', securityLevel: 'loose' });</script>
+</head>
+<body>
+  <header class="hero">
+    <div class="container">
+      <p class="eyebrow">Report 2 · 2026-09-28</p>
+      <h1>Current system — nine structural issues</h1>
+      <p class="subtitle">The synthesis of the budget review: every issue that shapes the bug class, ranked by priority. Each issue links to the evidence in the supporting files.</p>
+      <p class="meta">Source: <code>01-current-state-analysis.md</code> · <code>raw-evidence/bug-history.md</code></p>
+    </div>
+  </header>
+
+  <nav class="container">
+    <ul class="report-nav">
+      <li><a href="index.html">Overview</a></li>
+      <li><a href="01-current-flow.html">Current flow</a></li>
+      <li><a href="02-current-system.html">Current system</a></li>
+      <li><a href="03-pi-docs-alignment.html">Pi-docs alignment</a></li>
+      <li><a href="04-test-coverage.html">Test coverage</a></li>
+    </ul>
+  </nav>
+
+  <main class="container">
+    <section>
+      <h2>2.1 · The five-by-two-by-two-by-three matrix</h2>
+      <p>The budget layer's combinatorial surface is 60 cells. Each cell has its own write site, its own read site, its own tests. The combinatorial surface is the structural source of bugs.</p>
+
+      <div class="flow-diagram">
+        <pre class="mermaid">
+graph LR
+    subgraph Resources [5 resources]
+        R1[runs]
+        R2[tokens]
+        R3[cost]
+        R4[depth]
+        R5[queue]
+    end
+    subgraph Scopes [2 scopes]
+        S1[worker]
+        S2[team]
+    end
+    subgraph Strategies [feat/budget-strategy]
+        ST1[default<br/>operator intervention]
+        ST2[compact<br/>force-compact at 0%]
+    end
+    subgraph Counters [3 counters per runtime]
+        C1[runtime.*<br/>SDK session-lifetime]
+        C2[governanceTokens<br/>monotonic across runs]
+        C3[effectiveTokens<br/>current context load]
+    end
+    Resources --> Scopes
+    Scopes --> Strategies
+    Strategies --> Counters
+        </pre>
+      </div>
+    </section>
+
+    <section>
+      <h2>2.2 · Nine structural issues</h2>
+
+      <div class="issue-card severity-critical">
+        <div class="issue-header">
+          <span class="issue-number">1</span>
+          <h3 class="issue-title">Dual counter system, three write sites</h3>
+          <span class="issue-severity">Critical</span>
+        </div>
+        <p>Three counters (<code>runtime.*</code>, <code>governanceTokens</code>, <code>effectiveTokens</code>) are mutually inconsistent at different lifecycle moments. The <code>??</code> fallthrough in <code>workerConsumedTokens</code> (<code>src/engine/governance.ts:34-58</code>) papers over the inconsistency but encodes a state machine in source code that is hard to test exhaustively.</p>
+        <p><strong>Bug class:</strong> every counter-renaming, counter-resetting, or counter-source-changing refactor reintroduces the third-mystery bug class.</p>
+        <p class="cite">Pi-docs alignment: <code>extensions.md#state-management</code> prescribes <code>CustomEntry</code> for cumulative counters. Currently violated.</p>
+        <div class="issue-evidence">
+            <strong>Evidence:</strong> <code>current-flow/accumulation-flow.md</code> · <code>src/engine/governance.ts:33-58</code>
+          </div>
+      </div>
+
+      <div class="issue-card severity-high">
+        <div class="issue-header">
+          <span class="issue-number">2</span>
+          <h3 class="issue-title"><code>getSessionStats()</code> overwrite happens between live updates and end-of-run accumulation</h3>
+          <span class="issue-severity">High</span>
+        </div>
+        <p>The mid-run live values in <code>runtime.*</code> are overwritten by <code>session.getSessionStats()</code> at the end of each run. The end-of-run <code>governanceTokens += delta</code> math then uses the overwritten values. If the SDK's stats return different values than the live accumulation, the delta is wrong.</p>
+        <p><strong>Tests:</strong> pin deterministic paths (<code>tests/dispatch-usage.test.ts:385, 489, 544</code>) but do not exercise the abort-then-stats race.</p>
+        <p class="cite">Pi-docs alignment: not documented. Pi doesn't specify <code>getSessionStats()</code> semantics.</p>
+        <div class="issue-evidence">
+            <strong>Evidence:</strong> <code>current-flow/accumulation-flow.md#what-happens-on-mid-run-abort</code> · <code>src/engine/dispatch.ts:780-870</code>
+          </div>
+      </div>
+
+      <div class="issue-card severity-high">
+        <div class="issue-header">
+          <span class="issue-number">3</span>
+          <h3 class="issue-title">The <code>fresh=true</code> semantics is overloaded</h3>
+          <span class="issue-severity">High</span>
+        </div>
+        <p><code>fresh=true</code> currently means: (a) reload config from disk, (b) archive prior session, (c) zero all counters, (d) start a new Pi session. These four operations are coupled by a single flag and a single code block in <code>dispatch.ts:213-214</code>. The coupling is what made Bug 1 possible.</p>
+        <p><strong>Future hazard:</strong> a refactor that splits (a) from (c) re-introduces the original ordering bug.</p>
+        <p class="cite">Pi-docs alignment: Pi's <code>tool_call</code> blocking primitive is the right place to gate expensive operations (<code>extensions.md#work-with-events</code>). <code>fresh=true</code> conflates "block and re-do" with "reset budget" — separate Pi-level concerns.</p>
+        <div class="issue-evidence">
+            <strong>Evidence:</strong> <code>src/engine/dispatch.ts:73-110</code> (function) + <code>src/engine/dispatch.ts:213-214</code> (call site)
+          </div>
+      </div>
+
+      <div class="issue-card severity-medium">
+        <div class="issue-header">
+          <span class="issue-number">4</span>
+          <h3 class="issue-title">Operator intervention is wired before the dashboard UI exists</h3>
+          <span class="issue-severity">Medium</span>
+        </div>
+        <p>The three dispatch commands (<code>endWorkerSession</code>, <code>compactWorkerSession</code>, <code>respawnWorkerSession</code>) are in <code>src/engine/dispatch.ts:929-1099</code> and fully tested in <code>tests/budget-strategy.test.ts</code>. The dashboard UI to invoke them is "out of scope for PR #54" per <code>tmp/budget-strategy-plan.md</code>.</p>
+        <p>The engine commands are correct in isolation but unusable from the UI surface the user interacts with.</p>
+        <p class="cite">Pi-docs alignment: <code>extensions.md#custom-ui</code> recommends <code>setWidget</code> (RPC-friendly) and <code>custom()</code> (TUI-only). The engine is mode-independent (correct), but the UI surface is missing.</p>
+        <div class="issue-evidence">
+            <strong>Evidence:</strong> <code>current-flow/budget-check-flow.md#4-operator-intervention-three-dispatch-commands</code>
+          </div>
+      </div>
+
+      <div class="issue-card severity-medium">
+        <div class="issue-header">
+          <span class="issue-number">5</span>
+          <h3 class="issue-title">Strategy code is layered on top of the budget foundation without isolation</h3>
+          <span class="issue-severity">Medium</span>
+        </div>
+        <p><code>src/engine/budget-strategy.ts</code> is 200 LOC, all new in <code>feat/budget-strategy</code>. It depends on <code>src/engine/governance.ts</code> (175 LOC) and <code>src/engine/dispatch.ts</code> (1101 LOC). The strategy decision (default vs compact) and the prompt-hint construction are mixed: <code>emitBudgetWarning</code> does the event emission, the strategy resolution, the prompt mutation, and the dedup — four concerns in one function.</p>
+        <p class="cite">Pi-docs alignment: <code>extensions.md#work-with-events</code> notes that <code>message_end</code> "can replace a finalized message while preserving its role." A strategy that wants to inform the worker of an approaching budget should hook <code>before_agent_start</code> (per pi-docs §5) not mutate <code>runtime.systemPrompt</code> directly.</p>
+        <div class="issue-evidence">
+            <strong>Evidence:</strong> <code>src/engine/budget-strategy.ts:91-117</code> (the <code>emitBudgetWarning</code> function)
+          </div>
+      </div>
+
+      <div class="issue-card severity-medium">
+        <div class="issue-header">
+          <span class="issue-number">6</span>
+          <h3 class="issue-title">Test coverage is strong on deterministic paths, weak on races</h3>
+          <span class="issue-severity">Medium</span>
+        </div>
+        <p>~50 tests pin every layer of the budget feature in isolation. But no test exercises the abort-mid-run-then-<code>getSessionStats()</code> race. The tests use deterministic fake <code>createSession</code> factories; they do not exercise a real <code>runController.abort()</code> followed by a real SDK response.</p>
+        <p><strong>Coverage by concern:</strong> see Report 4 for the full matrix.</p>
+        <p class="cite">Pi-docs alignment: none.</p>
+        <div class="issue-evidence">
+            <strong>Evidence:</strong> <code>raw-evidence/test-coverage-analysis.md</code>
+          </div>
+      </div>
+
+      <div class="issue-card severity-low">
+        <div class="issue-header">
+          <span class="issue-number">7</span>
+          <h3 class="issue-title">The <code>fresh=true</code> code path lives in <code>dispatch.ts</code>, not in the budget module</h3>
+          <span class="issue-severity">Low</span>
+        </div>
+        <p><code>freshResetRuntime</code> is exported from <code>src/engine/dispatch.ts</code> (line 73) and called from <code>dispatchAgent</code> at line 214. It would be more cohesive to live in <code>src/engine/governance.ts</code> (or a new <code>src/engine/budget-ledger.ts</code> module) since its job is "reset the budget counters", not "orchestrate a dispatch".</p>
+        <p class="cite">Pi-docs alignment: <code>extensions.md#choose-where-it-loads</code> doesn't dictate file location but does recommend single-responsibility modules. The current placement splits "budget ledger" between three files for one concern.</p>
+        <div class="issue-evidence">
+            <strong>Evidence:</strong> <code>src/engine/dispatch.ts:73-110</code>
+          </div>
+      </div>
+
+      <div class="issue-card severity-low">
+        <div class="issue-header">
+          <span class="issue-number">8</span>
+          <h3 class="issue-title">Final-message accumulation uses <code>agent_end</code> instead of <code>agent_settled</code></h3>
+          <span class="issue-severity">Low (latent)</span>
+        </div>
+        <p>The current <code>agent_end</code> handler at <code>src/engine/dispatch.ts:707-714</code> runs final-message text accumulation. Per <code>sdk.md#subscribing-to-events</code>, <code>agent_end</code> "marks the end of one low-level agent run, but automatic recovery or queued work can still follow." The cleaner event for "Pi will not continue automatically" is <code>agent_settled</code>. The current <code>dispatchAgent</code> finalization runs after <code>session.prompt()</code> resolves, which is close to <code>agent_settled</code> but not identical — a recovery cycle (queued follow-up after an error, automatic retry after a transient API error) could fire another <code>agent_end</code> between the two, and the budget layer's accounting would split across them.</p>
+        <p class="cite">Pi-docs alignment: <code>sdk.md#subscribing-to-events</code> calls <code>agent_settled</code> out as the canonical "Pi will not continue automatically" event. This is a follow-up, not a blocker; the current <code>session.prompt()</code>-after-resolution finalization is functionally close to <code>agent_settled</code> for non-recovery runs. Worth tracking because it's the right hook for a future bug class around budget accounting across multiple <code>agent_end</code> cycles.</p>
+        <div class="issue-evidence">
+            <strong>Evidence:</strong> <code>src/engine/dispatch.ts:707-714</code> (handler); <code>src/engine/dispatch.ts:727-758</code> (the <code>session.prompt()</code> resolution point where the current finalization runs).
+          </div>
+      </div>
+
+      <div class="issue-card severity-low">
+        <div class="issue-header">
+          <span class="issue-number">9</span>
+          <h3 class="issue-title"><code>session.dispose()</code> is never called on the old runtime during respawn</h3>
+          <span class="issue-severity">Low (latent)</span>
+        </div>
+        <p><code>respawnWorkerSession</code> (<code>src/engine/dispatch.ts:1006-1099</code>) deletes the old runtime from <code>state.runtimes</code> and creates a new one, but it never calls <code>session.dispose()</code> on the old session. Per <code>sdk.md#session-management</code>, <code>session.dispose()</code> "aborts active work, invalidates extension contexts, disconnects from the agent, and removes event listeners." Without it, the old session's <code>session.subscribe(...)</code> callback (installed at <code>src/engine/dispatch.ts:401</code>) keeps a closure reference to the deleted runtime. If the SDK later fires events on the now-disconnected session, those events hit a stale closure. The current code guards against this because the dispatcher emits nothing on a runtime that's been removed from <code>state.runtimes</code>, but the listener leak is still present.</p>
+        <p class="cite">Pi-docs alignment: <code>sdk.md#session-management</code> is explicit about the distinction between <code>abort()</code> (stops the operation, waits for idle) and <code>dispose()</code> (releases listeners). The operator commands use <code>abort()</code> because they intend to keep the runtime alive for the next dispatch; the respawn path's <code>abort()</code> is correct, but the missing <code>dispose()</code> is a leak.</p>
+        <div class="issue-evidence">
+            <strong>Evidence:</strong> <code>src/engine/dispatch.ts:401</code> for the subscribe call site; <code>src/engine/dispatch.ts:1028</code> for the <code>session.abort()</code> in respawn (note: abort but not dispose).
+          </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>2.3 · Bug timeline (full chronological log)</h2>
+
+      <div class="timeline">
+        <div class="timeline-item">
+          <div class="timeline-date">2025-09-26</div>
+          <div class="timeline-title">PR #53 lands — rename (no behavior change)</div>
+          <div class="timeline-detail">
+            <code>Settings.worker</code> → <code>Settings.workerBudgets</code>. Merge commit <code>2d721a9</code>. Tests 467/467 server, 49/49 dashboard.
+          </div>
+        </div>
+
+        <div class="timeline-item">
+          <div class="timeline-date">2025-09-27</div>
+          <div class="timeline-title">Bug 1 discovered</div>
+          <div class="timeline-detail">
+            <code>fresh=true</code> doesn't reset budget. Fix in <code>081380a</code> + refined in <code>3be33f6</code>. Regression test at <code>tests/dispatch-usage.test.ts:385</code>.
+          </div>
+        </div>
+
+        <div class="timeline-item">
+          <div class="timeline-date">2025-09-27</div>
+          <div class="timeline-title">Bug 2 discovered</div>
+          <div class="timeline-detail">
+            Mid-run budget check sees stale <code>governanceTokens=0</code>; worker overran by 26x. Fix in <code>3be33f6</code>.
+          </div>
+        </div>
+
+        <div class="timeline-item">
+          <div class="timeline-date">2025-09-27</div>
+          <div class="timeline-title">kieran-typescript-reviewer round 1</div>
+          <div class="timeline-detail">
+            3 should-fix items applied in <code>8843834</code>: canonical runtime key, test fixture keying, hoist <code>mockLoadRuntime</code>.
+          </div>
+        </div>
+
+        <div class="timeline-item">
+          <div class="timeline-date">2025-09-28</div>
+          <div class="timeline-title">Bug 3 / third mystery <span class="tag status-unresolved">UNRESOLVED</span></div>
+          <div class="timeline-detail">
+            User re-tests; bug persists. Top hypothesis: end-of-run <code>governanceTokens += delta</code> reads pre-overwrite <code>runtime.*</code>. Documented in <code>tmp/2025-09-28-fresh-true-budget-bug-unresolved.md</code>.
+          </div>
+        </div>
+
+        <div class="timeline-item">
+          <div class="timeline-date">2025-09-28</div>
+          <div class="timeline-title">kieran-typescript-reviewer round 2</div>
+          <div class="timeline-detail">
+            2 should-fix items applied in <code>9f950fb</code>: comment reconciliation, regression test for fresh ordering.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>2.4 · Lessons learned</h2>
+
+      <ol>
+        <li><strong>The dual-counter system is the bug class.</strong> Every bug in this timeline is a consequence of having two (now three) counters for the same concept. The <code>??</code> fallthroughs paper over the inconsistency.</li>
+        <li><strong>The end-of-run order is implicit, not explicit.</strong> The current sequence is correct IF <code>getSessionStats()</code> returns the full session-lifetime total for aborted sessions. If it doesn't, the delta is wrong.</li>
+        <li><strong>Tests cover the deterministic paths but not the races.</strong> The fake-session pattern catches what it covers; it doesn't cover <code>runController.abort()</code> racing <code>getSessionStats()</code>.</li>
+        <li><strong>Review rounds find what the first round missed.</strong> Round 1 found 3 items; round 2 found 2 more. Multi-round review is the pattern that works; the first pass is never the last.</li>
+        <li><strong>kieran-typescript-reviewer is a process, not a one-shot.</strong> The reviewer found real issues each time. Even after the bug fix is complete, another round is the right move.</li>
+      </ol>
+    </section>
+
+    <footer class="container">
+      <p>Next: <a href="03-pi-docs-alignment.html">Pi-docs alignment</a> — what follows, conflicts, and is ignored vs. Pi's documented patterns.</p>
+    </footer>
+  </main>
+</body>
+</html>
