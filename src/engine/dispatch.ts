@@ -1,4 +1,4 @@
-import { type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { type ExtensionContext, type ToolDefinition, SessionManager } from "@earendil-works/pi-coding-agent";
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import { existsSync, readdirSync, renameSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -11,7 +11,7 @@ import { canDelegateTo } from "./domain";
 import { buildWorkerPrompt } from "./prompts";
 import { emitHiveEvent, runtimeSummary, writeHiveStateSnapshot } from "./observability";
 import { buildHiveTools } from "../agents/tools";
-import { normalizeWorkerSkillPaths } from "./worker-extension";
+import { normalizeWorkerSkillPaths, workerResourceLoader } from "./worker-extension";
 import { isExecutionGateOpen, isAwaitingHumanApproval } from "./openspec";
 import { agentRoster, resolveRuntime } from "./agent-lookup";
 import { addHiveActivity } from "../ui/tui/activity";
@@ -22,11 +22,10 @@ import { WorkerRunLifecycle } from "./worker-lifecycle";
 import { persistReviewerVerdict } from "./reviewer-verdict";
 import { createWorkerSubscriptionHandler, type WorkerSubscriptionState } from "./worker-subscription";
 import { applySessionStatsToRuntime } from "./runtime-stats";
-import { createWorkerSession, installWorkerBudgetHooks } from "./worker-session-factory";
 import { emitDelegationEnd } from "./delegation-end";
 import { isPendingArtifactRevisionTask } from "./dispatch-helpers";
 import { modelKey, resolveModel } from "./model-resolution";
-import { BUDGET_EXHAUSTED_ERROR_NAME, runBudgetPreflight } from "./budget/worker-tools";
+import { BUDGET_EXHAUSTED_ERROR_NAME, runBudgetPreflight, createBudgetAwareSession } from "./budget/worker-tools";
 // Hard cap to keep shared telemetry rows from blowing up on accidental
 // multi-hundred-KB worker dumps. 64 KB is high enough that normal review
 // verdicts are not middle-elided in the web UI.
@@ -157,10 +156,8 @@ export async function dispatchAgent(
   // settings). Throws `BudgetExhaustedError` on block; translated to the
   // existing `{ output, exitCode: 1 }` envelope so the tool harness keeps
   // its contract.
-  let preflightPolicy;
   try {
-    const preflight = await runBudgetPreflight(state, agentName, ctx);
-    preflightPolicy = preflight.policy;
+    await runBudgetPreflight(state, agentName, ctx);
   } catch (error: any) {
     if (error?.name === BUDGET_EXHAUSTED_ERROR_NAME) {
       emitHiveEvent(state, "budget_exhausted", {
@@ -352,50 +349,57 @@ export async function dispatchAgent(
   const allToolNames = dispatchToolNames(toolNames, hiveTools);
   const skillPaths = resolveWorkerSkillPaths(ctx.cwd, runtime.config.skills as unknown[]);
 
-  // F5 wiring: the worker-only tools (cooperative tools + summarize_progress)
-  // are built by `buildHiveTools(state, name, ledger)`. The ledger is
-  // restored INSIDE `createWorkerSession` (so the worker sees the tools from
-  // prompt #1) — the `hiveToolsWithLedger` callback receives it once
-  // `BudgetLedger.restore` completes. The merged customTools list is what
-  // `createAgentSession` receives.
-  const { session: createdSession, sessionManager, ledger: workerLedger } = await createWorkerSession({
+  // F2 spine: `createBudgetAwareSession` runs the budget pre-flight, opens
+  // the worker's SessionManager, restores the ledger, creates the
+  // AgentSession (via the F9 wiring dep below), installs the budget event
+  // hooks, and wires the F3 tool_call guard. The F5 ledger-dependent
+  // worker-only tools (cooperative tools + summarize_progress) are merged
+  // into customTools by the createSession closure AFTER BudgetLedger.restore
+  // — the closure receives the freshly-restored ledger and builds the
+  // extended tool set.
+  await createBudgetAwareSession(
     state,
+    runtime.config.name,
+    { fresh },
     ctx,
-    runtime,
-    resolvedModel,
-    thinking,
-    allToolNames,
-    hiveTools,
-    hiveToolsWithLedger: (ledger) => buildHiveTools(state, runtime.config.name, ledger).filter(
-      (t) => !hiveTools.some((existing) => existing.name === t.name)
-        && (toolNames.includes(t.name) || TYPE_SCOPED_TOOL_NAMES.has(t.name)),
-    ),
-    skillPaths,
-    preflightPolicy,
-    runController,
-    createSession,
-  });
-  session = createdSession;
-  lifecycle.attachSession(session);
-
-  // Wave 2 / F2 — install the new mid-run budget event hooks AFTER attaching
-  // the session to the lifecycle. If `installBudgetEventHooks` throws (e.g.
-  // `session.subscribe(...)` rejects), the lifecycle already owns the
-  // session, so `close(failed=true)` aborts and disposes it cleanly.
-  //
-  // Wave 5 / F3 — also wires the budget tool_call guard on
-  // `session.agent.beforeToolCall`. Pass `currentDelegationDepth: () => delegationDepth`
-  // so checkBudgetPolicy sees the per-call depth captured at this dispatch's
-  // start (events.ts / G-29 contract — `currentDelegationDepth() + 1`).
-  await installWorkerBudgetHooks({
-    runtime,
-    session,
-    sessionManager,
-    preflightPolicy,
-    ledger: workerLedger,
-    runController,
-    currentDelegationDepth: () => delegationDepth,
-  });
+    {
+      sessionManagerFactory: () => SessionManager.open(runtime.sessionFile),
+      createSession: async (opts) => {
+        // F9 wiring: the production createSession adds the resolved model,
+        // scoped tools, customTools (with the F5 hiveToolsWithLedger merge),
+        // and the reloaded worker resource loader.
+        const workerLoader = workerResourceLoader(state, ctx.cwd, runtime.config.name, skillPaths);
+        await workerLoader.reload();
+        const extendedTools = opts.ledger
+          ? buildHiveTools(state, runtime.config.name, opts.ledger).filter(
+              (t) => !hiveTools.some((existing) => existing.name === t.name)
+                && (toolNames.includes(t.name) || TYPE_SCOPED_TOOL_NAMES.has(t.name)),
+            )
+          : [];
+        return createSession({
+          cwd: ctx.cwd,
+          model: resolvedModel,
+          modelRegistry: (ctx as any).modelRegistry,
+          thinkingLevel: thinking as any,
+          tools: allToolNames,
+          customTools: [...hiveTools, ...extendedTools],
+          sessionManager: opts.sessionManager,
+          resourceLoader: workerLoader,
+        });
+      },
+      installWorkerHooks: true,
+      currentDelegationDepth: () => delegationDepth,
+      // Lifecycle-attach-before-subscribe: a throw from
+      // installBudgetEventHooks (e.g. session.subscribe(...) rejects) leaves
+      // the lifecycle owning the partially-created session, so the finally
+      // block's lifecycle.close(failed=true) aborts and disposes it.
+      onSessionCreated: (created, sm) => {
+        session = created;
+        lifecycle.attachSession(session);
+        void sm; // sessionManager is captured in the closure above; nothing else to do
+      },
+    },
+  );
 
   const abortWorker = (): void => {
     abortedByParent = true;

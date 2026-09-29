@@ -3,7 +3,7 @@
  *
  * Source of truth: docs/reviews/28-09-2026-budget-review/04-refactor-plan.md
  *   §2.3 ledger persistence via `appendCustomEntry("pi-hive-budget-ledger", ...)`
- *   §2.4 `BudgetLedger.restore(...)` is called by `delegateAgent` (idempotent,
+ *   §2.4 `BudgetLedger.restore(...)` is called by `createBudgetAwareSession` (idempotent,
  *        branch-aware — walks `sessionManager.getBranch()` filtering for the
  *        customType)
  *   §2.6 mid-run snapshot + warning + exhausted handlers

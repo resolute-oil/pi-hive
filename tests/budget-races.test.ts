@@ -241,7 +241,7 @@ test("T7.1 abort-then-getSessionStats race is consistent across 100 runs", async
 // ===========================================================================
 // T7.2 — Parallel delegation updates (G-09 augmented).
 //
-// Contract: two delegateAgent calls run concurrently and update the
+// Contract: two createBudgetAwareSession calls run concurrently and update the
 // SAME team ledger. The team ledger's `teamUsage(branch)` MUST equal
 // the sum of each worker's LATEST cumulative spend — no double-count,
 // no dropped entry, no race-induced drift.

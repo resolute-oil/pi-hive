@@ -18,7 +18,7 @@
  * payloads can be discriminated by kind without a schema change.
  */
 
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { BudgetLedger } from "./ledger";
 
 // ---------------------------------------------------------------------------
@@ -43,7 +43,7 @@ export type UsageKey = "input" | "output" | "cacheRead" | "cacheWrite" | "reason
 
 /**
  * Flat-string window consumed by the F1 runtime layer (BudgetLedger,
- * checkBudgetPolicy, installBudgetEventHooks, delegateAgent).
+ * checkBudgetPolicy, installBudgetEventHooks, createBudgetAwareSession).
  *
  * Contract-drift reconciliation (Wave 2 / F2):
  *
@@ -250,7 +250,7 @@ export interface BudgetBlock {
   limit: BudgetLimit;
 }
 
-/** Thrown by `delegateAgent` to refuse per Pi docs §2 ("Throw from execute() to produce a failed tool result"). */
+/** Thrown by `createBudgetAwareSession` to refuse per Pi docs §2 ("Throw from execute() to produce a failed tool result"). */
 export class BudgetExhaustedError extends Error {
   constructor(
     public readonly reason: string,
@@ -338,14 +338,16 @@ export interface RequestSnapshotResult {
 // §2.4 / §2.6 — Return shapes from the new delegation flow.
 // ---------------------------------------------------------------------------
 
-export interface DelegateAgentResult {
+export interface CreateBudgetAwareSessionResult {
   sessionId: string;
   session: AgentSession;
+  /** Worker's SessionManager — exposed so callers can thread it through lifecycle. */
+  sessionManager: SessionManager;
   ledger: BudgetLedger;
   /**
-   * Wave 2 / F2 — controller owned by `delegateAgent` and exposed here so
-   * callers can abort the session mid-run (e.g., parent-tool abort). The
-   * signal is threaded into every ledger write per plan §2.12.
+   * Wave 2 / F2 — controller owned by `createBudgetAwareSession` and exposed
+   * here so callers can abort the session mid-run (e.g., parent-tool abort).
+   * The signal is threaded into every ledger write per plan §2.12.
    */
   controller: AbortController;
 }

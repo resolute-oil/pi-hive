@@ -83,7 +83,7 @@ function latestCumulativeFor(branch: SessionEntry[], agentSlug: string): BudgetL
  * Pure function: returns a `BudgetBlock` describing why delegation should be
  * refused, or `undefined` when the worker + team usage is within caps.
  *
- * `delegateAgent` throws `new BudgetExhaustedError(...)` when this returns
+ * `createBudgetAwareSession` throws `new BudgetExhaustedError(...)` when this returns
  * non-undefined. Returning an object does NOT mark the tool as failed
  * (per Pi docs §2).
  *
@@ -93,7 +93,7 @@ function latestCumulativeFor(branch: SessionEntry[], agentSlug: string): BudgetL
  * rather than a silent `undefined` policy field access.
  *
  * Depth cap (T2.3, plan §3.2): enforced inline via the `currentDepth`
- * argument — `delegateAgent` passes `currentDelegationDepth() + 1` so this
+ * argument — `createBudgetAwareSession` passes `currentDelegationDepth() + 1` so this
  * stays a pure function (no module-level reads). Per C4 the depth cap is a
  * worker-only resource (no team aggregate), so it lives in the worker
  * branch and never reads `teamUsage()`. The check fires when the dispatch

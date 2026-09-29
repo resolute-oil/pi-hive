@@ -1,10 +1,10 @@
 /**
- * Wave 2 — T2.2 + T2.3 `delegateAgent` + `resolveWorkerBudgetPolicy` tests.
+ * Wave 2 — T2.2 + T2.3 `createBudgetAwareSession` + `resolveWorkerBudgetPolicy` tests.
  *
- * Coverage (16 tests; 14 for `delegateAgent` + 1 for `resolveWorkerBudgetPolicy`
+ * Coverage (16 tests; 14 for `createBudgetAwareSession` + 1 for `resolveWorkerBudgetPolicy`
  * + 1 for T2.3 depth-cap pre-flight):
  *
- *   delegateAgent:
+ *   createBudgetAwareSession:
  *   1.  unknown agent throws a regular Error (NOT BudgetExhaustedError) per Pi docs §2.
  *   2.  fresh=false calls SessionManager.continueRecent (via injected factory).
  *   3.  fresh=true calls SessionManager.create (via injected factory).
@@ -18,7 +18,7 @@
  *  11.  injected createSession receives cwd from ctx.cwd.
  *  12.  throws are caught by the throw-to-refuse contract (no object-return shape).
  *  13.  ledger cap snapshot fields are captured from the policy at restore time.
- *  14.  re-calling delegateAgent with fresh=true creates a new (independent) session.
+ *  14.  re-calling createBudgetAwareSession with fresh=true creates a new (independent) session.
  *
  *   resolveWorkerBudgetPolicy (bonus / F6 schema reconciliation):
  *  15.  settings.budgets.perWorker + agent.budgets override merge correctly
@@ -43,7 +43,7 @@ import type { ExtensionContext, SessionStats } from "@earendil-works/pi-coding-a
 import { runAtDelegationDepth } from "../src/engine/session.ts";
 import {
   BUDGET_EXHAUSTED_ERROR_NAME,
-  delegateAgent,
+  createBudgetAwareSession,
   resolveWorkerBudgetPolicy,
 } from "../src/engine/budget/worker-tools.ts";
 import {
@@ -292,12 +292,12 @@ function makeStateAndCtxWithSeededBranch(
 
 // ── Case 1: unknown agent → plain Error, NOT BudgetExhaustedError ───────
 
-test("delegateAgent: unknown agent throws a plain Error (NOT BudgetExhaustedError)", async () => {
+test("createBudgetAwareSession: unknown agent throws a plain Error (NOT BudgetExhaustedError)", async () => {
   const state = makeHiveState({ agentName: "Builder" });
   const cwd = state.session!.sessionDir;
   const ctx = makeCtx(cwd, SessionManager.inMemory(cwd));
   await assert.rejects(
-    () => delegateAgent(state, "Nonexistent", "task", {}, ctx, {
+    () => createBudgetAwareSession(state, "Nonexistent", {}, ctx, {
       sessionManagerFactory: (c, _fresh) => SessionManager.inMemory(c),
       createSession: makeCreateSession().invoke as never,
     }),
@@ -311,14 +311,14 @@ test("delegateAgent: unknown agent throws a plain Error (NOT BudgetExhaustedErro
 
 // ── Case 2: fresh=false calls SessionManager.continueRecent ──────────────
 
-test("delegateAgent({fresh:false}): sessionManagerFactory is called with fresh=false (continueRecent)", async () => {
+test("createBudgetAwareSession({fresh:false}): sessionManagerFactory is called with fresh=false (continueRecent)", async () => {
   const state = makeHiveState({ agentName: "Builder" });
   const cwd = state.session!.sessionDir;
   const ctx = makeCtx(cwd, SessionManager.inMemory(cwd));
   let lastFresh: boolean | undefined;
   const create = makeCreateSession();
 
-  await delegateAgent(state, "Builder", "task", { fresh: false }, ctx, {
+  await createBudgetAwareSession(state, "Builder", { fresh: false }, ctx, {
     sessionManagerFactory: (c, fresh) => {
       lastFresh = fresh;
       return SessionManager.inMemory(c);
@@ -331,14 +331,14 @@ test("delegateAgent({fresh:false}): sessionManagerFactory is called with fresh=f
 
 // ── Case 3: fresh=true calls SessionManager.create ───────────────────────
 
-test("delegateAgent({fresh:true}): sessionManagerFactory is called with fresh=true (create)", async () => {
+test("createBudgetAwareSession({fresh:true}): sessionManagerFactory is called with fresh=true (create)", async () => {
   const state = makeHiveState({ agentName: "Builder" });
   const cwd = state.session!.sessionDir;
   const ctx = makeCtx(cwd, SessionManager.inMemory(cwd));
   let lastFresh: boolean | undefined;
   const create = makeCreateSession();
 
-  await delegateAgent(state, "Builder", "task", { fresh: true }, ctx, {
+  await createBudgetAwareSession(state, "Builder", { fresh: true }, ctx, {
     sessionManagerFactory: (c, fresh) => {
       lastFresh = fresh;
       return SessionManager.inMemory(c);
@@ -351,7 +351,7 @@ test("delegateAgent({fresh:true}): sessionManagerFactory is called with fresh=tr
 
 // ── Case 4: over budget → BudgetExhaustedError with scope+resource ──────
 
-test("delegateAgent: throws BudgetExhaustedError when over worker tokens (scope=worker, resource=tokens)", async () => {
+test("createBudgetAwareSession: throws BudgetExhaustedError when over worker tokens (scope=worker, resource=tokens)", async () => {
   const { state, ctx } = makeStateAndCtxWithSeededBranch(
     [{ tokens: 100, costUsd: 0, runs: 0 }],
     "builder",
@@ -364,7 +364,7 @@ test("delegateAgent: throws BudgetExhaustedError when over worker tokens (scope=
 
   await assert.rejects(
     () =>
-      delegateAgent(state, "Builder", "task", {}, ctx, {
+      createBudgetAwareSession(state, "Builder", {}, ctx, {
         sessionManagerFactory: (c) => SessionManager.inMemory(c),
         createSession: create.invoke as never,
       }),
@@ -378,35 +378,36 @@ test("delegateAgent: throws BudgetExhaustedError when over worker tokens (scope=
   );
 });
 
-// ── Case 5: under caps → succeeds, returns DelegateAgentResult ──────────
+// ── Case 5: under caps → succeeds, returns CreateBudgetAwareSessionResult ──────────
 
-test("delegateAgent: returns DelegateAgentResult when under caps", async () => {
+test("createBudgetAwareSession: returns CreateBudgetAwareSessionResult when under caps", async () => {
   const state = makeHiveState({ agentName: "Builder" });
   // Default policy (worker tokens cap = 100_000) — fresh session is empty, so under cap.
   const cwd = state.session!.sessionDir;
   const ctx = makeCtx(cwd, SessionManager.inMemory(cwd));
   const create = makeCreateSession();
 
-  const result = await delegateAgent(state, "Builder", "task", {}, ctx, {
+  const result = await createBudgetAwareSession(state, "Builder", {}, ctx, {
     sessionManagerFactory: (c) => SessionManager.inMemory(c),
     createSession: create.invoke as never,
   });
 
   assert.equal(typeof result.sessionId, "string");
   assert.ok(result.session);
+  assert.ok(result.sessionManager);
   assert.ok(result.ledger);
   assert.ok(result.controller);
 });
 
 // ── Case 6: installBudgetEventHooks called BEFORE returning ─────────────
 
-test("delegateAgent: installBudgetEventHooks installs BEFORE delegateAgent returns (hooks observe session events)", async () => {
+test("createBudgetAwareSession: installBudgetEventHooks installs BEFORE createBudgetAwareSession returns (hooks observe session events)", async () => {
   const state = makeHiveState({ agentName: "Builder" });
   const cwd = state.session!.sessionDir;
   const ctx = makeCtx(cwd, SessionManager.inMemory(cwd));
   const create = makeCreateSession();
 
-  const result = await delegateAgent(state, "Builder", "task", {}, ctx, {
+  const result = await createBudgetAwareSession(state, "Builder", {}, ctx, {
     sessionManagerFactory: (c) => SessionManager.inMemory(c),
     createSession: create.invoke as never,
   });
@@ -422,13 +423,13 @@ test("delegateAgent: installBudgetEventHooks installs BEFORE delegateAgent retur
 
 // ── Case 7: controller is fresh (not pre-aborted) ───────────────────────
 
-test("delegateAgent: returned controller.signal is fresh (not pre-aborted)", async () => {
+test("createBudgetAwareSession: returned controller.signal is fresh (not pre-aborted)", async () => {
   const state = makeHiveState({ agentName: "Builder" });
   const cwd = state.session!.sessionDir;
   const ctx = makeCtx(cwd, SessionManager.inMemory(cwd));
   const create = makeCreateSession();
 
-  const result = await delegateAgent(state, "Builder", "task", {}, ctx, {
+  const result = await createBudgetAwareSession(state, "Builder", {}, ctx, {
     sessionManagerFactory: (c) => SessionManager.inMemory(c),
     createSession: create.invoke as never,
   });
@@ -438,13 +439,13 @@ test("delegateAgent: returned controller.signal is fresh (not pre-aborted)", asy
 
 // ── Case 8: sessionId matches session.sessionId ─────────────────────────
 
-test("delegateAgent: returned sessionId matches session.sessionId", async () => {
+test("createBudgetAwareSession: returned sessionId matches session.sessionId", async () => {
   const state = makeHiveState({ agentName: "Builder" });
   const cwd = state.session!.sessionDir;
   const ctx = makeCtx(cwd, SessionManager.inMemory(cwd));
   const create = makeCreateSession();
 
-  const result = await delegateAgent(state, "Builder", "task", {}, ctx, {
+  const result = await createBudgetAwareSession(state, "Builder", {}, ctx, {
     sessionManagerFactory: (c) => SessionManager.inMemory(c),
     createSession: create.invoke as never,
   });
@@ -454,14 +455,14 @@ test("delegateAgent: returned sessionId matches session.sessionId", async () => 
 
 // ── Case 9: ledger points at the WORKER's SessionManager ────────────────
 
-test("delegateAgent: returned ledger's SessionManager is the WORKER's, not ctx.sessionManager", async () => {
+test("createBudgetAwareSession: returned ledger's SessionManager is the WORKER's, not ctx.sessionManager", async () => {
   const state = makeHiveState({ agentName: "Builder" });
   const cwd = state.session!.sessionDir;
   const ctx = makeCtx(cwd, SessionManager.inMemory(cwd));
   const create = makeCreateSession();
   let workerSessionManager: SessionManager | undefined;
 
-  const result = await delegateAgent(state, "Builder", "task", {}, ctx, {
+  const result = await createBudgetAwareSession(state, "Builder", {}, ctx, {
     sessionManagerFactory: (c) => {
       workerSessionManager = SessionManager.inMemory(c);
       return workerSessionManager;
@@ -490,14 +491,14 @@ test("delegateAgent: returned ledger's SessionManager is the WORKER's, not ctx.s
 
 // ── Case 10: createSession receives the worker SessionManager ───────────
 
-test("delegateAgent: injected createSession is called with the SessionManager from sessionManagerFactory", async () => {
+test("createBudgetAwareSession: injected createSession is called with the SessionManager from sessionManagerFactory", async () => {
   const state = makeHiveState({ agentName: "Builder" });
   const cwd = state.session!.sessionDir;
   const ctx = makeCtx(cwd, SessionManager.inMemory(cwd));
   const create = makeCreateSession();
   let workerSM: SessionManager | undefined;
 
-  await delegateAgent(state, "Builder", "task", {}, ctx, {
+  await createBudgetAwareSession(state, "Builder", {}, ctx, {
     sessionManagerFactory: (c) => {
       workerSM = SessionManager.inMemory(c);
       return workerSM;
@@ -511,13 +512,13 @@ test("delegateAgent: injected createSession is called with the SessionManager fr
 
 // ── Case 11: createSession receives ctx.cwd ──────────────────────────────
 
-test("delegateAgent: injected createSession receives ctx.cwd verbatim", async () => {
+test("createBudgetAwareSession: injected createSession receives ctx.cwd verbatim", async () => {
   const state = makeHiveState({ agentName: "Builder" });
   const cwd = state.session!.sessionDir;
   const ctx = makeCtx(cwd, SessionManager.inMemory(cwd));
   const create = makeCreateSession();
 
-  await delegateAgent(state, "Builder", "task", {}, ctx, {
+  await createBudgetAwareSession(state, "Builder", {}, ctx, {
     sessionManagerFactory: (c) => SessionManager.inMemory(c),
     createSession: create.invoke as never,
   });
@@ -527,7 +528,7 @@ test("delegateAgent: injected createSession receives ctx.cwd verbatim", async ()
 
 // ── Case 12: throw-to-refuse — no object-return shape (no exitCode) ──────
 
-test("delegateAgent: budget violation throws (no { output, exitCode: 1 } object-return shape)", async () => {
+test("createBudgetAwareSession: budget violation throws (no { output, exitCode: 1 } object-return shape)", async () => {
   const { state, ctx } = makeStateAndCtxWithSeededBranch(
     [{ tokens: 100, costUsd: 0, runs: 0 }],
     "builder",
@@ -539,7 +540,7 @@ test("delegateAgent: budget violation throws (no { output, exitCode: 1 } object-
 
   let caught: unknown;
   try {
-    await delegateAgent(state, "Builder", "task", {}, ctx, {
+    await createBudgetAwareSession(state, "Builder", {}, ctx, {
       sessionManagerFactory: (c) => SessionManager.inMemory(c),
       createSession: create.invoke as never,
     });
@@ -553,7 +554,7 @@ test("delegateAgent: budget violation throws (no { output, exitCode: 1 } object-
 
 // ── Case 13: ledger caps captured from policy at restore ────────────────
 
-test("delegateAgent: ledger.caps reflects policy caps at restore time", async () => {
+test("createBudgetAwareSession: ledger.caps reflects policy caps at restore time", async () => {
   const { state, ctx } = makeStateAndCtx({ agentName: "Builder" });
   // Inject a budget config with non-default caps so we can assert the values.
   (state.config!.settings as unknown as { budgets?: unknown }).budgets = {
@@ -566,7 +567,7 @@ test("delegateAgent: ledger.caps reflects policy caps at restore time", async ()
   };
   const create = makeCreateSession();
 
-  const result = await delegateAgent(state, "Builder", "task", {}, ctx, {
+  const result = await createBudgetAwareSession(state, "Builder", {}, ctx, {
     sessionManagerFactory: (c) => SessionManager.inMemory(c),
     createSession: create.invoke as never,
   });
@@ -579,14 +580,14 @@ test("delegateAgent: ledger.caps reflects policy caps at restore time", async ()
 
 // ── Case 14: two fresh=true calls produce independent sessions ───────────
 
-test("delegateAgent: two fresh=true calls produce independent SessionManagers and sessions", async () => {
+test("createBudgetAwareSession: two fresh=true calls produce independent SessionManagers and sessions", async () => {
   const state = makeHiveState({ agentName: "Builder" });
   const cwd = state.session!.sessionDir;
   const ctx = makeCtx(cwd, SessionManager.inMemory(cwd));
   const create = makeCreateSession();
   const sms: SessionManager[] = [];
 
-  const r1 = await delegateAgent(state, "Builder", "task1", { fresh: true }, ctx, {
+  const r1 = await createBudgetAwareSession(state, "Builder", { fresh: true }, ctx, {
     sessionManagerFactory: (c) => {
       const sm = SessionManager.inMemory(c);
       sms.push(sm);
@@ -594,7 +595,7 @@ test("delegateAgent: two fresh=true calls produce independent SessionManagers an
     },
     createSession: create.invoke as never,
   });
-  const r2 = await delegateAgent(state, "Builder", "task2", { fresh: true }, ctx, {
+  const r2 = await createBudgetAwareSession(state, "Builder", { fresh: true }, ctx, {
     sessionManagerFactory: (c) => {
       const sm = SessionManager.inMemory(c);
       sms.push(sm);
@@ -649,7 +650,7 @@ test("T2.3: depth-cap violation throws BudgetExhaustedError with scope=worker, r
   let caught: (Error & { scope?: string; resource?: string }) | undefined;
   await runAtDelegationDepth(2, async () => {
     try {
-      await delegateAgent(state, "Builder", "task", {}, ctx, {
+      await createBudgetAwareSession(state, "Builder", {}, ctx, {
         sessionManagerFactory: (c) => SessionManager.inMemory(c),
         createSession: create.invoke as never,
       });

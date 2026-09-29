@@ -2,7 +2,7 @@
  * Wave 2 — F2 delegate-agent spine + cooperative tools.
  *
  * Source of truth: docs/reviews/28-09-2026-budget-review/04-refactor-plan.md
- *   §2.4 The new `delegateAgent` flow — throws `BudgetExhaustedError` to refuse
+ *   §2.4 The new `createBudgetAwareSession` flow — throws `BudgetExhaustedError` to refuse
  *   §2.5 Pre-flight gate (`checkBudgetPolicy`) — caller is the depth + budget
  *          pre-flight, throws on violation
  *   §2.8 EOL flexibility — 7 operator commands + 3 cooperative tools
@@ -10,7 +10,7 @@
  *           per Wave 1 Agent 1D T5.7)
  *   §2.12 Every write threads `controller.signal`.
  *
- * `delegateAgent` is the budget-aware session creator: it resolves the
+ * `createBudgetAwareSession` is the budget-aware session creator: it resolves the
  * worker's policy, restores the ledger, runs the pre-flight check
  * (depth + tokens/cost/runs), creates or opens the session, installs the
  * mid-run budget event hooks, and returns the session + ledger. It does
@@ -25,7 +25,7 @@
  *     does NOT exist in the local SDK. We use the explicit two-step form:
  *     open a `SessionManager`, then `createAgentSession({ sessionManager, ... })`.
  *
- *   - `delegateAgent` throws `BudgetExhaustedError` on pre-flight violation
+ *   - `createBudgetAwareSession` throws `BudgetExhaustedError` on pre-flight violation
  *     (per Pi docs §2 "Throw from execute() to produce a failed tool result").
  *     It does NOT return a `{ output: "...", exitCode: 1 }` envelope — the
  *     legacy shape that did so is replaced.
@@ -42,10 +42,10 @@
  *     `SessionManager.continueRecent(cwd)` invocations. Production callers
  *     leave it undefined; the default uses the real SDK factory.
  *
- *   - The `controller` argument: `delegateAgent` instantiates its own
+ *   - The `controller` argument: `createBudgetAwareSession` instantiates its own
  *     `AbortController` per call (consistent with the plan §2.4 example).
  *     The controller's signal is threaded into every ledger write per §2.12.
- *     It is exposed via the `DelegateAgentResult.controller` field so the
+ *     It is exposed via the `CreateBudgetAwareSessionResult.controller` field so the
  *     caller can abort mid-run if needed (e.g., parent-tool abort signal).
  *
  *   - `resolveWorkerBudgetPolicy` is the pure resolver. It walks
@@ -58,7 +58,7 @@
  *     snapshot / restore / resume / abortCompaction) and cooperative tools
  *     (request_compaction / request_end_session / request_snapshot) remain
  *     stubs throwing "not implemented" — they belong to Wave 5 / F5, not
- *     F2. The F2 spine ONLY ships `delegateAgent` + `resolveWorkerBudgetPolicy`.
+ *     F2. The F2 spine ONLY ships `createBudgetAwareSession` + `resolveWorkerBudgetPolicy`.
  */
 
 import {
@@ -67,6 +67,7 @@ import {
   SessionManager,
   createAgentSession,
 } from "@earendil-works/pi-coding-agent";
+import { installWorkerBudgetHooks } from "../worker-session-factory";
 import type { AgentConfig, HiveState } from "../../core/types";
 import { agentSlug } from "../../core/utils";
 import { currentDelegationDepth } from "../session";
@@ -81,7 +82,7 @@ import type {
   BudgetLedgerCumulative,
   BudgetLedgerData,
   BudgetLedgerKind,
-  DelegateAgentResult,
+  CreateBudgetAwareSessionResult,
   RequestCompactionArgs,
   RequestCompactionResult,
   RequestEndSessionArgs,
@@ -301,20 +302,22 @@ function findAgentBudgetsOverride(
 }
 
 // ---------------------------------------------------------------------------
-// §2.4 — `delegateAgent` (T2.2 main flow).
+// §2.4 — `createBudgetAwareSession` (T2.2 main flow).
+//
+// The F2 budget spine. Production callers (`dispatchAgent`) inject:
+//   - `sessionManagerFactory`: opens the worker's `SessionManager` (production
+//     captures `runtime.sessionFile` by closure).
+//   - `createSession`: wraps `createAgentSession` with the worker's resolved
+//     model, tools, customTools, and resource loader.
+//   - `installWorkerHooks: true`: also wire the F3 tool_call guard onto
+//     `session.agent.beforeToolCall`.
+//   - `currentDelegationDepth: () => depth`: depth closure for the guard.
+//
+// Tests inject only `sessionManagerFactory` + `createSession` to exercise the
+// minimal spine without booting the SDK's extension runner.
 // ---------------------------------------------------------------------------
 
-export interface DelegateAgentOptions {
-  fresh?: boolean;
-  configOverrides?: Partial<AgentConfig>;
-}
-
-/**
- * Test-time dependency-injection seam. NOT part of the public Wave 0
- * contract; production callers MUST NOT pass this. Both factories default
- * to the real SDK implementations.
- */
-export interface DelegateAgentDeps {
+export interface CreateBudgetAwareSessionDeps {
   /**
    * Override the SessionManager factory. The first argument is `cwd`, the
    * second is `fresh`. Tests inject this to assert which factory was called
@@ -322,8 +325,38 @@ export interface DelegateAgentDeps {
    * to use `SessionManager.inMemory` for hermetic tests.
    */
   sessionManagerFactory?: (cwd: string, fresh: boolean) => SessionManager;
-  /** Override `createAgentSession`. Tests inject a scripted session. */
-  createSession?: typeof createAgentSession;
+  /**
+   * Override `createAgentSession`. Tests inject a scripted session;
+   * production injects a wrapper that adds the resolved model, tools,
+   * customTools, and resource loader (the F9 wiring). The `ledger` field
+   * is plumbed so production's wrapper can merge F5 worker-only tools
+   * (cooperative + summarize_progress) into customTools; the SDK's default
+   * `createAgentSession` ignores it (it picks up `sessionManager` and
+   * constructs the session independently).
+   */
+  createSession?: (opts: { cwd: string; sessionManager: SessionManager; ledger: BudgetLedger }) => Promise<{ session: unknown }>;
+  /**
+   * Production wiring: also wire the F3 tool_call guard onto
+   * `session.agent.beforeToolCall` after the budget event hooks install.
+   * Default false (tests don't need the guard; the 17 tests pin the
+   * event-hooks-only contract).
+   */
+  installWorkerHooks?: boolean;
+  /**
+   * Production wiring: closure returning the current delegation depth for
+   * the in-flight worker. Required when `installWorkerHooks: true`; the
+   * guard passes this to `checkBudgetPolicy` so the per-call depth is the
+   * dispatch's start depth (G-29 / plan §2.5).
+   */
+  currentDelegationDepth?: () => number;
+  /**
+   * Optional: invoked with the freshly-created session (and session manager)
+   * BEFORE `installBudgetEventHooks` subscribes to it. Used by the dispatch
+   * path to attach the session to its lifecycle so a throw from
+   * `installBudgetEventHooks` leaves the lifecycle in a state where
+   * `close(failed=true)` aborts and disposes the partially-created session.
+   */
+  onSessionCreated?: (session: unknown, sessionManager: SessionManager) => void;
 }
 
 const defaultSessionManagerFactory = (cwd: string, fresh: boolean): SessionManager => {
@@ -331,7 +364,7 @@ const defaultSessionManagerFactory = (cwd: string, fresh: boolean): SessionManag
 };
 
 // ---------------------------------------------------------------------------
-// §2.4 — pre-flight helper used by `dispatchAgent` AND `delegateAgent`.
+// §2.4 — pre-flight helper used by `dispatchAgent` AND `createBudgetAwareSession`.
 //
 // The pre-flight is the load-bearing step Bug 1 was about: a queued or
 // concurrent dispatch can drain the budget between the initial check and
@@ -429,12 +462,16 @@ export async function runBudgetPreflight(
  *   1. Pre-flight (runBudgetPreflight): resolve policy + ledger restore +
  *      cap/depth check. Throws `BudgetExhaustedError` on block.
  *   2. Open or create the `SessionManager`.
- *   3. Create the `AgentSession` via the injected `createSession`.
- *   4. Re-restore the `BudgetLedger` against the WORKER's SessionManager
+ *   3. Re-restore the `BudgetLedger` against the WORKER's SessionManager
  *      (writes go to the worker SM, not `ctx.sessionManager` which is
  *      read-only — see `src/engine/budget/ledger.ts` Wave 1A note).
+ *      Done BEFORE createSession so the production `createSession` dep
+ *      can merge ledger-dependent tools (cooperative + summarize_progress)
+ *      into customTools.
+ *   4. Create the `AgentSession` via the injected `createSession`.
  *   5. Install mid-run budget event hooks (controller owned by this call).
- *   6. Return `{ sessionId, session, ledger, controller }`.
+ *   6. If `installWorkerHooks: true`, also wire the F3 tool_call guard.
+ *   7. Return `{ sessionId, session, sessionManager, ledger, controller }`.
  *
  * The caller is responsible for:
  *   - invoking `session.prompt(task)` to start the run,
@@ -442,40 +479,52 @@ export async function runBudgetPreflight(
  *     `session.dispose()` tear it down),
  *   - aborting `controller` if a parent abort signal fires.
  */
-export async function delegateAgent(
+export async function createBudgetAwareSession(
   state: HiveState,
   agentName: string,
-  task: string,
-  opts: DelegateAgentOptions,
+  opts: { fresh?: boolean },
   ctx: ExtensionContext,
-  deps: DelegateAgentDeps = {},
-): Promise<DelegateAgentResult> {
+  deps: CreateBudgetAwareSessionDeps = {},
+): Promise<CreateBudgetAwareSessionResult> {
   // 1. Pre-flight: policy resolution + ledger restore + cap/depth check.
   // Delegated to the shared helper used by `dispatchAgent` so the rule is
   // defined in exactly one place (no second copy of the depth/cap logic).
-  const { policy } = await runBudgetPreflight(state, agentName, ctx);
+  const { policy, depth } = await runBudgetPreflight(state, agentName, ctx);
 
   // 2. Open or create the SessionManager. Default factory maps directly to
   // the plan §2.4 example (`fresh ? SessionManager.create(cwd) :
   // SessionManager.continueRecent(cwd)`); tests inject a hermetic
-  // alternative.
+  // alternative. Production captures the runtime by closure and uses
+  // `SessionManager.open(runtime.sessionFile)`.
   const sessionManagerFactory = deps.sessionManagerFactory ?? defaultSessionManagerFactory;
   const sessionManager = sessionManagerFactory(ctx.cwd, Boolean(opts.fresh));
 
-  // 3. Create the AgentSession. Default uses `createAgentSession` with the
-  // minimum options required for the SDK to spin up a session bound to
-  // `sessionManager`. Production callers (`dispatchAgent`) inject their
-  // own factory that wires model/tools/loader; F2 ships the minimal
-  // default so the spine is runnable without the full dispatcher.
-  const createSession = deps.createSession ?? createAgentSession;
-  const created = await createSession({ cwd: ctx.cwd, sessionManager });
-  const session = created.session as AgentSession;
-
-  // 4. Restore the ledger against the WORKER's SessionManager (writes go
-  // here, not to the read-only `ctx.sessionManager`).
+  // 3. Restore the ledger against the WORKER's SessionManager (writes go
+  // here, not to the read-only `ctx.sessionManager`). Done BEFORE createSession
+  // so the production `createSession` dep can merge ledger-dependent tools
+  // (cooperative tools + summarize_progress) into customTools.
   const runtime = resolveRuntime(state, agentName);
   const slug = runtime ? agentSlug(runtime.config) : agentName;
   const ledger = await BudgetLedger.restore(sessionManager, slug, policy, ctx.signal);
+
+  // 4. Create the AgentSession. Default uses `createAgentSession` with the
+  // minimum options required for the SDK to spin up a session bound to
+  // `sessionManager`. Production callers inject a wrapper that adds the
+  // resolved model, tools, customTools, and resource loader (the F9 wiring).
+  // The `ledger` is included in the opts so production can merge F5 worker-only
+  // tools; the default SDK call doesn't read it.
+  const createSession = deps.createSession ?? (async (opts) => {
+    const { cwd, sessionManager } = opts;
+    return createAgentSession({ cwd, sessionManager });
+  });
+  const created = await createSession({ cwd: ctx.cwd, sessionManager, ledger });
+  const session = created.session as AgentSession;
+
+  // 4a. Notify the caller (e.g. dispatch) so it can attach the session to
+  // its lifecycle BEFORE installBudgetEventHooks subscribes — a throw from
+  // subscribe leaves the lifecycle in a state where close(failed=true)
+  // aborts the partially-created session.
+  deps.onSessionCreated?.(session, sessionManager);
 
   // 5. Install mid-run event hooks. The controller is owned by this call
   // (consistent with the plan §2.4 example) and exposed via the result so
@@ -483,9 +532,24 @@ export async function delegateAgent(
   const controller = new AbortController();
   installBudgetEventHooks(session, ledger, policy, sessionManager, controller);
 
+  // 6. Optional: production wiring — wire the F3 tool_call guard onto
+  // `session.agent.beforeToolCall`. Tests leave this off (the 17 tests pin
+  // the event-hooks-only contract).
+  if (deps.installWorkerHooks === true) {
+    await installWorkerBudgetHooks({
+      session,
+      sessionManager,
+      preflightPolicy: policy,
+      ledger,
+      runController: controller,
+      currentDelegationDepth: deps.currentDelegationDepth ?? (() => depth),
+    });
+  }
+
   return {
     sessionId: session.sessionId,
     session,
+    sessionManager,
     ledger,
     controller,
   };
@@ -720,8 +784,8 @@ function lastLedgerEntry(ledger: BudgetLedger, kind: string): BudgetLedgerEntry 
 //   - All three functions take a third `deps` argument carrying the live
 //     AgentSession / SessionManager / BudgetLedger / WorkerBudgetPolicy
 //     for the worker. Tests inject scripted versions; production callers
-//     pull these from a runtime registry / `delegateAgent` result.
-//   - The factory pattern matches `delegateAgent` (line ~540) so the test
+//     pull these from a runtime registry / `createBudgetAwareSession` result.
+//   - The factory pattern matches `createBudgetAwareSession` (line ~540) so the test
 //     seams stay consistent across the module.
 //
 // Result-shape note (plan §2.8 + Wave 0 `BudgetLedgerEntry`):
@@ -1293,12 +1357,12 @@ export type { AgentSession, ExtensionContext };
 // ---------------------------------------------------------------------------
 // Internal re-exports for tests. The `BudgetExhaustedError` class lives in
 // `src/engine/budget/types.ts` and is rebuilt here as a duck-typed Error so
-// `delegateAgent` does not need to import the Wave 0 surface (which will be
+// `createBudgetAwareSession` does not need to import the Wave 0 surface (which will be
 // deprecated in F9 cleanup). Tests assert on `error.name === "BudgetExhaustedError"`
 // and `error.scope` / `error.resource` instead of `instanceof`.
 // ---------------------------------------------------------------------------
 
-/** Sentinel name used to identify budget-violation throws from `delegateAgent`. */
+/** Sentinel name used to identify budget-violation throws from `createBudgetAwareSession`. */
 export const BUDGET_EXHAUSTED_ERROR_NAME = "BudgetExhaustedError";
 
 // Re-export so callers (dispatchAgent, future waves) can read the ledger kind

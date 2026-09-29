@@ -77,18 +77,10 @@ import type {
   BudgetBlock,
   WorkerBudgetPolicy,
 } from "../src/engine/budget/types.ts";
-import type { AgentConfig } from "../src/core/types.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers / fixtures.
 // ---------------------------------------------------------------------------
-
-/** A minimal AgentConfig that satisfies the shape `BudgetLedger.restore` and
- * `installWorkerBudgetHooks` read (we only need `config.name` / `config.path`). */
-function makeRuntime(name: string, path: string) {
-  const config: AgentConfig = { name, path };
-  return { config, systemPrompt: "", status: "running" as const, task: "", lastWork: "", toolCount: 0, elapsedMs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, contextPct: 0, runCount: 0, sessionFile: path };
-}
 
 function makePolicy(overrides: Partial<WorkerBudgetPolicy["worker"]> = {}): WorkerBudgetPolicy {
   return {
@@ -185,13 +177,13 @@ async function installWithSeededCumulative(args: {
   }
   const controller = args.controller ?? new AbortController();
   const session = makeFakeSession(args.previousBeforeToolCall);
-  const runtime = makeRuntime("wiring-worker", join(cwd, "session.jsonl"));
-  // F5: installWorkerBudgetHooks now receives a pre-restored ledger (the
-  // dispatch path restores it inside createWorkerSession). Restore here
-  // explicitly so the test setup mirrors production wiring.
+  // F2/F5 wiring: installWorkerBudgetHooks only wires the F3 tool_call
+  // guard; the budget event hooks are installed by createBudgetAwareSession.
+  // The test calls installWorkerBudgetHooks directly to exercise the guard
+  // wrapping in isolation, mirroring how the production path wires it AFTER
+  // createBudgetAwareSession's event-hook install.
   const ledger = await BudgetLedger.restore(sessionManager, "wiring-worker", policy, controller.signal);
   await installWorkerBudgetHooks({
-    runtime,
     session,
     sessionManager,
     preflightPolicy: policy,

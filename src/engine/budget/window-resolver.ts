@@ -20,7 +20,7 @@
  *     export interface BudgetWindowSpec { kind: WindowKind; duration?: number; }
  *
  * The F1 runtime primitives (`BudgetLedger`, `checkBudgetPolicy`,
- * `installBudgetEventHooks`, `delegateAgent`) were authored against the flat
+ * `installBudgetEventHooks`, `createBudgetAwareSession`) were authored against the flat
  * string surface in `src/engine/budget/types.ts` and the F6 schema validator
  * produces the object surface. A resolver sits between the schema layer and
  * the runtime layer so neither has to widen to accept the other.

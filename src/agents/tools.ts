@@ -113,7 +113,7 @@ function contextAdvice(contextPct?: number): "resume-ok" | "consider-fresh" | "f
 // F5 wiring: an optional `ledger` parameter, when present, enables the
 // worker-only tools (`summarize_progress` + the 3 cooperative tools). The
 // orchestrator does not pass a ledger because it has no per-worker
-// `BudgetLedger`; workers receive the ledger after `installWorkerBudgetHooks`
+// `BudgetLedger`; workers receive the ledger after `createBudgetAwareSession`
 // restores it on their session manager.
 export function buildHiveTools(
   state: HiveState,
