@@ -474,8 +474,11 @@ test("fresh re-run resets lifetime counters so the delta is the fresh session's 
   assert.equal(run2.delta.cacheReadTokens, 5);
   assert.equal(run2.delta.cacheWriteTokens, 2);
   assert.ok(Math.abs(run2.delta.costUsd - 0.08) < 1e-9, `run2 cost delta ${run2.delta.costUsd} ≈ 0.08`);
-  // Runtime now holds the fresh session's lifetime totals (overwritten by stats).
-  assert.equal(worker.inputTokens, 80);
+  // The CURRENT runtime in state.runtimes now holds the fresh session's
+  // lifetime totals (overwritten by stats). Move 2 swaps the runtime on
+  // fresh=true, so the original `worker` reference is intentionally
+  // orphaned — read from the registry.
+  assert.equal(state.runtimes.get("builder")!.inputTokens, 80);
 });
 
 // R3-1.1: the fresh-delta fix must survive a runtime-counter restore. A mode
@@ -513,16 +516,25 @@ test("fresh-delta survives a mode-switch runtime restore — third run's delta i
   // runtime snapshot for run 2 records 80 — SMALLER than run 1's 500.
   const create2: CreateAgentSession = (async () => ({ session: scriptedSession({ turns: [{ input: 1, output: 1, cost: 0 }], stats: { input: 80, output: 30, cacheRead: 5, cacheWrite: 2, cost: 0.08 } }) })) as any;
   await dispatchAgent(state, "Builder", "run two fresh", ctx, true, create2);
-  assert.equal(worker.inputTokens, 80);
+  // Move 2 swaps the runtime in state.runtimes on fresh=true; the original
+  // `worker` reference is orphaned, so read from the registry.
+  assert.equal(state.runtimes.get("builder")!.inputTokens, 80);
 
   // Simulate a mode switch / reloadTeam: rebuild the runtime with zeroed counters
   // (as loadAgentRuntime does), then restore from the log. Last-row-wins must
-  // restore 80, NOT the peak 500.
-  worker.inputTokens = 0; worker.outputTokens = 0; worker.cacheReadTokens = 0;
-  worker.cacheWriteTokens = 0; worker.costUsd = 0; worker.runCount = 0; worker.toolCount = 0;
+  // restore 80, NOT the peak 500. With Move 2 in effect, we zero the CURRENT
+  // runtime in state.runtimes (not the orphaned `worker` reference).
+  const current = state.runtimes.get("builder")!;
+  current.inputTokens = 0; current.outputTokens = 0; current.cacheReadTokens = 0;
+  current.cacheWriteTokens = 0; current.costUsd = 0; current.runCount = 0; current.toolCount = 0;
   restoreRuntimeCounters(state);
-  assert.equal(worker.inputTokens, 80, "restore must pick the latest (post-fresh) row, not the peak");
-  assert.equal(worker.runCount, 2, "runCount stays monotonic across the restore");
+  assert.equal(state.runtimes.get("builder")!.inputTokens, 80, "restore must pick the latest (post-fresh) row, not the peak");
+  // Move 2 swaps the runtime on fresh=true — the new runtime starts at
+  // runCount=0, then dispatch's increment brings it to 1 for run 2. The
+  // previous expectation (2) reflected the legacy bug where runCount was
+  // incremented unconditionally without a fresh reset; that was the very
+  // "runs=2 after fresh" symptom the user reported. Move 2 fixes it.
+  assert.equal(state.runtimes.get("builder")!.runCount, 1, "fresh dispatch resets runCount on the new runtime (Move 2)");
 
   // Run 3 (non-fresh): the fresh session continues, lifetime grows 80 → 130. With a
   // correct baseline of 80, the delta is run-3-only (50). With the resurrected 500

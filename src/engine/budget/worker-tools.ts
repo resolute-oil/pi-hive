@@ -357,14 +357,25 @@ export interface BudgetPreflightResult {
  * Run the budget pre-flight for `agentName`. Throws `BudgetExhaustedError`
  * (duck-typed: `error.name === "BudgetExhaustedError"`) on block.
  *
- * The helper takes the `ExtensionContext` only for `ctx.sessionManager`
- * (branch read) and `ctx.signal` (abort propagation into the ledger
- * restore). It does NOT create or open any session.
+ * The helper takes the `ExtensionContext` only for `ctx.signal` (abort
+ * propagation into the ledger restore). It does NOT create or open any
+ * session.
+ *
+ * Move 4 (tmp/2025-09-29-fresh-true-rebuild-runtime.md): the ledger is
+ * restored against the WORKER's `SessionManager` when provided via
+ * `workerSessionManager`. Without it, the helper falls back to
+ * `ctx.sessionManager` (the orchestrator's read-only SM, which has no
+ * worker budget CustomEntries → preflight always passed). Callers that
+ * already created a worker SM (the dispatch path) MUST pass it here.
+ *
+ * `delegateAgent` still works without `workerSessionManager` because it
+ * pre-creates the SM itself (the path is owned in one place).
  */
 export async function runBudgetPreflight(
   state: HiveState,
   agentName: string,
   ctx: ExtensionContext,
+  workerSessionManager?: SessionManager,
 ): Promise<BudgetPreflightResult> {
   const runtime = resolveRuntime(state, agentName);
   if (!runtime) {
@@ -387,16 +398,22 @@ export async function runBudgetPreflight(
     Boolean(policy.team.tokens?.cap) ||
     Boolean(policy.team.costUsd?.cap) ||
     Boolean(policy.team.runs?.cap);
-  if (!hasAnyCap || !ctx.sessionManager) {
+  const branchSource = workerSessionManager ?? (ctx.sessionManager as unknown as SessionManager | undefined);
+  if (!hasAnyCap || !branchSource) {
     return { policy, depth };
   }
 
-  // Standard path: restore the ledger against the active branch and run the
-  // pre-flight. The ledger is read-only here (no writes during pre-flight);
-  // the worker's own SessionManager (created later) is what writes go to.
+  // Standard path: restore the ledger against the WORKER's branch and run
+  // the pre-flight. When `workerSessionManager` is supplied (the dispatch
+  // path), this is the worker SM created earlier in the dispatch — its
+  // branch carries the worker's prior budget CustomEntries, which is the
+  // authoritative per-worker cumulative. Without `workerSessionManager`, we
+  // fall back to `ctx.sessionManager` (the orchestrator's read-only SM) —
+  // preserved for `delegateAgent`'s direct calls, where it pre-creates the
+  // SM itself.
   const slug = agentSlug(runtime.config);
   const ledger = await BudgetLedger.restore(
-    ctx.sessionManager as unknown as SessionManager,
+    branchSource,
     slug,
     policy,
     ctx.signal,
@@ -404,7 +421,7 @@ export async function runBudgetPreflight(
   const blocked = checkBudgetPolicy(
     ledger,
     policy,
-    ctx.sessionManager.getBranch(),
+    branchSource.getBranch(),
     depth,
   );
   if (blocked) {
