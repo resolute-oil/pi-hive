@@ -78,7 +78,6 @@ import { resolveWindow } from "./window-resolver";
 import { installBudgetEventHooks } from "./events";
 import type {
   BudgetLedgerEntry,
-  BudgetExhaustedError as _BudgetExhaustedError,
   BudgetLedgerCumulative,
   BudgetLedgerData,
   BudgetLedgerKind,

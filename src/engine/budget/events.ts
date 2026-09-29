@@ -66,10 +66,6 @@
 
 import type { AgentSession, SessionManager, SessionStats } from "@earendil-works/pi-coding-agent";
 import type { BudgetLedger } from "./ledger";
-import {
-  THROTTLE_MESSAGE_INTERVAL,
-  THROTTLE_SPEND_RATIO,
-} from "./ledger";
 import { checkBudgetPolicy, crossedThreshold, ratioRemaining } from "./policy";
 import type {
   BudgetBlock,
@@ -487,8 +483,13 @@ export function createBudgetToolCallGuard(
 }
 
 /**
- * Re-export the SDK types we accept structurally so call sites that want a
+ * Re-export the SDK type we accept structurally so call sites that want a
  * strongly-typed AgentSession do not need a second import.
+ *
+ * Note — `THROTTLE_MESSAGE_INTERVAL` / `THROTTLE_SPEND_RATIO` are exported
+ * from `./ledger.ts` (and re-exported through the barrel `./index.ts`).
+ * They were previously re-exported from here too, but the re-export was
+ * dead — `events.ts` does not consult the throttle constants; it only
+ * reads/writes the ledger and the session.
  */
 export type { AgentSession };
-export { THROTTLE_MESSAGE_INTERVAL, THROTTLE_SPEND_RATIO };

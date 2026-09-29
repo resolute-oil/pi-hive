@@ -297,9 +297,6 @@ export interface RequestSnapshotResult {
 // §2.8 ledger kind for cooperative tools + operator commands.
 // ---------------------------------------------------------------------------
 
-/** Maps operator / cooperative action → §2.3 ledger kind. */
-export type OperatorLedgerKind = BudgetLedgerKind;
-
 // ---------------------------------------------------------------------------
 // §2.4 / §2.6 — Return shapes from the new delegation flow.
 // ---------------------------------------------------------------------------
