@@ -250,17 +250,18 @@ export interface BudgetBlock {
   limit: BudgetLimit;
 }
 
-/** Thrown by `createBudgetAwareSession` to refuse per Pi docs §2 ("Throw from execute() to produce a failed tool result"). */
-export class BudgetExhaustedError extends Error {
-  constructor(
-    public readonly reason: string,
-    public readonly scope: BudgetScope,
-    public readonly resource: BudgetResource,
-  ) {
-    super(reason);
-    this.name = "BudgetExhaustedError";
-  }
-}
+/**
+ * Budget violation shape thrown by `createBudgetAwareSession` and
+ * `runBudgetPreflight`. The runtime path duck-types this — it builds the
+ * error ad hoc with `error.name = "BudgetExhaustedError"` and attaches
+ * `.scope` and `.resource`. No `instanceof BudgetExhaustedError` checks
+ * exist; consumers should compare `error.name === "BudgetExhaustedError"`.
+ *
+ * The `BudgetExhaustedError` CLASS that previously lived here was removed
+ * in audit C1: never instantiated, only documented. The duck-typed
+ * envelope is what callers actually use. See `BUDGET_EXHAUSTED_ERROR_NAME`
+ * in `worker-tools.ts` for the canonical sentinel string.
+ */
 
 // ---------------------------------------------------------------------------
 // Team-usage aggregation across the branch.
