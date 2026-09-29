@@ -87,13 +87,50 @@ export interface DepthCap {
 export type BudgetCap = TokensCap | CostUsdCap | RunsCap | DepthCap;
 
 // ---------------------------------------------------------------------------
-// §2.13 C5 — Structured strategies. PLACEHOLDER ONLY; v3 unless user overrides.
+// §2.13 C5 — Structured strategies (full implementation).
+//
+// Source of truth: docs/reviews/28-09-2026-budget-review/04-refactor-plan.md
+//   §2.13 C5 (structured strategies) — decouples warning behavior from EOL
+//          behavior; extensible without breaking changes.
+//
+// Resolved shape (always populated; defaults applied when absent in config):
+//   onApproachingLimit: { action: "wrap-up" | "compact" | "none", threshold?, hint? }
+//   onExhaustion:       { action: "compact" | "abort" | "none", customInstructions? }
+//   summary:            { maxTokens? }
+//
+// Field names mirror kebab-case YAML via auto-camelization
+// (`on-approaching-limit` → `onApproachingLimit`).
 // ---------------------------------------------------------------------------
 
-/** TODO C5: deferred to v3 unless user overrides. */
+export type ApproachingLimitAction = "wrap-up" | "compact" | "none";
+export type ExhaustionAction = "compact" | "abort" | "none";
+
+/** Resolved approaching-limit block. */
+export interface ResolvedApproachingLimitStrategy {
+  action: ApproachingLimitAction;
+  /** Fraction in [0.0, 1.0]; default 0.20 (i.e. 20% remaining). */
+  threshold: number;
+  /** Optional prompt hint surfaced to the worker when the threshold is crossed. */
+  hint?: string;
+}
+
+/** Resolved exhaustion block. */
+export interface ResolvedExhaustionStrategy {
+  action: ExhaustionAction;
+  /** Only honored when `action: compact`; prepended to the /compact prompt. */
+  customInstructions?: string;
+}
+
+/** Resolved summary block (tuning for the `summarize_progress` tool). */
+export interface ResolvedSummaryStrategy {
+  /** Per-call cap for `notes:`; default 2000 tokens. */
+  maxTokens: number;
+}
+
 export interface WorkerBudgetStrategy {
-  // TODO C5: deferred to v3 unless user overrides
-  readonly _placeholder: never;
+  onApproachingLimit: ResolvedApproachingLimitStrategy;
+  onExhaustion: ResolvedExhaustionStrategy;
+  summary: ResolvedSummaryStrategy;
 }
 
 // ---------------------------------------------------------------------------

@@ -289,41 +289,87 @@ test("summarize_progress returns over_cap isError when notes exceed the 2000-tok
 });
 
 // ---------------------------------------------------------------------------
-// 6. new: `compact_failed` returns isError when `compact: true` under default strategy.
+// 6. C5: under default strategy, `compact: true` flag is silently ignored.
 // ---------------------------------------------------------------------------
 
-test("summarize_progress returns compact_failed isError under default strategy when compact is requested", async () => {
+test("C5: summarize_progress silently ignores `compact: true` under default strategy (notes stored, no compact)", async () => {
   const state = makeState({ runtime: makeRuntime() }); // default strategy
   const ledger = makeFakeLedger();
 
-  const result = await invoke(state, ledger, { notes: "wrap up; request compact", compact: true });
+  const result = await invoke(state, ledger, { notes: "wrap up; requested compact", compact: true });
 
-  assert.equal(result.isError, true, "compact_failed surfaces as isError");
+  assert.equal(result.isError, undefined, "default strategy with compact: true returns success (silent ignore)");
   const details = result.details as {
     ok: boolean;
-    reason: SummarizeProgressFailureReason;
-    strategy: string;
+    reason?: SummarizeProgressFailureReason;
     compactRequested: boolean;
+    compacted: boolean;
+    strategy?: string;
   };
-  assert.equal(details.ok, false);
-  assert.equal(details.reason, "compact_failed");
-  assert.equal(details.strategy, "default");
+  assert.equal(details.ok, true);
   assert.equal(details.compactRequested, true);
-  assert.match(result.content[0].text, /under "default" strategy/);
-  // Notes were stored BEFORE the strategy check (matches the spec flow).
+  assert.equal(details.compacted, false, "default strategy does not trigger compact");
+  assert.match(result.content[0].text, /compact flag ignored under "default" strategy/);
+  // Notes were stored (the strategy check is downstream of the storage step).
   assert.equal(
     readProgressNotes(state)?.[CALLER],
-    "wrap up; request compact",
-    "notes are stored before the strategy rejection",
+    "wrap up; requested compact",
+    "notes are stored even when compact: true is ignored",
   );
-  // But appendCustomMessageEntry was NOT called — the failure short-circuits.
+  // But appendCustomMessageEntry was NOT called — the default strategy does not honor compact.
   assert.equal(
     state.runtimes.get(CALLER)?.session.sessionManager.calls.length,
     0,
-    "no appendCustomMessageEntry call under non-compact strategy",
+    "no appendCustomMessageEntry call under default strategy",
   );
-  // No ledger write on failure paths.
-  assert.equal(ledger.snapshotCalls.length, 0, "compact_failed does not write a ledger entry");
+  // Ledger still gets a progress_notes entry (notes were stored).
+  assert.equal(ledger.snapshotCalls.length, 1, "ledger receives one progress_notes entry");
+});
+
+// ---------------------------------------------------------------------------
+// 6b. C5: under compact strategy, `compact: true` actually triggers the compact.
+// ---------------------------------------------------------------------------
+
+test("C5: summarize_progress under compact strategy triggers appendCustomMessageEntry when compact: true", async () => {
+  const state = makeState({ runtime: makeRuntime() });
+  // Configure compact strategy (on-exhaustion.action === "compact").
+  state.config = {
+    orchestrator: { name: "Orchestrator", path: "/tmp/orchestrator" },
+    agents: [],
+    sharedContext: [],
+    settings: {
+      subagentOutputLimit: 12000,
+      defaultTools: "",
+      distiller: { enabled: false, model: "test-model", conversationLines: 100 },
+      budgets: {
+        strategies: {
+          onApproachingLimit: { action: "wrap-up" },
+          onExhaustion: { action: "compact" },
+        },
+      },
+    },
+  } as unknown as HiveState["config"];
+  const ledger = makeFakeLedger();
+
+  const result = await invoke(state, ledger, { notes: "compact now please", compact: true });
+
+  assert.equal(result.isError, undefined, "compact strategy honors compact: true");
+  const details = result.details as {
+    ok: boolean;
+    compactRequested: boolean;
+    compacted: boolean;
+    strategy?: string;
+  };
+  assert.equal(details.ok, true);
+  assert.equal(details.compacted, true, "compact strategy triggers compact");
+  assert.match(result.content[0].text, /compact honored/);
+  // appendCustomMessageEntry was called exactly once.
+  const sm = state.runtimes.get(CALLER)?.session.sessionManager as FakeSessionManager;
+  assert.equal(sm.calls.length, 1, "appendCustomMessageEntry called once under compact strategy");
+  assert.equal(sm.calls[0].customType, "progress_note");
+  assert.equal(sm.calls[0].content, "compact now please");
+  // Ledger also gets a progress_notes entry.
+  assert.equal(ledger.snapshotCalls.length, 1, "ledger receives one progress_notes entry");
 });
 
 // ---------------------------------------------------------------------------

@@ -277,6 +277,58 @@ export const DepthCapYAMLSchema = Type.Object({
 });
 
 // ---------------------------------------------------------------------------
+// §2.13 C5 — Structured strategies.
+//
+// Replaces the flat `budget-strategy: default | compact` enum with a structured
+// config where each event has its own action. The YAML keys are kebab-case;
+// after `enrichFromConfig` they are camelCased into the TS shape
+// (`onApproachingLimit`, `onExhaustion`, `summary`). See `strategy.ts` for the
+// default preset and `worker-tools.ts` for the integration call sites.
+// ---------------------------------------------------------------------------
+
+/** Actions for the `on-approaching-limit` event (worker crosses the threshold). */
+export const ApproachingLimitActionSchema = Type.Union([
+  Type.Literal("wrap-up"),
+  Type.Literal("compact"),
+  Type.Literal("none"),
+]);
+
+/** Actions for the `on-exhaustion` event (worker hits 0% remaining). */
+export const ExhaustionActionSchema = Type.Union([
+  Type.Literal("compact"),
+  Type.Literal("abort"),
+  Type.Literal("none"),
+]);
+
+/** `on-approaching-limit` block: warning behavior at the threshold. */
+export const OnApproachingLimitSchema = Type.Object({
+  action: ApproachingLimitActionSchema,
+  /** Fraction in [0.0, 1.0] of remaining / cap at which the warning fires. */
+  threshold: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+  hint: Type.Optional(Type.String()),
+});
+
+/** `on-exhaustion` block: EOL behavior at 0%. */
+export const OnExhaustionSchema = Type.Object({
+  action: ExhaustionActionSchema,
+  /** Only honored when `action: compact`. Prepended to the /compact prompt. */
+  customInstructions: Type.Optional(Type.String()),
+});
+
+/** `summary` block: tuning for the `summarize_progress` tool. */
+export const SummarySchema = Type.Object({
+  /** Per-call cap for the `notes:` field; ~4-chars-per-token estimate. */
+  maxTokens: Type.Optional(Type.Number({ minimum: 1, maximum: 100_000, integer: true })),
+});
+
+/** Full structured strategies block. */
+export const StrategiesConfigSchema = Type.Object({
+  onApproachingLimit: Type.Optional(OnApproachingLimitSchema),
+  onExhaustion: Type.Optional(OnExhaustionSchema),
+  summary: Type.Optional(SummarySchema),
+});
+
+// ---------------------------------------------------------------------------
 // YAML-layer aggregate schemas (used by validateRawConfig and
 // validateAgentBudgets).
 // ---------------------------------------------------------------------------
@@ -303,14 +355,15 @@ export const TeamBudgetConfigSchema = Type.Object({
  * in `hive-config.yaml`. Per C3 (SKIPPED per G-16) there are no defaults: an
  * absent block means every resource is intentionally unlimited.
  *
- * `strategies` is reserved for §2.13 C5 (deferred to v3 unless the user
- * overrides). The validator (`validateBudgets` below) accepts it as `never`
- * today and will reject any concrete value.
+ * `strategies` accepts the structured shape from §2.13 C5: each event has its
+ * own action. When absent, the resolver (`resolveWorkerBudgetStrategy` in
+ * `src/engine/budget/strategy.ts`) returns the default preset
+ * (wrap-up + abort).
  */
 export const BudgetsConfigSchema = Type.Object({
   perWorker: Type.Optional(WorkerBudgetConfigSchema),
   perTeam: Type.Optional(TeamBudgetConfigSchema),
-  strategies: Type.Optional(Type.Never()),
+  strategies: Type.Optional(StrategiesConfigSchema),
 });
 
 /** §2.13 C1 — Per-agent override block (YAML layer; frontmatter `budgets:` key). */
