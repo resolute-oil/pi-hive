@@ -1,0 +1,1219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Budget Refactor Plan — pi-hive</title>
+  <link rel="stylesheet" href="assets/presentation.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head>
+<body>
+  <div class="layout">
+    <!-- ============================================================
+         SIDEBAR NAVIGATION
+         ============================================================ -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <p class="eyebrow">pi-hive refactor</p>
+        <h1>Budget System Plan</h1>
+        <p class="meta">feat/budget-strategy @ 9f950fb</p>
+      </div>
+
+      <ul class="sidebar-nav">
+        <li><a href="#hero"><span class="step-num">1</span>Overview</a></li>
+        <li><a href="#problem"><span class="step-num">2</span>The problem</a></li>
+        <li><a href="#goal"><span class="step-num">3</span>The goal</a></li>
+        <li><a href="#away"><span class="step-num">4</span>What goes away</a></li>
+        <li><a href="#replace"><span class="step-num">5</span>What replaces it</a></li>
+        <li><a href="#workflow"><span class="step-num">6</span>New workflow</a></li>
+        <li><a href="#diff"><span class="step-num">7</span>Side-by-side</a></li>
+        <li><a href="#tasks"><span class="step-num">8</span>Task plan</a></li>
+        <li><a href="#config"><span class="step-num">9</span>Config options</a></li>
+        <li><a href="#proscons"><span class="step-num">10</span>Pros / cons / pitfalls</a></li>
+        <li><a href="#questions"><span class="step-num">11</span>Open questions</a></li>
+        <li><a href="#gates"><span class="step-num">12</span>Verification gates</a></li>
+        <li><a href="#pickup"><span class="step-num">13</span>Pickup</a></li>
+      </ul>
+
+      <div class="sidebar-footer">
+        <span id="progress-counter">0/0 tasks (0/0 features)</span>
+        <button id="reset-state" type="button">Reset checkboxes</button>
+      </div>
+    </aside>
+
+    <main>
+      <!-- ============================================================
+           PAGE 1 — OVERVIEW
+           ============================================================ -->
+      <section id="hero" class="hero">
+        <p class="eyebrow">Refactor plan · 2026-09-28</p>
+        <h1>Budget system, redesigned around Pi</h1>
+        <p class="subtitle">
+          Replace the dual-counter budget layer with a single-source-of-truth design built on Pi SDK primitives.
+          Collapse three counters to one ledger. Make the <code>fresh=true</code> bug class structurally impossible.
+          Expose six EOL/respawn commands instead of three.
+        </p>
+        <div class="meta">
+          <span class="meta-item"><strong>Baseline:</strong>&nbsp;<code>feat/budget-strategy @ 9f950fb</code></span>
+          <span class="meta-item"><strong>Scope:</strong>&nbsp;~2,100 LOC rewritten · ~50 new tests · 13 features</span>
+          <span class="meta-item"><strong>Status:</strong>&nbsp;Awaiting user decisions on 13 open questions</span>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           PAGE 2 — THE PROBLEM
+           ============================================================ -->
+      <section id="problem" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 2 · Why</p>
+          <h2>The problem</h2>
+          <p class="subtitle">Nine structural issues and three fresh=true bugs in the current implementation.</p>
+        </header>
+
+        <h3>Nine structural issues</h3>
+        <p>From the prior session's <a href="https://github.com/resolute-oil/pi-hive/blob/review/budget-redesign-2026-09-28/docs/reviews/28-09-2026-budget-review/01-current-state-analysis.md">current-state analysis</a>:</p>
+
+        <div class="issue-card severity-critical">
+          <div class="issue-header">
+            <span class="issue-number">1</span>
+            <h4 class="issue-title">Dual/triple counter system</h4>
+            <span class="issue-severity">Critical</span>
+          </div>
+          <p>Three independent counters (<code>runtime.*</code>, <code>governanceTokens</code>, <code>effectiveTokens</code>) with <code>??</code> fallthroughs encoding a state machine in source code. Every refactor that touches counters reintroduces the bug class.</p>
+        </div>
+
+        <div class="issue-card severity-high">
+          <div class="issue-header">
+            <span class="issue-number">2</span>
+            <h4 class="issue-title">Overwrite/accumulation race</h4>
+            <span class="issue-severity">High</span>
+          </div>
+          <p>The mid-run live updates are overwritten by <code>getSessionStats()</code> at agent_end; delta math runs on post-overwrite values. If the SDK's stats return different values than live accumulation (aborted session, missed message_end), the delta is wrong.</p>
+        </div>
+
+        <div class="issue-card severity-high">
+          <div class="issue-header">
+            <span class="issue-number">3</span>
+            <h4 class="issue-title">fresh=true is overloaded</h4>
+            <span class="issue-severity">High</span>
+          </div>
+          <p><code>fresh=true</code> couples four operations (reload config, archive session, zero counters, start new session). The coupling is what made Bug 1 possible.</p>
+        </div>
+
+        <div class="issue-card severity-medium">
+          <div class="issue-header">
+            <span class="issue-number">4</span>
+            <h4 class="issue-title">Dashboard intervention UI missing</h4>
+            <span class="issue-severity">Medium</span>
+          </div>
+          <p>Three dispatch commands are correct and tested, but the dashboard UI to invoke them is missing.</p>
+        </div>
+
+        <div class="issue-card severity-medium">
+          <div class="issue-header">
+            <span class="issue-number">5</span>
+            <h4 class="issue-title">Strategy layered without isolation</h4>
+            <span class="issue-severity">Medium</span>
+          </div>
+          <p><code>budget-strategy.ts</code> mixes four concerns: event emission, strategy resolution, prompt mutation, and dedup.</p>
+        </div>
+
+        <div class="issue-card severity-medium">
+          <div class="issue-header">
+            <span class="issue-number">6</span>
+            <h4 class="issue-title">Test coverage weak on races</h4>
+            <span class="issue-severity">Medium</span>
+          </div>
+          <p>Deterministic paths are well-pinned. The abort-then-<code>getSessionStats</code> race is not.</p>
+        </div>
+
+        <div class="issue-card severity-low">
+          <div class="issue-header">
+            <span class="issue-number">7</span>
+            <h4 class="issue-title">fresh=true lives in dispatch.ts</h4>
+            <span class="issue-severity">Low</span>
+          </div>
+          <p><code>freshResetRuntime</code> belongs in the budget module, not the dispatcher.</p>
+        </div>
+
+        <div class="issue-card severity-low">
+          <div class="issue-header">
+            <span class="issue-number">8</span>
+            <h4 class="issue-title">agent_end instead of agent_settled</h4>
+            <span class="issue-severity">Low</span>
+          </div>
+          <p>Pi's canonical "Pi will not continue automatically" event is <code>agent_settled</code>, not <code>agent_end</code>.</p>
+        </div>
+
+        <div class="issue-card severity-low">
+          <div class="issue-header">
+            <span class="issue-number">9</span>
+            <h4 class="issue-title">session.dispose() never called on respawn</h4>
+            <span class="issue-severity">Low</span>
+          </div>
+          <p>Old session's <code>session.subscribe()</code> listener leaks because <code>dispose()</code> is absent.</p>
+        </div>
+
+        <h3>Three fresh=true bugs</h3>
+        <table>
+          <thead>
+            <tr><th>Bug</th><th>Symptom</th><th>Fix</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Bug 1</strong></td>
+              <td><code>fresh=true</code> doesn't reset; respawn blocked</td>
+              <td>Move <code>freshResetRuntime</code> before <code>checkDispatchBudgets</code></td>
+              <td><span class="tag success">Fixed</span> commit <code>3be33f6</code></td>
+            </tr>
+            <tr>
+              <td><strong>Bug 2</strong></td>
+              <td>Mid-run check sees stale <code>governanceTokens=0</code>; worker overruns by 26x</td>
+              <td><code>workerConsumedTokens</code> returns live values mid-run</td>
+              <td><span class="tag success">Fixed</span> commit <code>3be33f6</code></td>
+            </tr>
+            <tr>
+              <td><strong>Bug 3</strong></td>
+              <td>Post-abort end-of-run math: <code>tokens=0</code> but <code>remaining.tokens=0</code></td>
+              <td>Structural — collapsed to <code>getSessionStats()</code> as source of truth</td>
+              <td><span class="tag error">Open</span> closed by this refactor</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout amber">
+          <div class="callout-title">Key insight</div>
+          <p>The bug class lives in the dual-counter system. Every fix so far has been a defensive guard in the read sites. A structural fix collapses the counters to one source of truth.</p>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           PAGE 3 — THE GOAL
+           ============================================================ -->
+      <section id="goal" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 3 · What</p>
+          <h2>The goal</h2>
+          <p class="subtitle">Budget-constrained delegated agents with flexibility in EOL/respawn moments. Pi Best Practices.</p>
+        </header>
+
+        <h3>Pi Best Practices applied</h3>
+        <p>The four source citations the user mandated:</p>
+
+        <div class="cards-grid">
+          <div class="card">
+            <h4><span class="tag accent">Source 1</span> Local Pi source</h4>
+            <p><code>/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/</code> v0.87.1. Verified <code>agent-session.d.ts</code>, <code>session-manager.d.ts</code>, <code>usage-totals.d.ts</code>, <code>compaction.d.ts</code>.</p>
+          </div>
+          <div class="card">
+            <h4><span class="tag accent">Source 2</span> Local Pi docs</h4>
+            <p><code>/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/docs/</code>. 12 sections of verbatim quotes with citations.</p>
+          </div>
+          <div class="card">
+            <h4><span class="tag accent">Source 3</span> Online Pi docs</h4>
+            <p><code>https://pi.dev/docs/latest/</code>. <code>steer</code>/<code>followUp</code> returns, <code>session.systemPrompt</code> read-only, <code>agent_settled</code> emphasis.</p>
+          </div>
+          <div class="card">
+            <h4><span class="tag accent">Source 4</span> pi-sdk-session-api.md</h4>
+            <p>Verified ground-truth from local SDK source. 555 lines of behavior-by-behavior documentation.</p>
+          </div>
+        </div>
+
+        <h3>End state</h3>
+        <ul>
+          <li><strong>Budget-constrained</strong> via single-source-of-truth <code>getSessionStats()</code> + throttled <code>CustomEntry</code> ledger.</li>
+          <li><strong>Delegated</strong> via throw-to-refuse <code>delegate_agent</code> per Pi docs §2.</li>
+          <li><strong>Flexibility in EOL/respawn</strong> via 6 commands (vs. current 3): end / compact / respawn / pause / snapshot / restore.</li>
+          <li><strong>Pi Best Practices</strong> throughout: four-tier state model, throw-to-refuse, tool_call blocking, agent_settled finalization, mode-independent behavior.</li>
+        </ul>
+
+        <div class="callout success">
+          <div class="callout-title">Bug 3 becomes structurally impossible</div>
+          <p>The dual/triple counter math disappears entirely. <code>getSessionStats()</code> IS the cumulative source. The post-abort end-of-run overwrite/accumulate sequence is gone.</p>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           PAGE 4 — WHAT GOES AWAY
+           ============================================================ -->
+      <section id="away" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 4 · Removal</p>
+          <h2>What goes away</h2>
+          <p class="subtitle">Counter fields, functions, files removed in the refactor.</p>
+        </header>
+
+        <h3>Counter fields removed from <code>AgentRuntime</code></h3>
+        <table>
+          <thead><tr><th>Old field</th><th>Replaced by</th></tr></thead>
+          <tbody>
+            <tr><td><code>governanceTokens</code></td><td><code>session.getSessionStats().tokens.total</code></td></tr>
+            <tr><td><code>governanceCostUsd</code></td><td><code>session.getSessionStats().cost</code></td></tr>
+            <tr><td><code>effectiveTokens</code></td><td><code>session.getContextUsage().tokens</code></td></tr>
+            <tr><td><code>runStartInputTokens</code> etc.</td><td>(no replacement — stats are lifetime)</td></tr>
+            <tr><td><code>budgetWarnings: Set&lt;string&gt;</code></td><td>Dedup moves to <code>CustomEntry</code> walk</td></tr>
+            <tr><td><code>progressNotes: string</code></td><td><code>appendCustomMessageEntry("progress_note", ...)</code></td></tr>
+          </tbody>
+        </table>
+
+        <h3>Functions deleted or replaced</h3>
+        <ul>
+          <li><code>freshResetRuntime(...)</code> — <strong>deleted</strong>. "Fresh" is structural (new session, empty branch); no reset needed.</li>
+          <li><code>emitBudgetWarning</code> — replaced by <code>appendCustomMessageEntry("budget_warning", ...)</code>.</li>
+          <li><code>workerConsumedTokens(runtime, scope)</code> → <code>workerConsumedTokens(session)</code> — direct SDK read.</li>
+          <li><code>teamUsage(state, scope)</code> → <code>teamUsage(branch)</code> — walks active branch <code>CustomEntry</code>s.</li>
+        </ul>
+
+        <h3>Files deleted</h3>
+        <ul>
+          <li><code>src/engine/budget-strategy.ts</code> (~200 LOC)</li>
+          <li><code>src/engine/governance.ts</code> (~175 LOC)</li>
+        </ul>
+
+        <h3>Events no longer hooked</h3>
+        <ul>
+          <li><code>agent_end</code> (for finalization) → replaced by <code>agent_settled</code>.</li>
+          <li><code>message_end</code> (for live counter accumulation) → reads from <code>session.getSessionStats()</code> on demand.</li>
+        </ul>
+      </section>
+
+      <!-- ============================================================
+           PAGE 5 — WHAT REPLACES IT
+           ============================================================ -->
+      <section id="replace" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 5 · Architecture</p>
+          <h2>What replaces it</h2>
+          <p class="subtitle">New module structure, single source of truth, persistent ledger.</p>
+        </header>
+
+        <h3>Module structure</h3>
+        <pre><code>src/engine/budget/
+├── ledger.ts          # BudgetLedger — class wrapping CustomEntry persistence
+├── policy.ts          # BudgetPolicy — pure decision functions (no I/O, no SDK)
+├── strategy.ts        # WorkerBudgetStrategy — enum + resolver
+├── events.ts          # installBudgetEventHooks(session, ledger, caps, controller)
+└── worker-tools.ts    # delegateAgent + 6 operator commands
+└── index.ts           # Barrel re-exports</code></pre>
+
+        <h3>The single source of truth</h3>
+        <p>Per <code>pi-sdk-session-api.md#1.3</code>, <code>session.getSessionStats()</code> returns:</p>
+        <pre><code>{
+  sessionFile, sessionId,
+  userMessages, assistantMessages, toolCalls, toolResults, totalMessages,
+  tokens: { input, output, cacheRead, cacheWrite, total },
+  cost: number,
+  contextUsage: ContextUsage
+}</code></pre>
+
+        <p><code>tokens.total = input + output + cacheRead + cacheWrite</code> — cumulative across the session's lifetime, including aborted messages whose <code>Usage</code> field was populated.</p>
+
+        <div class="callout">
+          <div class="callout-title">Why this kills the bug class</div>
+          <p>The old design had three write sites (<code>message_end</code>, <code>agent_end</code>, <code>compaction_end</code>) updating three different counters. The new design has zero write sites for cumulative spend — the SDK maintains <code>getSessionStats()</code> internally. We just read it.</p>
+        </div>
+
+        <h3>The persistent ledger</h3>
+        <p>Per Pi docs §4 and §9, <code>CustomEntry</code> is the right tier for "durable data excluded from model context." Branch-aware via <code>getBranch()</code>; survives <code>/reload</code>, <code>/tree</code>, <code>/fork</code>.</p>
+
+        <pre><code>type BudgetLedgerEntry = {
+  type: "custom";
+  customType: "pi-hive-budget-ledger";
+  data: {
+    caps: { workerTokens?, workerCostUsd?, workerRuns?, workerDepth?,
+            teamTokens?, teamCostUsd?, teamRuns? };
+    cumulative: { tokens: number; costUsd: number; runs: number };
+    writtenAt: number;
+    agentSlug: string;
+    marker?: "warning" | "exhausted" | "checkpoint";
+  };
+};</code></pre>
+
+        <p><strong>Write cadence:</strong></p>
+        <table>
+          <thead><tr><th>Trigger</th><th>Cadence</th><th>Marker</th></tr></thead>
+          <tbody>
+            <tr><td><code>message_end</code> (routine)</td><td>Throttled — every 10 msgs OR ≥5% spend change</td><td>—</td></tr>
+            <tr><td><code>message_end</code> crosses 20% remaining</td><td>Always</td><td><code>"warning"</code></td></tr>
+            <tr><td><code>message_end</code> crosses 0% remaining</td><td>Always</td><td><code>"exhausted"</code></td></tr>
+            <tr><td><code>compaction_end</code></td><td>Always</td><td>—</td></tr>
+            <tr><td><code>agent_settled</code></td><td>Always</td><td><code>"checkpoint"</code></td></tr>
+            <tr><td>Operator action</td><td>Always</td><td><code>"checkpoint"</code></td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- ============================================================
+           PAGE 6 — THE NEW WORKFLOW
+           ============================================================ -->
+      <section id="workflow" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 6 · Sequences</p>
+          <h2>The new workflow</h2>
+          <p class="subtitle">Three sequence diagrams: delegation with budget check, respawn with snapshot, restore from snapshot.</p>
+        </header>
+
+        <h3>Delegation with budget check</h3>
+        <div class="mermaid-block">
+<pre class="mermaid">
+sequenceDiagram
+    participant User
+    participant Orchestrator
+    participant DelegateTool as delegate_agent (new)
+    participant BudgetPolicy as BudgetPolicy (pure)
+    participant BudgetLedger as BudgetLedger (new)
+    participant SM as SessionManager
+    participant Session as AgentSession
+    participant Worker
+
+    User->>Orchestrator: /hive command
+    Orchestrator->>DelegateTool: delegate_agent(name, task, fresh=false)
+    DelegateTool->>BudgetPolicy: resolveWorkerBudgetPolicy(state, name)
+    BudgetPolicy-->>DelegateTool: WorkerBudgetPolicy
+    DelegateTool->>BudgetLedger: restore(sessionManager, name)
+    BudgetLedger->>SM: getBranch()
+    SM-->>BudgetLedger: branch entries
+    BudgetLedger-->>DelegateTool: {tokens, costUsd, runs}
+    DelegateTool->>BudgetPolicy: checkBudgetPolicy(ledger, policy, branch)
+    alt over budget
+        BudgetPolicy-->>DelegateTool: BudgetBlock
+        DelegateTool-->>Orchestrator: throw BudgetExhaustedError
+    else under budget
+        DelegateTool->>SM: continueRecent(cwd) OR create(fresh=true)
+        SM-->>DelegateTool: AgentSession
+        DelegateTool->>Session: installBudgetEventHooks
+        DelegateTool->>Session: prompt(task)
+        Session->>Worker: model call (loop)
+        Worker-->>Session: response + usage
+        Session->>DelegateTool: message_end
+        DelegateTool->>SM: appendCustomEntry("pi-hive-budget-ledger", snapshot)
+        opt crosses 20% remaining
+            DelegateTool->>SM: appendCustomMessageEntry("budget_warning", hint, display=true)
+        end
+        opt crosses 0% remaining
+            DelegateTool->>Session: controller.abort(reason)
+        end
+        Session->>DelegateTool: agent_settled
+        DelegateTool->>SM: appendCustomEntry(final snapshot)
+        DelegateTool-->>Orchestrator: { sessionId, ledgerSnapshot }
+    end
+</pre>
+        </div>
+
+        <h3>Respawn with snapshot</h3>
+        <div class="mermaid-block">
+<pre class="mermaid">
+sequenceDiagram
+    participant Op as Operator
+    participant Tool as respawnWorkerSession
+    participant OldSession
+    participant SM as SessionManager
+    participant NewSession
+
+    Op->>Tool: respawnWorkerSession(agent, reason, newTask?)
+    Tool->>OldSession: branchWithSummary(leafId, "Resumed by operator")
+    Tool->>OldSession: session.dispose()
+    Tool->>SM: create(cwd) [fresh budget by construction]
+    SM-->>Tool: new AgentSession
+    Tool->>NewSession: installBudgetEventHooks
+    Tool->>NewSession: prompt(newTask || resumption context)
+    NewSession-->>Tool: agent_settled
+    Tool-->>Op: { oldSessionId, newSessionId, ledgerSnapshot }
+</pre>
+        </div>
+
+        <h3>EOL state graph</h3>
+        <div class="mermaid-block">
+<pre class="mermaid">
+graph TD
+    A[Running worker] -->|session.abort| B[End: graceful stop]
+    A -->|session.compact| C[Compact + continue]
+    A -->|dispose + create| D[Respawn fresh]
+    A -->|waitForIdle + checkpoint| E[Pause, resumable]
+    A -->|branchWithSummary| F[Snapshot, navigable]
+    F -->|createBranchedSession| G[Restore from snapshot]
+    B --> H[next dispatch OK]
+    C --> A
+    D --> A
+    E --> A
+    G --> A
+</pre>
+        </div>
+
+        <div class="callout">
+          <div class="callout-title">Key insight</div>
+          <p><code>fresh=true</code> no longer means "do four operations in this order." It means "create a new session." The session naturally has no entries, so <code>getBranch()</code> returns nothing, the ledger is empty, the cap is the cap. Bug class is structurally impossible.</p>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           PAGE 7 — SIDE-BY-SIDE DIFF
+           ============================================================ -->
+      <section id="diff" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 7 · Comparison</p>
+          <h2>Side-by-side diff</h2>
+          <p class="subtitle">Current vs proposed on fourteen dimensions.</p>
+        </header>
+
+        <table>
+          <thead>
+            <tr><th style="width:24%">Aspect</th><th style="width:38%">Current</th><th style="width:38%">Proposed</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Source of truth for "spent tokens"</td>
+              <td>3 mutable counters + <code>getSessionStats()</code> overwrite</td>
+              <td><code>session.getSessionStats()</code> + throttled <code>CustomEntry</code> ledger</td>
+            </tr>
+            <tr>
+              <td>Source of truth for "live context load"</td>
+              <td><code>effectiveTokens</code> (mutable)</td>
+              <td><code>session.getContextUsage()</code></td>
+            </tr>
+            <tr>
+              <td>End-of-run finalization</td>
+              <td><code>agent_end</code> + overwrite + delta math</td>
+              <td><code>agent_settled</code> + final ledger snapshot</td>
+            </tr>
+            <tr>
+              <td>Pre-flight gate</td>
+              <td>Inline check in dispatcher, returns <code>{output, exitCode: 1}</code></td>
+              <td><strong>throw</strong> from <code>delegate_agent.execute</code> (Pi docs §2)</td>
+            </tr>
+            <tr>
+              <td>Mid-run warning</td>
+              <td><code>emitBudgetWarning</code> mutates <code>runtime.systemPrompt</code></td>
+              <td><code>appendCustomMessageEntry("budget_warning", ..., display=true)</code></td>
+            </tr>
+            <tr>
+              <td>Mid-run exhaustion</td>
+              <td><code>runController.abort()</code></td>
+              <td><code>runController.abort()</code> (same) + <code>appendCustomEntry("budget_exhausted", ...)</code></td>
+            </tr>
+            <tr>
+              <td><code>fresh=true</code> semantics</td>
+              <td>4-operation flag (reload, archive, reset, start), order-sensitive</td>
+              <td><code>SessionManager.create()</code> (1 operation, structurally safe)</td>
+            </tr>
+            <tr>
+              <td>EOL options</td>
+              <td>3 commands (end, compact, respawn)</td>
+              <td><strong>6 commands</strong> (+ pause, snapshot, restore)</td>
+            </tr>
+            <tr>
+              <td>Config schema</td>
+              <td>Flat (<code>token-budget</code>, <code>cost-budget-usd</code>, ...)</td>
+              <td>Nested (<code>tokens.cap</code>, <code>cost-usd.cap</code>, ...) + kebab-case</td>
+            </tr>
+            <tr>
+              <td>Reload survival</td>
+              <td>Counters die; bug class emerges</td>
+              <td><code>getBranch()</code> re-derives from <code>CustomEntry</code></td>
+            </tr>
+            <tr>
+              <td>Race condition coverage</td>
+              <td>None for abort-then-stats</td>
+              <td>New tests in <code>tests/budget-races.test.ts</code> — 6 race scenarios</td>
+            </tr>
+            <tr>
+              <td><code>ctx.signal</code> propagation</td>
+              <td>Inconsistent (gap noted in pi-docs audit)</td>
+              <td>Threaded through every ledger write</td>
+            </tr>
+            <tr>
+              <td>Listener cleanup on respawn</td>
+              <td><strong>MISSING</strong> (Issue 9 latent leak)</td>
+              <td><code>session.dispose()</code> called explicitly</td>
+            </tr>
+            <tr>
+              <td>Line count</td>
+              <td>dispatch.ts ~1100 + governance.ts ~175 + budget-strategy.ts ~200 = ~1,475 LOC</td>
+              <td>budget/worker-tools.ts ~400 + budget/policy.ts ~100 + budget/ledger.ts ~150 + budget/events.ts ~100 + budget/strategy.ts ~30; dispatch.ts shrinks to ~600 LOC</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- ============================================================
+           PAGE 8 — TASK PLAN
+           ============================================================ -->
+      <section id="tasks" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 8 · Execution</p>
+          <h2>Task plan</h2>
+          <p class="subtitle">Thirteen features across four phases. Check off tasks as you complete them — state persists in localStorage.</p>
+        </header>
+
+        <div class="callout">
+          <div class="callout-title">How to use this page</div>
+          <p>Each task has a <code>[ ]</code> checkbox. Click to mark complete. Each feature has a "How do I know this feature is complete?" guard at the end with concrete verifiable criteria. Only move to the next feature when its guard is satisfied. <strong>Progress is saved in your browser.</strong></p>
+        </div>
+
+        <!-- ============== PHASE 1 ============== -->
+        <div class="phase-header">
+          <span class="phase-num">1</span>
+          <h3>Phase 1 — Foundation</h3>
+        </div>
+
+        <div class="feature-block" id="feature-f1">
+          <h4><span class="feature-tag">F1</span>Budget primitives <span style="font-weight:400; color:var(--text-muted); font-size:0.92rem;">— BudgetLedger, BudgetPolicy, WorkerBudgetStrategy</span></h4>
+          <p>Goal: foundational classes/functions exist, are fully unit-tested in isolation, have a stable public surface.</p>
+
+          <div class="checklist">
+            <label class="checklist-item"><input type="checkbox" data-id="f1-t1-1"><span class="item-body"><strong>T1.1</strong> Add <code>src/engine/budget/</code> module skeleton with barrel export.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f1-t1-2"><span class="item-body"><strong>T1.2</strong> Implement <code>BudgetLedger</code> class with restore/snapshot/maybeSnapshot/recordCompaction.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f1-t1-3"><span class="item-body"><strong>T1.3</strong> Implement <code>BudgetPolicy</code> pure functions (no I/O).</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f1-t1-4"><span class="item-body"><strong>T1.4</strong> Implement <code>WorkerBudgetStrategy</code> enum + resolver.</span></label>
+          </div>
+
+          <div class="completion-guard">
+            <div class="guard-title">How do I know F1 is complete?</div>
+            <ul style="font-size:0.9rem; padding-left:18px; margin:0;">
+              <li>All 4 task checkboxes above are marked</li>
+              <li><code>tests/budget-ledger.test.ts</code> passes (8 tests)</li>
+              <li><code>tests/budget-policy.test.ts</code> passes (10 tests)</li>
+              <li><code>tests/budget-strategy-resolver.test.ts</code> passes (4 tests)</li>
+              <li><code>just typecheck</code> clean; <code>npx eslint src/engine/budget/</code> clean</li>
+              <li>Each module has a usage example pinned by tests</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- ============== PHASE 2 ============== -->
+        <div class="phase-header">
+          <span class="phase-num">2</span>
+          <h3>Phase 2 — Migration</h3>
+        </div>
+
+        <div class="feature-block" id="feature-f2">
+          <h4><span class="feature-tag">F2</span>Budget-aware <code>delegate_agent</code></h4>
+          <p>Goal: orchestration tool that opens/creates sessions, checks the budget, installs hooks. Throw-to-refuse per Pi docs §2.</p>
+
+          <div class="checklist">
+            <label class="checklist-item"><input type="checkbox" data-id="f2-t2-1"><span class="item-body"><strong>T2.1</strong> Implement <code>installBudgetEventHooks(session, ledger, policy, controller)</code> for <code>message_end</code>, <code>compaction_end</code>, <code>agent_settled</code>.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f2-t2-2"><span class="item-body"><strong>T2.2</strong> Implement <code>delegateAgent</code> with throw-to-refuse, <code>SessionManager.create/continueRecent</code>, ledger restore, policy check, event hooks. Refactor <code>dispatch.ts:dispatchAgent</code> to delegate.</span></label>
+          </div>
+
+          <div class="completion-guard">
+            <div class="guard-title">How do I know F2 is complete?</div>
+            <ul style="font-size:0.9rem; padding-left:18px; margin:0;">
+              <li><code>tests/budget-events.test.ts</code> passes (12 tests)</li>
+              <li><code>tests/budget-worker-tools.test.ts</code> passes (15 tests)</li>
+              <li><code>delegateAgent</code> throws <code>BudgetExhaustedError</code> (not returns) — verified</li>
+              <li><code>fresh: true</code> calls <code>SessionManager.create()</code>; <code>fresh: false</code> calls <code>SessionManager.continueRecent()</code></li>
+              <li><code>ctx.signal</code> threaded through every <code>appendCustomEntry</code> and <code>appendCustomMessageEntry</code></li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="feature-block" id="feature-f3">
+          <h4><span class="feature-tag">F3</span>Live budget tracking during worker runs</h4>
+          <p>Goal: <code>message_end</code> updates ledger, emits warnings at 20%, aborts at 0%. Worker SEES warnings via <code>appendCustomMessageEntry</code>.</p>
+
+          <div class="checklist">
+            <label class="checklist-item"><input type="checkbox" data-id="f3-t3-1"><span class="item-body"><strong>T3.1</strong> Wire <code>message_end</code> → throttled ledger snapshot.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f3-t3-2"><span class="item-body"><strong>T3.2</strong> Wire <code>message_end</code> warning emit at 20% via <code>appendCustomMessageEntry</code>.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f3-t3-3"><span class="item-body"><strong>T3.3</strong> Wire <code>message_end</code> abort at 0% + emit <code>appendCustomEntry("budget_exhausted")</code>.</span></label>
+          </div>
+
+          <div class="completion-guard">
+            <div class="guard-title">How do I know F3 is complete?</div>
+            <ul style="font-size:0.9rem; padding-left:18px; margin:0;">
+              <li>Warning emitted exactly once per <code>${scope}:${resource}:${agent|team}</code> (dedup)</li>
+              <li>Worker SEES the warning in next prompt context</li>
+              <li>Abort fires at 0%; <code>controller.signal.aborted === true</code></li>
+              <li>Throttle works (≤10 writes per 1000 events below threshold)</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="feature-block" id="feature-f4">
+          <h4><span class="feature-tag">F4</span>End-of-run budget finalization</h4>
+          <p>Goal: <code>agent_settled</code> writes final snapshot. No overwrite math. Ledger durable across reload.</p>
+
+          <div class="checklist">
+            <label class="checklist-item"><input type="checkbox" data-id="f4-t4-1"><span class="item-body"><strong>T4.1</strong> Wire <code>agent_settled</code> → final snapshot (<code>BudgetLedger.snapshot(stats, policy, "checkpoint", signal)</code>).</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f4-t4-2"><span class="item-body"><strong>T4.2</strong> Remove old <code>agent_end</code> handler in <code>dispatch.ts</code> that did manual overwrite math.</span></label>
+          </div>
+
+          <div class="completion-guard">
+            <div class="guard-title">How do I know F4 is complete?</div>
+            <ul style="font-size:0.9rem; padding-left:18px; margin:0;">
+              <li><code>agent_settled</code> triggers exactly one final snapshot</li>
+              <li>No <code>getSessionStats()</code> overwrite math in new code</li>
+              <li><code>effectiveTokens</code> gone from <code>AgentRuntime</code></li>
+              <li>End-of-run order canonical: <code>session.prompt()</code> → <code>agent_settled</code> → ledger snapshot</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="feature-block" id="feature-f5">
+          <h4><span class="feature-tag">F5</span>Six EOL/respawn operator commands</h4>
+          <p>Goal: end / compact / respawn / pause / snapshot / restore. Each writes a ledger snapshot with a unique marker.</p>
+
+          <div class="checklist">
+            <label class="checklist-item"><input type="checkbox" data-id="f5-t5-1"><span class="item-body"><strong>T5.1</strong> <code>endWorkerSession(agent, reason)</code> — <code>session.abort()</code> + ledger snapshot.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f5-t5-2"><span class="item-body"><strong>T5.2</strong> <code>compactWorkerSession(agent, reason)</code> — <code>session.compact(customInstructions?)</code> + ledger snapshot.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f5-t5-3"><span class="item-body"><strong>T5.3</strong> <code>respawnWorkerSession(agent, reason, newTask?)</code> — <code>session.dispose()</code> + <code>SessionManager.create()</code> + <code>branchWithSummary()</code>.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f5-t5-4"><span class="item-body"><strong>T5.4</strong> <code>pauseWorkerSession(agent, reason)</code> — <code>session.waitForIdle()</code> + ledger entry.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f5-t5-5"><span class="item-body"><strong>T5.5</strong> <code>snapshotWorkerSession(agent, label)</code> — <code>session_manager.branchWithSummary()</code>.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f5-t5-6"><span class="item-body"><strong>T5.6</strong> <code>restoreWorkerSession(agent, snapshotId)</code> — <code>SessionManager.createBranchedSession()</code>.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f5-t5-7"><span class="item-body"><strong>T5.7</strong> Simplify <code>summarize_progress</code> to use <code>appendCustomMessageEntry</code> instead of <code>runtime.progressNotes</code>.</span></label>
+          </div>
+
+          <div class="completion-guard">
+            <div class="guard-title">How do I know F5 is complete?</div>
+            <ul style="font-size:0.9rem; padding-left:18px; margin:0;">
+              <li><code>tests/budget-eol.test.ts</code> passes (18 tests)</li>
+              <li><code>tests/summarize-progress.test.ts</code> passes (4 tests)</li>
+              <li>Each command callable from operator surface (RPC or TUI)</li>
+              <li>Each writes a ledger snapshot with a unique <code>marker.kind</code></li>
+              <li><code>respawnWorkerSession</code> calls <code>session.dispose()</code> (verified — old listeners removed)</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="feature-block" id="feature-f6">
+          <h4><span class="feature-tag">F6</span>Backwards-compatible config schema <span style="font-weight:400; color:var(--text-muted); font-size:0.92rem;">— covers §2.10 + §2.13 C1-C6</span></h4>
+          <p>Goal: existing configs work; new configs use nested format with §2.13 improvements; one release of dual-format support.</p>
+
+          <div class="checklist">
+            <label class="checklist-item"><input type="checkbox" data-id="f6-t6-1"><span class="item-body"><strong>T6.1</strong> Add new nested config schema (<code>tokens.cap</code>, <code>cost-usd.cap</code>, <code>runs.cap</code>, <code>depth.cap</code>).</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f6-t6-2"><span class="item-body"><strong>T6.2</strong> Add old flat schema as deprecated alias with lazy conversion-on-read.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f6-t6-3"><span class="item-body"><strong>T6.3</strong> Add config validation that accepts both formats; emits structured deprecation telemetry.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f6-t6-4"><span class="item-body"><strong>T6.4</strong> (C1) Add <code>budgets:</code> alias in agent.md frontmatter; keep <code>governance:</code> as deprecated alias.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f6-t6-5"><span class="item-body"><strong>T6.5</strong> (C2) Replace <code>tokens.scope</code> with <code>tokens.include: [Usage keys]</code>.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f6-t6-6"><span class="item-body"><strong>T6.6</strong> (C3) Add <code>budgets.defaults-enabled: true</code> config flag (default: <code>false</code> for one release).</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f6-t6-7"><span class="item-body"><strong>T6.7</strong> (C4) Refactor config types to discriminated unions via typebox.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f6-t6-8"><span class="item-body"><strong>T6.8</strong> (C6) Add explicit <code>window:</code> field with valid values per resource.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f6-t6-9"><span class="item-body"><strong>T6.9</strong> (C5, conditional) Replace <code>budget-strategy</code> flat enum with structured <code>strategies:</code> config.</span></label>
+          </div>
+
+          <div class="completion-guard">
+            <div class="guard-title">How do I know F6 is complete?</div>
+            <ul style="font-size:0.9rem; padding-left:18px; margin:0;">
+              <li><code>tests/config-schema.test.ts</code> passes (≥11 tests)</li>
+              <li>Existing user configs (old flat format) still parse without errors</li>
+              <li>Deprecation warning emitted to telemetry for each deprecated key</li>
+              <li>Invalid combinations rejected at config-load with structured error</li>
+              <li>TypeScript narrowing works in <code>policy.ts</code></li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- ============== PHASE 3 ============== -->
+        <div class="phase-header">
+          <span class="phase-num">3</span>
+          <h3>Phase 3 — Validation</h3>
+        </div>
+
+        <div class="feature-block" id="feature-f7">
+          <h4><span class="feature-tag">F7</span>Race-safe accounting</h4>
+          <p>Goal: previously-untested race paths pinned by deterministic tests.</p>
+
+          <div class="checklist">
+            <label class="checklist-item"><input type="checkbox" data-id="f7-t7-1"><span class="item-body"><strong>T7.1</strong> Abort-then-<code>getSessionStats()</code> race (Bug 3's symptom class).</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f7-t7-2"><span class="item-body"><strong>T7.2</strong> Parallel delegation updates (both ledgers intact).</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f7-t7-3"><span class="item-body"><strong>T7.3</strong> Mid-run compaction racing with <code>message_end</code>.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f7-t7-4"><span class="item-body"><strong>T7.4</strong> <code>session_start</code> racing with in-flight <code>CustomEntry</code> write.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f7-t7-5"><span class="item-body"><strong>T7.5</strong> <code>/reload</code> mid-budget (also covered in F8).</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f7-t7-6"><span class="item-body"><strong>T7.6</strong> <code>agent_settled</code> after abort.</span></label>
+          </div>
+
+          <div class="completion-guard">
+            <div class="guard-title">How do I know F7 is complete?</div>
+            <ul style="font-size:0.9rem; padding-left:18px; margin:0;">
+              <li><code>tests/budget-races.test.ts</code> passes 100 consecutive runs</li>
+              <li>Each race test exercises a SPECIFIC bug class from <code>01-current-state-analysis.md</code></li>
+              <li>Tests deterministic — no <code>Math.random()</code>, no <code>Date.now()</code>, no <code>setTimeout</code></li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="feature-block" id="feature-f8">
+          <h4><span class="feature-tag">F8</span>Reload-stable ledger</h4>
+          <p>Goal: <code>/reload</code> re-derives ledger from active branch via <code>getBranch()</code>. No budget state in closure.</p>
+
+          <div class="checklist">
+            <label class="checklist-item"><input type="checkbox" data-id="f8-t8-1"><span class="item-body"><strong>T8.1</strong> Verify <code>/reload</code> re-derives ledger (T7.5 covers this).</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f8-t8-2"><span class="item-body"><strong>T8.2</strong> Verify pre-reload <code>BudgetExhaustedError</code> blocks post-reload dispatch.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f8-t8-3"><span class="item-body"><strong>T8.3</strong> Verify paused session resumes correctly after <code>/reload</code>.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f8-t8-4"><span class="item-body"><strong>T8.4</strong> Audit <code>src/engine/budget/</code> for closure-captured state.</span></label>
+          </div>
+
+          <div class="completion-guard">
+            <div class="guard-title">How do I know F8 is complete?</div>
+            <ul style="font-size:0.9rem; padding-left:18px; margin:0;">
+              <li><code>tests/budget-reload.test.ts</code> passes (3 tests)</li>
+              <li>Manual smoke test: open session → run worker → <code>/reload</code> → verify display</li>
+              <li>Session file (JSONL) contains the <code>CustomEntry</code> ledger</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="feature-block" id="feature-f9">
+          <h4><span class="feature-tag">F9</span>Legacy cleanup</h4>
+          <p>Goal: <code>governance.ts</code> and <code>budget-strategy.ts</code> deleted. <code>dispatch.ts</code> slimmed.</p>
+
+          <div class="checklist">
+            <label class="checklist-item"><input type="checkbox" data-id="f9-t9-1"><span class="item-body"><strong>T9.1</strong> <code>git rm src/engine/governance.ts</code>. Update all imports.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f9-t9-2"><span class="item-body"><strong>T9.2</strong> <code>git rm src/engine/budget-strategy.ts</code>. Update all imports.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f9-t9-3"><span class="item-body"><strong>T9.3</strong> Slim <code>src/engine/dispatch.ts</code> from ~1100 LOC to ≤600 LOC.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f9-t9-4"><span class="item-body"><strong>T9.4</strong> <code>npx eslint</code> clean on all touched files.</span></label>
+          </div>
+
+          <div class="completion-guard">
+            <div class="guard-title">How do I know F9 is complete?</div>
+            <ul style="font-size:0.9rem; padding-left:18px; margin:0;">
+              <li><code>! test -f src/engine/governance.ts</code></li>
+              <li><code>! test -f src/engine/budget-strategy.ts</code></li>
+              <li><code>wc -l src/engine/dispatch.ts</code> shows ≤600</li>
+              <li><code>grep -r "from.*governance" src/</code> returns no matches</li>
+              <li><code>grep -r "from.*budget-strategy" src/</code> returns no matches</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="feature-block" id="feature-f10">
+          <h4><span class="feature-tag">F10</span>Reviewer sign-off</h4>
+          <p>Goal: three reviewers (<code>kieran-typescript-reviewer</code>, <code>architecture-strategist</code>, <code>code-simplicity-reviewer</code>) all clean.</p>
+
+          <div class="checklist">
+            <label class="checklist-item"><input type="checkbox" data-id="f10-t10-1"><span class="item-body"><strong>T10.1</strong> Run <code>kieran-typescript-reviewer</code>; apply all should-fix items.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f10-t10-2"><span class="item-body"><strong>T10.2</strong> Run <code>architecture-strategist</code>; apply all should-fix items.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f10-t10-3"><span class="item-body"><strong>T10.3</strong> Run <code>code-simplicity-reviewer</code>; apply all should-fix items.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f10-t10-4"><span class="item-body"><strong>T10.4</strong> Save each reviewer's output to <code>docs/reviews/28-09-2026-budget-review/review-runs/</code>.</span></label>
+          </div>
+
+          <div class="completion-guard">
+            <div class="guard-title">How do I know F10 is complete?</div>
+            <ul style="font-size:0.9rem; padding-left:18px; margin:0;">
+              <li>Each reviewer's output saved to <code>review-runs/</code></li>
+              <li>Each reviewer's verdict is "clean" or "applied all should-fix items"</li>
+              <li>No new <code>any</code>, no new state-in-closure, no new shared-mutable-counter patterns</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="feature-block" id="feature-f11">
+          <h4><span class="feature-tag">F11</span>PR merge</h4>
+          <p>Goal: PR #54 disposition decided; refactor PR opened; user merges per AGENTS.md.</p>
+
+          <div class="checklist">
+            <label class="checklist-item"><input type="checkbox" data-id="f11-t11-1"><span class="item-body"><strong>T11.1</strong> Decide and act on PR #54 disposition (default: close in favor of refactor).</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f11-t11-2"><span class="item-body"><strong>T11.2</strong> Open refactor PR against <code>main</code> with all 12-15 commits.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f11-t11-3"><span class="item-body"><strong>T11.3</strong> Wait for user merge per AGENTS.md (no auto-merge).</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f11-t11-4"><span class="item-body"><strong>T11.4</strong> Update local main: <code>git fetch origin main && git pull --ff-only</code>. Delete feature branch + worktree.</span></label>
+          </div>
+
+          <div class="completion-guard">
+            <div class="guard-title">How do I know F11 is complete?</div>
+            <ul style="font-size:0.9rem; padding-left:18px; margin:0;">
+              <li>PR #54 disposition decided and documented</li>
+              <li>Refactor PR exists with all commits</li>
+              <li>User has explicitly merged</li>
+              <li>Local main fast-forwarded to the merged commit</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- ============== PHASE 4 ============== -->
+        <div class="phase-header">
+          <span class="phase-num">4</span>
+          <h3>Phase 4 — Migration support (non-blocking)</h3>
+        </div>
+
+        <div class="feature-block" id="feature-f12">
+          <h4><span class="feature-tag">F12</span>Config migration guide</h4>
+          <p>Goal: <code>docs/migrations/budget-config-v2.md</code> walks users through the schema change.</p>
+
+          <div class="checklist">
+            <label class="checklist-item"><input type="checkbox" data-id="f12-t12-1"><span class="item-body"><strong>T12.1</strong> Write <code>docs/migrations/budget-config-v2.md</code> with ≥5 before/after examples.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f12-t12-2"><span class="item-body"><strong>T12.2</strong> Document the deprecation timeline.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f12-t12-3"><span class="item-body"><strong>T12.3</strong> Document rollback instructions.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f12-t12-4"><span class="item-body"><strong>T12.4</strong> Document the <code>defaults-enabled</code> flag (C3).</span></label>
+          </div>
+
+          <div class="completion-guard">
+            <div class="guard-title">How do I know F12 is complete?</div>
+            <ul style="font-size:0.9rem; padding-left:18px; margin:0;">
+              <li>Migration guide exists with ≥5 before/after examples</li>
+              <li>Deprecation timeline is specific (e.g., "removed in v0.50.0")</li>
+              <li><code>defaults-enabled</code> flag documented with opt-out example</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="feature-block" id="feature-f13">
+          <h4><span class="feature-tag">F13</span>Dashboard intervention UI</h4>
+          <p>Goal: dashboard exposes buttons for the 6 EOL commands. <em>Separate PR after refactor lands.</em></p>
+
+          <div class="checklist">
+            <label class="checklist-item"><input type="checkbox" data-id="f13-t13-1"><span class="item-body"><strong>T13.1</strong> Add TUI/RPC buttons for the 6 EOL commands.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f13-t13-2"><span class="item-body"><strong>T13.2</strong> Surface <code>interventionAvailable</code> flag on <code>budget_warning</code> events.</span></label>
+            <label class="checklist-item"><input type="checkbox" data-id="f13-t13-3"><span class="item-body"><strong>T13.3</strong> Verify mode-independence (TUI, RPC, print, JSON).</span></label>
+          </div>
+
+          <div class="completion-guard">
+            <div class="guard-title">How do I know F13 is complete?</div>
+            <ul style="font-size:0.9rem; padding-left:18px; margin:0;">
+              <li>Dashboard shows 6 buttons per active worker</li>
+              <li>Clicking a button invokes the corresponding operator command</li>
+              <li><code>interventionAvailable</code> flag honored</li>
+              <li>Mode-independent — works in all 4 modes</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Overall completion guard -->
+        <div class="completion-guard" style="background:var(--accent-soft); border-left-color:var(--accent); margin-top:32px;">
+          <div class="guard-title" style="color:var(--accent);">Overall completion guard</div>
+          <p>The refactor is complete when ALL of the following are true:</p>
+          <ul style="font-size:0.9rem; padding-left:18px; margin:0;">
+            <li>All 13 features (F1-F13) have their "How do I know this feature is complete?" sections fully checked off</li>
+            <li>All 52+ task checkboxes are marked</li>
+            <li>Test count: 565+ server tests passing (was 510; +55 new budget tests)</li>
+            <li><code>just typecheck</code>, <code>just test</code>, <code>npx eslint</code> all clean</li>
+            <li>Refactor PR merged by user</li>
+            <li>Bug 3 is structurally impossible to reintroduce</li>
+            <li>All three reviewer reports saved</li>
+            <li>Config migration guide published</li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           PAGE 9 — CONFIG OPTIONS
+           ============================================================ -->
+      <section id="config" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 9 · Config</p>
+          <h2>Config options</h2>
+          <p class="subtitle">All six §2.13 proposals applied. Kebab-case throughout. Pi <code>Usage</code> shape mirrored.</p>
+        </header>
+
+        <h3>Complete configuration</h3>
+        <p>With all six C1-C6 proposals applied:</p>
+
+        <pre><code># ============================================================
+# Global budget config — .pi/hive/hive-config.yaml
+# All six §2.13 proposals applied: C1, C2, C3, C4, C5, C6
+# ============================================================
+budgets:
+  defaults-enabled: true              # C3 — opt-in flag; one release, then default-on
+
+  per-worker:                          # C1 — was: worker-budgets
+    tokens:
+      cap: 3500
+      window: per-session              # C6
+      include: [input, output]         # C2 — was: scope: input_output
+    cost-usd:
+      cap: 0.50
+      window: per-session
+    runs:
+      cap: 3
+    depth:
+      cap: 2
+
+  per-team:                            # C1 — was: team-budgets
+    tokens:
+      cap: 50000
+      window: per-team-lifetime
+      include: [input, output, cacheRead, cacheWrite]
+    cost-usd:
+      cap: 5.00
+      window: per-team-lifetime
+    runs:
+      cap: 20
+
+  strategies:                          # C5
+    on-approaching-limit:
+      action: wrap-up
+      threshold: 0.20
+      hint: "Wrap up your work; call summarize_progress when done."
+    on-exhaustion:
+      action: abort
+    summary:
+      max-tokens: 2000
+
+# Per-agent override — .pi/hive/agents/engine-coder.md frontmatter
+budgets:                              # C1: renamed from governance:
+  tokens:
+    cap: 1000                          # overrides per-worker.tokens.cap
+  cost-usd:
+    cap: 0.25
+  runs:
+    cap: 1</code></pre>
+
+        <h3>Six proposals</h3>
+        <table>
+          <thead>
+            <tr><th style="width:8%">#</th><th style="width:30%">Proposal</th><th>Recommendation</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>C1</strong></td><td>Rename <code>governance:</code> → <code>budgets:</code> in agent.md frontmatter</td><td><span class="tag success">Land</span></td></tr>
+            <tr><td><strong>C2</strong></td><td><code>include: [Usage keys]</code> instead of <code>scope</code> enum</td><td><span class="tag success">Land</span></td></tr>
+            <tr><td><strong>C3</strong></td><td>Sensible defaults via <code>budgets.defaults-enabled</code> flag</td><td><span class="tag success">Land</span> opt-in for one release, then default-on</td></tr>
+            <tr><td><strong>C4</strong></td><td>Discriminated union types via typebox</td><td><span class="tag success">Land</span></td></tr>
+            <tr><td><strong>C5</strong></td><td>Structured <code>strategies:</code> replace <code>budget-strategy</code> enum</td><td><span class="tag amber">Conditional</span></td></tr>
+            <tr><td><strong>C6</strong></td><td>Explicit <code>window:</code> field</td><td><span class="tag success">Land</span> (with C3)</td></tr>
+          </tbody>
+        </table>
+
+        <h3>What stays the same</h3>
+        <ul>
+          <li>The two-tier worker/team split — correct abstraction.</li>
+          <li>The per-agent override mechanism — just renamed (C1).</li>
+          <li>The pre-flight block + mid-run warning + abort-at-0% model — correct.</li>
+          <li>The <code>fresh: true</code> parameter — correct.</li>
+          <li>The five resource types: <code>tokens</code>, <code>cost-usd</code>, <code>runs</code>, <code>depth</code>, <code>queue</code> — correct enumeration.</li>
+        </ul>
+
+        <h3>TypeScript naming convention</h3>
+        <p>YAML keys are kebab-case. The TypeScript interface mirrors kebab-case keys via auto-camelization:</p>
+        <pre><code>// YAML
+budgets:
+  defaults-enabled: true
+  per-worker:
+    cost-usd:
+      cap: 0.50
+
+// TypeScript interface
+interface BudgetsConfig {
+  defaultsEnabled: boolean;
+  perWorker: {
+    costUsd: { cap: number; ... };
+  };
+}</code></pre>
+      </section>
+
+      <!-- ============================================================
+           PAGE 10 — PROS / CONS / PITFALLS
+           ============================================================ -->
+      <section id="proscons" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 10 · Trade-offs</p>
+          <h2>Pros, cons, and pitfalls</h2>
+          <p class="subtitle">What this refactor gives us, what it costs, and what to watch out for.</p>
+        </header>
+
+        <div class="procon-grid">
+          <div class="procon pros">
+            <h4>✓ Pros</h4>
+            <ul>
+              <li><strong>Single source of truth.</strong> <code>getSessionStats()</code> IS the cumulative source. No more dual-counter state machine.</li>
+              <li><strong>Bug 3 becomes structurally impossible.</strong> The dual/triple counter math disappears.</li>
+              <li><strong>Branch-aware + reload-safe.</strong> <code>getBranch()</code> re-derives from <code>CustomEntry</code>s; survives <code>/reload</code>, <code>/tree</code>, <code>/fork</code>.</li>
+              <li><strong>Six EOL commands.</strong> End / compact / respawn / pause / snapshot / restore — far more flexibility than the current 3.</li>
+              <li><strong>Pi-native.</strong> Every primitive from Pi's documented API; no parallel infrastructure.</li>
+              <li><strong>Throw-to-refuse.</strong> Per Pi docs §2; clean error semantics for the orchestrator.</li>
+              <li><strong>Worker sees warnings.</strong> Via <code>appendCustomMessageEntry("budget_warning", ..., display=true)</code>; the agent can act on the hint.</li>
+              <li><strong>Mode-independent.</strong> Works in TUI, RPC, print, JSON modes.</li>
+              <li><strong>Race-testable.</strong> ~6 new race tests covering the previously untested paths.</li>
+              <li><strong>Typebox-validated config.</strong> Invalid combinations surface at config-load with structured errors.</li>
+            </ul>
+          </div>
+
+          <div class="procon cons">
+            <h4>✗ Cons</h4>
+            <ul>
+              <li><strong>~2,100 LOC rewritten.</strong> Substantial change surface; risk of regression in adjacent code.</li>
+              <li><strong>Existing tests break during migration.</strong> All 510 existing tests must be rewritten to use the new primitives (in-place rewrite, not deletion).</li>
+              <li><strong>Config schema change.</strong> User configs need migration; one release of dual-format support.</li>
+              <li><strong>Telemetry event name choices.</strong> Keep old names for dashboard compat, or break the dashboard — both have costs.</li>
+              <li><strong>PR #54 conflict.</strong> The open budget-strategy PR conflicts with the refactor; one must close.</li>
+              <li><strong>Sensible defaults are a behavior change.</strong> Projects with no caps will now have defaults; users may hit friction.</li>
+              <li><strong><code>agent_settled</code> semantics may differ from <code>agent_end</code>.</strong> Latent edge cases around recovery cycles; race tests will surface divergence.</li>
+              <li><strong>Dashboard UI still separate.</strong> F13 is a separate PR; the engine changes ship without UI surface initially.</li>
+            </ul>
+          </div>
+
+          <div class="procon pitfalls">
+            <h4>⚠ Pitfalls</h4>
+            <ul>
+              <li><strong>Stale process.</strong> After editing <code>src/engine/budget/**</code> or <code>src/engine/dispatch.ts</code>, restart: <code>PID=$(lsof -nP -iTCP:43191 -sTCP:LISTEN -t) && kill "$PID" && just pi-dev</code></li>
+              <li><strong>Worktree force-remove.</strong> Never run <code>git worktree remove --force</code> without <code>git status</code> precheck (HANDOFF pitfall #29).</li>
+              <li><strong>No upstream pushes.</strong> Only <code>origin</code> (resolute-oil fork); never <code>upstream</code> (demetere source).</li>
+              <li><strong>No <code>git push origin main</code>.</strong> Changes reach <code>main</code> via PRs the user merges.</li>
+              <li><strong><code>Math.random()</code> / <code>Date.now()</code> / <code>setTimeout</code> in race tests.</strong> All three make tests non-deterministic; grep audit required.</li>
+              <li><strong>Bun-only code.</strong> Isolate to dashboard/server paths; core extension must load even when Bun is unavailable.</li>
+              <li><strong>Closure-captured state.</strong> The old design's bug class lives in closure-shaped mutable maps; the new design must NOT regress to this.</li>
+              <li><strong>Disk-level reload preservation.</strong> <code>getBranch()</code> re-derivation is the structural fix — do NOT rely on in-memory state across reload.</li>
+              <li><strong>Promote compact strategy only on user approval.</strong> C5 is conditional; landing it without user buy-in is scope creep.</li>
+              <li><strong>Skip auto-merge.</strong> Per AGENTS.md, never auto-merge via branch protection or settings.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           PAGE 11 — OPEN QUESTIONS
+           ============================================================ -->
+      <section id="questions" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 11 · Decisions</p>
+          <h2>Open questions</h2>
+          <p class="subtitle">Thirteen decisions awaiting user input before implementation begins.</p>
+        </header>
+
+        <ol class="questions-list">
+          <li>
+            <strong>PR #54 disposition.</strong> Open budget-strategy PR conflicts with the refactor.
+            <div class="rec"><strong>Recommendation:</strong> Close (the refactor supersedes). Alternative: amend as a mega-PR.</div>
+          </li>
+          <li>
+            <strong>Config migration window.</strong> Old flat config vs new nested config — how long to support both?
+            <div class="rec"><strong>Recommendation:</strong> One release dual-format. Alternative: hard break with manual migration.</div>
+          </li>
+          <li>
+            <strong>Dashboard intervention UI.</strong> Engine commands are correct but the UI is missing.
+            <div class="rec"><strong>Recommendation:</strong> Separate PR after refactor lands (F13). Alternative: same PR.</div>
+          </li>
+          <li>
+            <strong>Per-call <code>CustomEntry</code> write cadence.</strong> Every <code>message_end</code> vs throttled.
+            <div class="rec"><strong>Recommendation:</strong> Throttled (10 messages / 5% spend, always on thresholds). Alternative: every <code>message_end</code>.</div>
+          </li>
+          <li>
+            <strong>Operator command exposure.</strong> How many of the 6 EOL commands to ship in the refactor?
+            <div class="rec"><strong>Recommendation:</strong> All 6 commands. Alternative: 3 (end/compact/respawn) plus the rest as follow-up.</div>
+          </li>
+          <li>
+            <strong><code>session.dispose()</code> on <code>endWorkerSession</code>.</strong> Should end-of-worker dispose listeners?
+            <div class="rec"><strong>Recommendation:</strong> Do NOT dispose (preserve for resume). Alternative: dispose on every end.</div>
+          </li>
+          <li>
+            <strong>Backwards-compat telemetry events.</strong> Keep old event names for the dashboard?
+            <div class="rec"><strong>Recommendation:</strong> Emit both old and new shapes for one release. Alternative: hard cutover.</div>
+          </li>
+          <li>
+            <strong>C1 — Rename <code>governance:</code> → <code>budgets:</code></strong> in agent.md frontmatter.
+            <div class="rec"><strong>Recommendation:</strong> Land (pure rename, two-release deprecation).</div>
+          </li>
+          <li>
+            <strong>C2 — <code>include: [Usage keys]</code></strong> instead of <code>scope: input_output | all</code>.
+            <div class="rec"><strong>Recommendation:</strong> Land (matches Pi's <code>Usage</code> shape; extensible).</div>
+          </li>
+          <li>
+            <strong>C3 — Sensible defaults via <code>budgets.defaults-enabled</code> flag.</strong>
+            <div class="rec"><strong>Recommendation:</strong> Land opt-in for one release, then default-on. Alternative: hard behavior change.</div>
+          </li>
+          <li>
+            <strong>C4 — Discriminated union types via typebox.</strong>
+            <div class="rec"><strong>Recommendation:</strong> Land (no new dependency; invalid combinations surface at config-load time).</div>
+          </li>
+          <li>
+            <strong>C5 — Structured <code>strategies:</code></strong> replace <code>budget-strategy</code> enum.
+            <div class="rec"><strong>Recommendation:</strong> Conditional — land only if richer strategies are wanted.</div>
+          </li>
+          <li>
+            <strong>C6 — Explicit <code>window:</code></strong> field with valid values per resource.
+            <div class="rec"><strong>Recommendation:</strong> Land (pair with C3 for clarity).</div>
+          </li>
+        </ol>
+      </section>
+
+      <!-- ============================================================
+           PAGE 12 — VERIFICATION GATES
+           ============================================================ -->
+      <section id="gates" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 12 · Gates</p>
+          <h2>Verification gates</h2>
+          <p class="subtitle">Per AGENTS.md. Run on every commit in the implementation branch.</p>
+        </header>
+
+        <h3>Standard gates</h3>
+        <ul>
+          <li><code>just typecheck</code> — clean across core/bun/tests/dashboard configs</li>
+          <li><code>just test</code> — 565+ server tests pass (was 510 at start; +55 new budget tests)</li>
+          <li><code>cd ui/web && npm run test:unit</code> — 49+ dashboard tests (no change unless F13 in scope)</li>
+          <li><code>npx eslint &lt;touched files&gt;</code> — exit 0</li>
+          <li><code>just dashboard-build</code> — mandatory after F13</li>
+          <li><code>just review-vendor-verify</code> — pass</li>
+          <li><code>node scripts/check-package-budgets.mjs</code> — pass</li>
+          <li><code>just review-build</code> — mandatory after editing <code>ui/review/src/**</code></li>
+        </ul>
+
+        <h3>Stale-process trap</h3>
+        <p>Per HANDOFF pitfall #1 and AGENTS.md. After editing any of these, restart the running server:</p>
+        <ul>
+          <li><code>src/engine/budget/**</code></li>
+          <li><code>src/engine/dispatch.ts</code></li>
+          <li><code>src/observability/server/**</code></li>
+          <li><code>src/engine/review.ts</code></li>
+        </ul>
+
+        <pre><code>PID=$(lsof -nP -iTCP:43191 -sTCP:LISTEN -t) && kill "$PID"
+just pi-dev</code></pre>
+
+        <h3>Worktree rule</h3>
+        <p>All file edits go in a git worktree, never APP_ROOT. Symlink <code>node_modules</code> with absolute path (the relative <code>../../node_modules</code> target works too):</p>
+        <pre><code>APP_ROOT=/Users/cgrant/.pi/agent/git/github.com/demetere/pi-hive
+git worktree add .worktrees/refactor-budget-pi-native -b refactor/budget-pi-native main
+ln -s "$APP_ROOT/node_modules" "$APP_ROOT/.worktrees/refactor-budget-pi-native/node_modules"
+ln -s "$APP_ROOT/ui/web/node_modules" "$APP_ROOT/.worktrees/refactor-budget-pi-native/ui/web/node_modules"</code></pre>
+
+        <div class="callout error">
+          <div class="callout-title">Critical: worktree force-remove precheck</div>
+          <p>Never <code>git worktree remove --force</code> without a <code>git status</code> precheck. Commit / back up / stash first. See HANDOFF pitfall #29 for the full incident (silent total work loss of ~700 lines in one <code>git worktree remove --force</code> command).</p>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           PAGE 13 — PICKUP
+           ============================================================ -->
+      <section id="pickup" class="page">
+        <header class="page-header">
+          <p class="eyebrow">Page 13 · Next session</p>
+          <h2>Pickup instructions</h2>
+          <p class="subtitle">For future sessions picking up where the previous left off.</p>
+        </header>
+
+        <h3>Read first (in order)</h3>
+        <ol>
+          <li><a href="https://github.com/resolute-oil/pi-hive/blob/review/budget-redesign-2026-09-28/docs/reviews/28-09-2026-budget-review/review-status.md"><code>review-status.md</code></a> — state of the world</li>
+          <li><a href="https://github.com/resolute-oil/pi-hive/blob/review/budget-redesign-2026-09-28/docs/reviews/28-09-2026-budget-review/04-refactor-plan.md"><code>04-refactor-plan.md</code></a> — the plan</li>
+          <li><a href="https://github.com/resolute-oil/pi-hive/blob/review/budget-redesign-2026-09-28/docs/reviews/28-09-2026-budget-review/01-current-state-analysis.md"><code>01-current-state-analysis.md</code></a> — the synthesis (what was wrong)</li>
+          <li><a href="https://github.com/resolute-oil/pi-hive/blob/review/budget-redesign-2026-09-28/docs/reviews/28-09-2026-budget-review/raw-evidence/pi-sdk-session-api.md"><code>raw-evidence/pi-sdk-session-api.md</code></a> — SDK ground-truth reference</li>
+        </ol>
+
+        <h3>Then execute</h3>
+        <ol>
+          <li>Open a fresh worktree off <code>main</code> (PR #54 should be closed first per default).</li>
+          <li>Execute Phase 1 (Foundation) — F1's 4 tasks. Each has its own gate.</li>
+          <li>Execute Phase 2 (Migration) — F2 through F6. Existing tests rewritten in-place.</li>
+          <li>Execute Phase 3 (Validation) — F7 through F11. Run three reviewers.</li>
+          <li>Commit per task, push branch, open a single PR (or one per phase — user preference).</li>
+          <li>Wait for user merge per AGENTS.md.</li>
+        </ol>
+
+        <h3>Branch and worktree conventions</h3>
+        <ul>
+          <li>The review branch <code>review/budget-redesign-2026-09-28</code> is documentation only. <strong>Do not push it</strong> unless the user asks.</li>
+          <li>Implementation happens on a NEW branch, in a NEW worktree, off the user-decided base (<code>main</code>, <code>feat/budget-strategy</code>, or a fresh branch).</li>
+          <li>Per AGENTS.md: never push to <code>upstream</code>; all pushes go to <code>origin</code> (the fork).</li>
+        </ul>
+
+        <h3>If blocked</h3>
+        <p>Surface the blocker to the user via <code>ask_user</code> (inline mode, AGENTS.md-compliant). Do not invent workarounds.</p>
+
+        <div class="callout success" style="margin-top: 24px;">
+          <div class="callout-title">The end goal</div>
+          <p>Budget-constrained delegated agents with flexibility in EOL/respawn moments. Pi Best Practices. Single source of truth per concern. Bug 3 structurally impossible to reintroduce. All achieved with ~2,100 LOC rewritten across ~14 files, ~55 new tests, 12-15 commits, three reviewer sign-offs, and one user merge.</p>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           FOOTER
+           ============================================================ -->
+      <footer class="page-footer">
+        <p>Budget Refactor Plan · pi-hive · 2026-09-28 · baseline <code>feat/budget-strategy @ 9f950fb</code></p>
+        <p>Generated on the review branch <code>review/budget-redesign-2026-09-28</code> (not pushed). Implementation work begins on a NEW branch <code>refactor/budget-pi-native</code> in a NEW worktree, off <code>main</code>, per the user's default recommendations in §6.</p>
+      </footer>
+    </main>
+  </div>
+
+  <script src="assets/presentation.js"></script>
+</body>
+</html>

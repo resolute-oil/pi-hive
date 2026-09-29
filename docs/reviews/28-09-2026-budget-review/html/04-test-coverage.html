@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Test Coverage — Budget Strategies Review</title>
+  <link rel="stylesheet" href="assets/review.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>mermaid.initialize({ startOnLoad: true, theme: 'neutral', securityLevel: 'loose' });</script>
+</head>
+<body>
+  <header class="hero">
+    <div class="container">
+      <p class="eyebrow">Report 4 · 2026-09-28</p>
+      <h1>Test coverage analysis</h1>
+      <p class="subtitle">What the existing tests pin, where the gaps are, and the architecture that makes some races untestable without redesign.</p>
+      <p class="meta">Source: <code>raw-evidence/test-coverage-analysis.md</code></p>
+    </div>
+  </header>
+
+  <nav class="container">
+    <ul class="report-nav">
+      <li><a href="index.html">Overview</a></li>
+      <li><a href="01-current-flow.html">Current flow</a></li>
+      <li><a href="02-current-system.html">Current system</a></li>
+      <li><a href="03-pi-docs-alignment.html">Pi-docs alignment</a></li>
+      <li><a href="04-test-coverage.html">Test coverage</a></li>
+    </ul>
+  </nav>
+
+  <main class="container">
+    <section>
+      <h2>4.1 · Coverage matrix by concern</h2>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Concern</th>
+            <th>Status</th>
+            <th>Pinned by</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Unlimited budget (no cap = no block)</td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/governance.test.ts:25-39</code></td></tr>
+          <tr><td>Per-agent governance overrides</td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/governance.test.ts:25-39</code></td></tr>
+          <tr><td>Independent worker + team blocks</td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/governance.test.ts:41-60</code></td></tr>
+          <tr><td>Monotonic governance (Bug 1, W1.1)</td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/governance.test.ts:62-67</code>, <code>tests/dispatch-usage.test.ts:385-535</code></td></tr>
+          <tr><td>FIFO queue + cancellation</td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/governance.test.ts:69-94</code></td></tr>
+          <tr><td><code>tokenBudgetScope: input_output</code></td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/governance.test.ts:131-167</code></td></tr>
+          <tr><td>First <code>checkDispatchBudgets</code> block</td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/governance.test.ts:41-60</code></td></tr>
+          <tr><td>Second <code>checkDispatchBudgets</code> (post-queue)</td><td><span class="tag severity-high">GAP</span></td><td>NONE — function is tested but the call-from-dispatch pattern isn't</td></tr>
+          <tr><td><code>fresh=true</code> ordering</td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/dispatch-usage.test.ts:385</code> (Bug 1)</td></tr>
+          <tr><td><code>fresh=true</code> archive + counter reset</td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/dispatch-usage.test.ts:489-535</code> (W1.1)</td></tr>
+          <tr><td>Fresh-delta survives mode-switch restore</td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/dispatch-usage.test.ts:544-585</code> (R3-1.1)</td></tr>
+          <tr><td>Mid-run warning at ≤20%</td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/budget-strategy.test.ts</code></td></tr>
+          <tr><td>Mid-run abort at 0%</td><td><span class="tag severity-medium">PARTIAL</span></td><td>Trigger covered; post-abort end-of-run math not exercised</td></tr>
+          <tr><td>End-of-run <code>governanceTokens</code> accumulation</td><td><span class="tag severity-medium">PARTIAL</span></td><td>Deterministic path covered; abort-then-stats race not exercised</td></tr>
+          <tr><td><code>getSessionStats()</code> overwrite order</td><td><span class="tag severity-critical">GAP</span></td><td>NONE — Bug 3 hypothesis lives here</td></tr>
+          <tr><td>Compaction recalc savings math</td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/budget-strategy.test.ts</code></td></tr>
+          <tr><td>Compaction recalc no-op on missing fields</td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/budget-strategy.test.ts</code></td></tr>
+          <tr><td>Cost not recalculated by compaction</td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/budget-strategy.test.ts</code></td></tr>
+          <tr><td><code>summarize_progress</code> size cap</td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/budget-strategy.test.ts</code></td></tr>
+          <tr><td><code>summarize_progress</code> strategy-conditional compact</td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/budget-strategy.test.ts</code></td></tr>
+          <tr><td><code>summarize_progress</code> error paths</td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/budget-strategy.test.ts</code></td></tr>
+          <tr><td>Operator commands (end / compact / respawn)</td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/budget-strategy.test.ts</code></td></tr>
+          <tr><td>Config validation rejects unknown strategy</td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/budget-strategy.test.ts</code></td></tr>
+          <tr><td><code>interventionAvailable</code> flag (default strategy)</td><td><span class="tag status-fixed">FULL</span></td><td><code>tests/budget-strategy.test.ts</code></td></tr>
+          <tr><td>Operator intervention wired before dashboard UI</td><td><span class="tag severity-medium">GAP</span></td><td>UI missing (engine correct)</td></tr>
+          <tr><td>Abort-then-<code>getSessionStats()</code> race (Bug 3)</td><td><span class="tag severity-critical">CRITICAL GAP</span></td><td>NONE — no test exercises this</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>4.2 · Where the gaps are</h2>
+
+      <div class="issue-card severity-high">
+        <div class="issue-header">
+          <span class="issue-number">G1</span>
+          <h3 class="issue-title">Second <code>checkDispatchBudgets</code> after queue</h3>
+          <span class="issue-severity">High</span>
+        </div>
+        <p>The dispatcher calls <code>checkDispatchBudgets</code> twice: once before slot acquisition (<code>src/engine/dispatch.ts:252</code>) and once after (<code>src/engine/dispatch.ts:302</code>). The first is well-tested; the second is not. The function itself is tested in <code>tests/governance.test.ts</code>, but the call-from-dispatch pattern isn't.</p>
+      </div>
+
+      <div class="issue-card severity-critical">
+        <div class="issue-header">
+          <span class="issue-number">G2</span>
+          <h3 class="issue-title"><code>getSessionStats()</code> overwrite order</h3>
+          <span class="issue-severity">Critical</span>
+        </div>
+        <p>The third-mystery bug hypothesis is that the order of (stats overwrite → delta computation → <code>governanceTokens</code> accumulation) is wrong, or that <code>getSessionStats()</code> returns unexpected values for aborted sessions. No test exercises this.</p>
+        <p>Tests use deterministic fake <code>createSession</code> factories that always return predictable <code>getSessionStats</code> values. A real SDK abort path is not exercised.</p>
+      </div>
+
+      <div class="issue-card severity-critical">
+        <div class="issue-header">
+          <span class="issue-number">G3</span>
+          <h3 class="issue-title">Abort-then-<code>getSessionStats()</code> race (Bug 3)</h3>
+          <span class="issue-severity">Critical</span>
+        </div>
+        <p>Even if the order is correct, an aborted session might cause <code>getSessionStats()</code> to return values that disagree with the live accumulation. Tests do not exercise this race.</p>
+        <p><strong>What such a test would look like:</strong></p>
+        <pre><code>1. Set up a fake session whose prompt() calls runController.abort() mid-stream.
+2. Have getSessionStats() return a different value than the live accumulation.
+3. Assert the post-run governanceTokens matches expectations.</code></pre>
+        <p>Such a test would have caught Bug 3 if it had existed before the user's deployment test.</p>
+      </div>
+
+      <div class="issue-card severity-medium">
+        <div class="issue-header">
+          <span class="issue-number">G4</span>
+          <h3 class="issue-title">Concurrent parallel delegations</h3>
+          <span class="issue-severity">Medium</span>
+        </div>
+        <p>The orchestrator can call <code>delegate_agent</code> twice in the same turn (parallel tool calls). The budget counter is updated by sibling handlers in any order. Tests do not exercise parallel updates to the team total.</p>
+      </div>
+
+      <div class="issue-card severity-medium">
+        <div class="issue-header">
+          <span class="issue-number">G5</span>
+          <h3 class="issue-title">Operator commands without UI</h3>
+          <span class="issue-severity">Medium</span>
+        </div>
+        <p><code>endWorkerSession</code>, <code>compactWorkerSession</code>, <code>respawnWorkerSession</code> are tested. The dashboard UI that invokes them is missing. The gap is in the dashboard, not the engine.</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>4.3 · Test architecture observations</h2>
+
+      <div class="callout">
+        <strong>The tests are well-structured.</strong> Three layers of test fidelity, from fast pure-function tests to higher-fidelity dispatchAgent tests with fake sessions.
+      </div>
+
+      <h3>Layer 1 — Pure-function tests</h3>
+      <p><code>tests/governance.test.ts</code> and <code>tests/budget-strategy.test.ts</code> use <code>runtime(name, overrides)</code> and <code>state(runtimes, settings)</code> helpers to construct mock state. Fast, deterministic. Catches the budget math, the strategy resolution, and the operator command semantics.</p>
+
+      <h3>Layer 2 — Dispatch with fake sessions</h3>
+      <p><code>tests/dispatch-usage.test.ts</code> uses <code>createAgentSession</code> injection to drive <code>dispatchAgent</code> end-to-end with fake sessions. Higher fidelity; catches the ordering and counter-reset bugs (Bug 1, W1.1, R3-1.1).</p>
+
+      <h3>Layer 3 — Real SDK tests</h3>
+      <p>Not present. No test exercises a real Pi SDK <code>session.prompt()</code> + <code>runController.abort()</code> + <code>getSessionStats()</code> race. The third-mystery bug lives in this layer.</p>
+
+      <div class="callout warning">
+        <strong>The fake-session pattern can be extended.</strong> A test that drives <code>prompt()</code> to call <code>runController.abort()</code> mid-stream and has <code>getSessionStats()</code> return a different value than the live accumulation would have caught Bug 3. The architecture supports it; the test just needs to be written.
+      </div>
+    </section>
+
+    <section>
+      <h2>4.4 · Total counts</h2>
+
+      <table>
+        <thead>
+          <tr><th>Test file</th><th>LOC</th><th>Tests</th><th>Coverage</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>tests/governance.test.ts</code></td><td>167</td><td>9</td><td>Budget math: unlimited, per-agent overrides, worker/team blocks, monotonic governance, FIFO queue, <code>tokenBudgetScope</code></td></tr>
+          <tr><td><code>tests/budget-strategy.test.ts</code> <span class="tag">NEW</span></td><td>667</td><td>~38</td><td>Strategy resolution, warnings, summarize_progress (size cap, error paths, strategy-conditional compact), operator commands, compaction recalc, respawn, config validation, interventionAvailable</td></tr>
+          <tr><td><code>tests/dispatch-usage.test.ts</code> (relevant subset)</td><td>~50</td><td>~3 directly budget-related</td><td>Bug 1 ordering, W1.1 fresh-delta, R3-1.1 mode-switch survival</td></tr>
+        </tbody>
+      </table>
+
+      <p>Total: <strong>~50 tests</strong> covering budget behavior. Reasonable coverage for a complex feature; gaps are in the edge cases the bug timeline exposes.</p>
+    </section>
+
+    <footer class="container">
+      <p>End of report. See <a href="index.html">Overview</a> for the cross-document index and source-file references.</p>
+    </footer>
+  </main>
+</body>
+</html>
