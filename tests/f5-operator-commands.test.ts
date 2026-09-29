@@ -189,6 +189,47 @@ test("F5b-invoke: invokeOperatorCommand supports end, compact, pause, abort-comp
   assert.ok(kinds.includes("compact-aborted"), `abort-compaction writes kind:"compact-aborted" (got ${JSON.stringify(kinds)})`);
 });
 
+// ── B7: operator commands honor ctx.signal.aborted as an early-exit guard.
+// The audit (HTML §5 B7) noted that the 5 operator commands (end, compact,
+// pause, resume, abort-compaction) all used ctx.signal only for the post-
+// action ledger snapshot — a call with an already-aborted signal would
+// still run the SDK call to completion.
+// ---------------------------------------------------------------------------
+
+test("B7: operator command end returns isError envelope when ctx.signal is already aborted", async () => {
+  const session = makeFakeSession();
+  const runtime = makeFakeRuntime("test-worker", session);
+  const state = makeState(runtime);
+  state.runtimes.set("test-worker", runtime);
+
+  // The operator commands take ctx: ExtensionContext. Build one with an
+  // already-aborted signal so the early-exit guard fires.
+  const ctx = { signal: AbortSignal.abort(), cwd: "/tmp" } as any;
+  const result = await invokeOperatorCommand(state, "end", { agent: "test-worker", reason: "test", snapshotId: "" }, ctx);
+  assert.equal((result as { isError?: boolean }).isError, true, "end returns isError envelope");
+  assert.equal((result as { code?: string }).code, "aborted", "isError carries code: aborted");
+  // session.abort() must NOT have been called.
+  assert.equal(session.sessionManager.getBranch().length, 0, "no sessionManager writes when signal is pre-aborted");
+});
+
+test("B7: operator command compact returns isError envelope when ctx.signal is already aborted", async () => {
+  const session = makeFakeSession();
+  const runtime = makeFakeRuntime("test-worker", session);
+  const state = makeState(runtime);
+  state.runtimes.set("test-worker", runtime);
+
+  const ctx = { signal: AbortSignal.abort(), cwd: "/tmp" } as any;
+  const result = await invokeOperatorCommand(state, "compact", { agent: "test-worker", reason: "test", snapshotId: "" }, ctx);
+  assert.equal((result as { isError?: boolean }).isError, true);
+  assert.equal((result as { code?: string }).code, "aborted");
+  // No "compact" CustomEntry should have been written (sessionManager branch
+  // is empty because the early-exit guard skipped both the SDK call and the
+  // ledger snapshot).
+  const writes = (session.sessionManager as { getBranch: () => Array<{ data?: { kind?: string } }> }).getBranch();
+  const kinds = writes.map((w) => w.data?.kind);
+  assert.ok(!kinds.includes("compact"), `compact should NOT write when signal pre-aborted (got ${JSON.stringify(kinds)})`);
+});
+
 // ---------------------------------------------------------------------------
 // Slice 4 — Complex commands (respawn / snapshot / restore) wired.
 // ---------------------------------------------------------------------------

@@ -588,6 +588,39 @@ export interface OperatorCommandResult {
 }
 
 /**
+ * Error-path envelope for the 5 direct-WorkerSessionHandle operator commands
+ * (end / compact / pause / resume / abort-compaction). Currently only
+ * emitted when `ctx.signal?.aborted` is true on entry — the SDK calls
+ * don't accept a signal parameter (verified in agent-session.d.ts:271/419/420/
+ * 475/479), so the operator must early-exit before invoking them.
+ *
+ * Named `OperatorCommandAborted` to avoid collision with the thrown
+ * `OperatorCommandError` class in `operator-commands.ts` (which is a
+ * different error type — a thrown `Error` for dispatch failures).
+ */
+export interface OperatorCommandAborted {
+  isError: true;
+  code: "aborted";
+  reason: string;
+}
+
+/**
+ * Early-exit guard for operator commands. Returns `null` when the signal
+ * is not aborted (proceed normally), or an `OperatorCommandAborted` when it
+ * is. The audit (HTML §5 B7) flagged that all 5 direct commands used
+ * `ctx.signal` only for the post-action ledger snapshot — a call with an
+ * already-aborted signal would still run the SDK call to completion.
+ *
+ * Callers should return the result directly: `const r = abortedSignalReturn(ctx); if (r) return r;`
+ */
+export function abortedSignalReturn(ctx: ExtensionContext): OperatorCommandAborted | null {
+  if (ctx.signal?.aborted) {
+    return { isError: true, code: "aborted", reason: "ctx.signal was already aborted on operator-command entry" };
+  }
+  return null;
+}
+
+/**
  * T5.1 — `endWorkerSession(agent, reason)` (plan §3.5).
  *
  * Calls `session.abort()` and writes a ledger snapshot with
@@ -603,7 +636,12 @@ export async function endWorkerSession(
   _args: WorkerOperatorArgs,
   ctx: ExtensionContext,
   handle: WorkerSessionHandle,
-): Promise<OperatorCommandResult> {
+): Promise<OperatorCommandResult | OperatorCommandAborted> {
+  // Audit B7: honor ctx.signal.aborted before invoking SDK methods that
+  // don't accept a signal parameter. Without this, a call dispatched with
+  // an already-aborted signal would still run session.abort() to completion.
+  const aborted = abortedSignalReturn(ctx);
+  if (aborted) return aborted;
   // Plan §6.2: do NOT dispose. The session reference stays valid; a later
   // `resumeWorkerSession` call re-attaches event hooks on the SAME session.
   await handle.session.abort();
@@ -634,7 +672,10 @@ export async function compactWorkerSession(
   ctx: ExtensionContext,
   handle: WorkerSessionHandle,
   customInstructions?: string,
-): Promise<CompactWorkerSessionResult> {
+): Promise<CompactWorkerSessionResult | OperatorCommandAborted> {
+  // Audit B7: honor ctx.signal.aborted before invoking SDK methods.
+  const aborted = abortedSignalReturn(ctx);
+  if (aborted) return aborted;
   const compaction = await handle.session.compact(customInstructions);
   // Snapshot AFTER compact completes — `getSessionStats()` now reflects the
   // post-compaction token total. The earlier `recordCompaction` handler in
@@ -665,7 +706,10 @@ export async function pauseWorkerSession(
   _args: WorkerOperatorArgs,
   ctx: ExtensionContext,
   handle: WorkerSessionHandle,
-): Promise<OperatorCommandResult> {
+): Promise<OperatorCommandResult | OperatorCommandAborted> {
+  // Audit B7: honor ctx.signal.aborted before invoking SDK methods.
+  const aborted = abortedSignalReturn(ctx);
+  if (aborted) return aborted;
   await handle.session.waitForIdle();
   const stats = handle.session.getSessionStats();
   handle.ledger.snapshot(stats, handle.policy, "pause", ctx.signal);
@@ -695,7 +739,10 @@ export async function resumeWorkerSession(
   _args: WorkerOperatorArgs,
   ctx: ExtensionContext,
   handle: WorkerSessionHandle,
-): Promise<OperatorCommandResult> {
+): Promise<OperatorCommandResult | OperatorCommandAborted> {
+  // Audit B7: honor ctx.signal.aborted before re-installing hooks.
+  const aborted = abortedSignalReturn(ctx);
+  if (aborted) return aborted;
   // Re-attach on the existing session reference. The fresh controller is
   // owned by this command and is unused by the F2 spine (events.ts ignores
   // it after wiring the listeners) but is required by the signature.
@@ -731,7 +778,10 @@ export async function abortWorkerCompaction(
   _args: WorkerOperatorArgs,
   ctx: ExtensionContext,
   handle: WorkerSessionHandle,
-): Promise<OperatorCommandResult> {
+): Promise<OperatorCommandResult | OperatorCommandAborted> {
+  // Audit B7: honor ctx.signal.aborted before invoking SDK methods.
+  const aborted = abortedSignalReturn(ctx);
+  if (aborted) return aborted;
   handle.session.abortCompaction();
   // After `abortCompaction()` returns, the SDK is back to a non-compacting
   // state. `getSessionStats()` reflects the pre-compaction totals because

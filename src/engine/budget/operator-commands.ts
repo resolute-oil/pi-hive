@@ -45,6 +45,7 @@ import {
   resumeWorkerSession,
   snapshotWorkerSession,
   type OperatorCommandResult,
+  type OperatorCommandAborted,
   type RespawnWorkerResult,
   type RestoreWorkerOutcome,
   type SnapshotWorkerResult,
@@ -222,6 +223,7 @@ function depsForRestore(handle: WorkerSessionHandle, args: RestoreWorkerArgs): {
 /** Union of all operator command return envelopes. */
 export type OperatorCommandEnvelope =
   | OperatorCommandResult
+  | OperatorCommandAborted
   | RespawnWorkerResult
   | SnapshotWorkerResult
   | RestoreWorkerOutcome;
