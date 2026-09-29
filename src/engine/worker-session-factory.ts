@@ -44,7 +44,26 @@ export interface CreateWorkerSessionOptions {
   resolvedModel: unknown;
   thinking: string | undefined;
   allToolNames: string[];
+  /**
+   * Initial `hiveTools` list passed to `createAgentSession`. Worker-only
+   * tools (cooperative tools, summarize_progress) require the ledger which
+   * is not available until SessionManager.open + BudgetLedger.restore run;
+   * use `hiveToolsWithLedger` to inject them after the restore.
+   */
   hiveTools: ToolDefinition[];
+  /**
+   * Optional: invoked with the freshly-restored `BudgetLedger` so the caller
+   * can build extended tool sets (cooperative tools + summarize_progress)
+   * that depend on the ledger. Returned tools are MERGED into the session's
+   * effective customTools via `createAgentSession(... customTools: [...])`.
+   *
+   * The merged tool set is the union of `hiveTools` and the callback's
+   * return value. SDK behavior: customTools already registered via
+   * `createAgentSession` are authoritative — if the callback returns tools
+   * with names that overlap, the first occurrence wins (we keep the
+   * `hiveTools` ordering and append the new ones after).
+   */
+  hiveToolsWithLedger?: (ledger: BudgetLedger) => ToolDefinition[];
   skillPaths: string[];
   preflightPolicy: WorkerBudgetPolicy;
   runController: AbortController;
@@ -54,22 +73,39 @@ export interface CreateWorkerSessionOptions {
 export interface CreateWorkerSessionResult {
   session: unknown;
   sessionManager: SessionManager;
+  ledger: BudgetLedger;
 }
 
 /**
- * Open the `SessionManager` and call `createAgentSession(...)` with the
- * worker-specific arguments (resolved model, scoped tools, customTools,
- * resource loader). The returned `session` is unattached — the caller is
- * expected to thread it through `WorkerRunLifecycle.attachSession(...)`
- * BEFORE the budget-event-hook install, so a throw from
- * `installBudgetEventHooks` (which subscribes to the session internally)
- * still leaves the lifecycle in a state where `close(failed=true)` can
- * abort the partially-created session.
+ * Open the `SessionManager`, restore the worker's `BudgetLedger`, and call
+ * `createAgentSession(...)` with the worker-specific arguments (resolved
+ * model, scoped tools, customTools, resource loader). The returned
+ * `session` is unattached — the caller is expected to thread it through
+ * `WorkerRunLifecycle.attachSession(...)` BEFORE the budget-event-hook
+ * install, so a throw from `installBudgetEventHooks` (which subscribes to
+ * the session internally) still leaves the lifecycle in a state where
+ * `close(failed=true)` can abort the partially-created session.
+ *
+ * F5 wiring: when `opts.hiveToolsWithLedger` is provided, the callback is
+ * invoked AFTER `BudgetLedger.restore` so the extended tool set can include
+ * ledger-dependent tools (cooperative tools + summarize_progress). The
+ * returned tools are merged into the session's customTools so the worker
+ * sees them from prompt #1.
  */
 export async function createWorkerSession(opts: CreateWorkerSessionOptions): Promise<CreateWorkerSessionResult> {
-  const { state, ctx, runtime, resolvedModel, thinking, allToolNames, hiveTools, skillPaths, createSession } = opts;
+  const { state, ctx, runtime, resolvedModel, thinking, allToolNames, hiveTools, hiveToolsWithLedger, skillPaths, preflightPolicy, runController, createSession } = opts;
 
   const sessionManager = SessionManager.open(runtime.sessionFile);
+  // Restore the ledger BEFORE `createAgentSession` so `hiveToolsWithLedger`
+  // (F5) can build worker-only tools (summarize_progress + cooperative
+  // tools) that depend on the ledger for their `progress_notes` /
+  // `cooperative-*` entry persistence.
+  const ledger = await BudgetLedger.restore(
+    sessionManager,
+    agentSlug(runtime.config),
+    preflightPolicy,
+    runController.signal,
+  );
 
   // createAgentSession only calls reload() when it creates its own resource
   // loader (sdk.js). When a loader is supplied by the caller, the SDK skips
@@ -81,18 +117,22 @@ export async function createWorkerSession(opts: CreateWorkerSessionOptions): Pro
   const workerLoader = workerResourceLoader(state, ctx.cwd, runtime.config.name, skillPaths);
   await workerLoader.reload();
 
+  const mergedCustomTools: ToolDefinition[] = hiveToolsWithLedger
+    ? [...hiveTools, ...hiveToolsWithLedger(ledger)]
+    : hiveTools;
+
   const created = await createSession({
     cwd: ctx.cwd,
     model: resolvedModel,
     modelRegistry: (ctx as any).modelRegistry,
     thinkingLevel: thinking as any,
     tools: allToolNames,
-    customTools: hiveTools,
+    customTools: mergedCustomTools,
     sessionManager,
     resourceLoader: workerLoader,
   });
 
-  return { session: created.session, sessionManager };
+  return { session: created.session, sessionManager, ledger };
 }
 
 /**
@@ -121,16 +161,15 @@ export async function installWorkerBudgetHooks(opts: {
   session: unknown;
   sessionManager: SessionManager;
   preflightPolicy: WorkerBudgetPolicy;
+  /** Pre-restored BudgetLedger (created by createWorkerSession; F5 wiring). */
+  ledger: BudgetLedger;
   runController: AbortController;
   currentDelegationDepth: () => number;
 }): Promise<BudgetLedger> {
-  const { runtime, session, sessionManager, preflightPolicy, runController, currentDelegationDepth } = opts;
-  const workerLedger = await BudgetLedger.restore(
-    sessionManager,
-    agentSlug(runtime.config),
-    preflightPolicy,
-    runController.signal,
-  );
+  const { session, sessionManager, preflightPolicy, ledger: workerLedger, runController, currentDelegationDepth } = opts;
+  // F5 wiring: the ledger is now restored inside `createWorkerSession` (so
+  // `hiveToolsWithLedger` can build worker-only tools like summarize_progress
+  // against the live ledger). This function only installs the hooks + guard.
   // `installBudgetEventHooks` returns the unsubscribe handle from
   // `session.subscribe(...)`. We intentionally do NOT capture it: the
   // dispatch lifecycle (`WorkerRunLifecycle.close()`) invokes

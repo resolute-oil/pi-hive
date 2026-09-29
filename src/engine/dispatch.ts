@@ -352,7 +352,13 @@ export async function dispatchAgent(
   const allToolNames = dispatchToolNames(toolNames, hiveTools);
   const skillPaths = resolveWorkerSkillPaths(ctx.cwd, runtime.config.skills as unknown[]);
 
-  const { session: createdSession, sessionManager } = await createWorkerSession({
+  // F5 wiring: the worker-only tools (cooperative tools + summarize_progress)
+  // are built by `buildHiveTools(state, name, ledger)`. The ledger is
+  // restored INSIDE `createWorkerSession` (so the worker sees the tools from
+  // prompt #1) — the `hiveToolsWithLedger` callback receives it once
+  // `BudgetLedger.restore` completes. The merged customTools list is what
+  // `createAgentSession` receives.
+  const { session: createdSession, sessionManager, ledger: workerLedger } = await createWorkerSession({
     state,
     ctx,
     runtime,
@@ -360,6 +366,10 @@ export async function dispatchAgent(
     thinking,
     allToolNames,
     hiveTools,
+    hiveToolsWithLedger: (ledger) => buildHiveTools(state, runtime.config.name, ledger).filter(
+      (t) => !hiveTools.some((existing) => existing.name === t.name)
+        && (toolNames.includes(t.name) || TYPE_SCOPED_TOOL_NAMES.has(t.name)),
+    ),
     skillPaths,
     preflightPolicy,
     runController,
@@ -382,6 +392,7 @@ export async function dispatchAgent(
     session,
     sessionManager,
     preflightPolicy,
+    ledger: workerLedger,
     runController,
     currentDelegationDepth: () => delegationDepth,
   });

@@ -186,11 +186,16 @@ async function installWithSeededCumulative(args: {
   const controller = args.controller ?? new AbortController();
   const session = makeFakeSession(args.previousBeforeToolCall);
   const runtime = makeRuntime("wiring-worker", join(cwd, "session.jsonl"));
-  const ledger = await installWorkerBudgetHooks({
+  // F5: installWorkerBudgetHooks now receives a pre-restored ledger (the
+  // dispatch path restores it inside createWorkerSession). Restore here
+  // explicitly so the test setup mirrors production wiring.
+  const ledger = await BudgetLedger.restore(sessionManager, "wiring-worker", policy, controller.signal);
+  await installWorkerBudgetHooks({
     runtime,
     session,
     sessionManager,
     preflightPolicy: policy,
+    ledger,
     runController: controller,
     currentDelegationDepth: () => 1,
   });
