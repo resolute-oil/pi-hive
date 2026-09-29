@@ -1,63 +1,43 @@
-import { withFileMutationQueue, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
+import { type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import { existsSync, readdirSync, renameSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { TYPE_SCOPED_TOOL_NAMES } from "../core/constants";
 import type { AgentRuntime, HiveState } from "../core/types";
-import {
-  boundedDiagnostics,
-  modelFrom,
-  normalizeWorkerTools,
-  safeJson,
-  agentSlug,
-  textFromMessage,
-  textOfResult,
-  truncateMiddle,
-  extractUsage,
-} from "../core/utils";
+import { modelFrom, normalizeWorkerTools, agentSlug, truncateMiddle } from "../core/utils";
 import { logRecord } from "./state";
 import { currentAgentName, currentChangeId, currentDelegationDepth, reloadAgentConfig, runAsAgent, runAtDelegationDepth, runWithChange } from "./session";
 import { canDelegateTo } from "./domain";
 import { buildWorkerPrompt } from "./prompts";
 import { emitHiveEvent, runtimeSummary, writeHiveStateSnapshot } from "./observability";
 import { buildHiveTools } from "../agents/tools";
-import { normalizeWorkerSkillPaths, workerResourceLoader } from "./worker-extension";
-import { approvalRecordPath, isExecutionGateOpen, isAwaitingHumanApproval, setAgentReviewVerdict, type AgentReviewVerdict } from "./openspec";
-import { ARTIFACT_ORDER, type ArtifactId } from "../shared/openspec-artifacts";
+import { normalizeWorkerSkillPaths } from "./worker-extension";
+import { isExecutionGateOpen, isAwaitingHumanApproval } from "./openspec";
 import { agentRoster, resolveRuntime } from "./agent-lookup";
 import { addHiveActivity } from "../ui/tui/activity";
 import { resolveConfiguredPath } from "../core/safe-path";
-import { acquireWorkerSlot, budgetRemaining, checkDispatchBudgets, effectiveWorkerGovernance, releaseWorkerSlot } from "./governance";
+import { acquireWorkerSlot, releaseWorkerSlot } from "./worker-queue";
+import { budgetRemaining } from "./budget/display";
 import { WorkerRunLifecycle } from "./worker-lifecycle";
+import { persistReviewerVerdict } from "./reviewer-verdict";
+import { createWorkerSubscriptionHandler, type WorkerSubscriptionState } from "./worker-subscription";
+import { applySessionStatsToRuntime } from "./runtime-stats";
+import { createWorkerSession, installWorkerBudgetHooks } from "./worker-session-factory";
+import { emitDelegationEnd } from "./delegation-end";
+import { isPendingArtifactRevisionTask } from "./dispatch-helpers";
 import { modelKey, resolveModel } from "./model-resolution";
 import { BUDGET_EXHAUSTED_ERROR_NAME, runBudgetPreflight } from "./budget/worker-tools";
-import { installBudgetEventHooks } from "./budget/events";
-import { BudgetLedger } from "./budget/ledger";
-
-// Dashboard activity should show reviewer/worker conclusions without confusing
-// middle elision in normal cases. Keep a high hard cap to avoid unbounded shared
-// telemetry rows if an agent accidentally returns a huge dump.
+// Hard cap to keep shared telemetry rows from blowing up on accidental
+// multi-hundred-KB worker dumps. 64 KB is high enough that normal review
+// verdicts are not middle-elided in the web UI.
 const DELEGATION_EVENT_MESSAGE_LIMIT = 64_000;
 
 function publishRuntimeUpdate(state: HiveState) {
   state.onRuntimeUpdate?.(state);
 }
 
-// Coerce to a finite number or undefined. Unlike `Number(x) || undefined`, this
-// preserves a legitimate 0 (a real delayMs/tokensAfter of 0 is meaningful; only
-// NaN/absent should drop to undefined). Mirrors the Number.isFinite guards used
-// on the SessionStats overwrite below. Guards null/undefined FIRST (R3-2.5) so an
-// absent field stays undefined rather than coercing to Number(null) === 0.
-function finiteOrUndef(x: unknown): number | undefined {
-  if (x == null) return undefined;
-  const n = Number(x);
-  return Number.isFinite(n) ? n : undefined;
-}
-
-// Move an agent's current session log aside to a numbered archive so a fresh run
-// can start clean without losing the prior run's transcript. "<slug>.jsonl"
-// becomes "<slug>.run-<N>.jsonl" with N the next free index. Returns silently if
-// there is nothing to archive.
+// Archive the current session log to a numbered run file so a fresh run can
+// start clean without losing the prior run's transcript.
 function archivePriorRun(sessionFile: string) {
   const dir = dirname(sessionFile);
   const base = basename(sessionFile, ".jsonl"); // e.g. "core-tester"
@@ -84,27 +64,19 @@ export function resolveWorkerSkillPaths(cwd: string, refs: unknown[] = []): stri
   });
 }
 
-const ARTIFACT_REVISION_MARKERS = /\b(revise|revision|fix|address|correct|update|rewrite|repair|failed review|review failed|rejected|denied|blocker|blocking)\b/i;
+// Re-export the artifact/verdict-inference helpers from dispatch-helpers.ts so
+// existing callers (`tests/dispatch-usage.test.ts`, etc.) keep compiling
+// without churn. Behavior is byte-identical to the pre-extraction versions.
+export {
+  inferArtifactFromReviewTask,
+  inferChangeIdFromReviewTask,
+  inferReviewVerdict,
+  isPendingArtifactRevisionTask,
+} from "./dispatch-helpers";
 
-const ARTIFACT_TARGET_MARKERS: Record<ArtifactId, RegExp> = {
-  proposal: /\bproposal(?:\.md)?\b|proposal artifact|proposal gate/i,
-  design: /\bdesign(?:\.md)?\b|design artifact|design gate/i,
-  specs: /\bspecs?(?:\/\*\*\/\*\.md| artifact| gate)?\b|specs\/|spec\.md/i,
-  tasks: /\btasks(?:\.md)?\b|tasks artifact|tasks gate/i,
-};
-
-export function isPendingArtifactRevisionTask(task: string, pending: ArtifactId): boolean {
-  if (!ARTIFACT_REVISION_MARKERS.test(task)) return false;
-  if (/\bauthor the next artifact\b/i.test(task)) return false;
-  return ARTIFACT_TARGET_MARKERS[pending].test(task);
-}
-
-export function inferChangeIdFromReviewTask(task: string): string | null {
-  const pathMatch = task.match(/openspec\/changes\/([a-z0-9]+(?:-[a-z0-9]+)*)\//i);
-  if (pathMatch) return pathMatch[1];
-  const quotedMatch = task.match(/OpenSpec change [`"]([a-z0-9]+(?:-[a-z0-9]+)*)[`"]|change [`"]([a-z0-9]+(?:-[a-z0-9]+)*)[`"]|change\s+([a-z0-9]+(?:-[a-z0-9]+)*)\b/i);
-  return quotedMatch?.[1] || quotedMatch?.[2] || quotedMatch?.[3] || null;
-}
+// Re-export the delegation-end telemetry emitter so the post-`prompt` block
+// in dispatchAgent doesn't carry the full ~80-line payload assembly.
+export { emitDelegationEnd } from "./delegation-end";
 
 // Union the agent's enumerated `tools:` list with the names of any
 // type-scoped tools `buildHiveTools` emitted. The Pi SDK treats `tools` as
@@ -117,41 +89,6 @@ export function inferChangeIdFromReviewTask(task: string): string | null {
 // so the regression test can pin the behavior without spinning up the SDK.
 export function dispatchToolNames(toolNames: string[], hiveTools: ReadonlyArray<ToolDefinition | { name: string }>): string[] {
   return Array.from(new Set([...toolNames, ...hiveTools.map((t) => t.name)]));
-}
-
-export function inferArtifactFromReviewTask(task: string): ArtifactId | null {
-  // Prefer the explicit review target. Review prompts often contain negative
-  // scope clauses like "Do not consider design/specs/tasks"; a plain keyword
-  // scan would otherwise tag a proposal review as tasks/specs/design.
-  const explicit = task.match(/\breview\s+only\s+the\s+(proposal|design|specs?|requirements|tasks)\s+(?:artifact|gate)\b/i);
-  if (explicit) {
-    const target = explicit[1].toLowerCase();
-    return target.startsWith("spec") || target === "requirements" ? "specs" : (target as ArtifactId);
-  }
-
-  const pathMatch = task.match(/openspec\/changes\/[^\s`'"]+\/((?:proposal|design|tasks)\.md|specs\/[^\s`'"]+|specs\/\*\*\/\*\.md)/i);
-  if (pathMatch) return pathMatch[1].startsWith("specs/") ? "specs" : (pathMatch[1].replace(/\.md$/i, "") as ArtifactId);
-
-  const positiveText = task
-    .split(/(?<=[.!?])\s+|\n+/)
-    .filter((sentence) => !/\bdo not\b|\bdon't\b|\bno\s+(?:design|specs|tasks|proposal)\b/i.test(sentence))
-    .join("\n");
-  let best: { id: ArtifactId; index: number } | null = null;
-  for (const id of ARTIFACT_ORDER) {
-    const match = positiveText.match(ARTIFACT_TARGET_MARKERS[id]);
-    if (match?.index != null && (!best || match.index < best.index)) best = { id, index: match.index };
-  }
-  return best?.id ?? null;
-}
-
-function inferReviewVerdict(output: string): Exclude<AgentReviewVerdict, null> | null {
-  const text = output.trim();
-  const match = text.match(/^\s*(?:#{1,6}\s*)?(?:verdict\s*[:—-]\s*)?(PASS|GREEN|YELLOW|FAIL|RED)\b/i);
-  const verdict = match?.[1]?.toLowerCase();
-  if (verdict === "pass" || verdict === "green") return "green";
-  if (verdict === "yellow") return "yellow";
-  if (verdict === "fail" || verdict === "red") return "red";
-  return null;
 }
 
 export async function dispatchAgent(
@@ -215,23 +152,6 @@ export async function dispatchAgent(
     return { output: `${runtime.config.name} is already running.`, exitCode: 1, elapsed: runtime.elapsedMs };
   }
   const delegationDepth = currentDelegationDepth() + 1;
-  // LEGACY pre-flight — `checkDispatchBudgets` honors the v1
-  // `WorkerGovernance` shape that the Wave 1B hard cutover removed from
-  // config validation but that legacy state objects (test fixtures, in-flight
-  // dispatches during the rollout window) still carry. Kept alongside the
-  // new path below so existing tests asserting the legacy message format
-  // continue to pass. Wave 5 / F9 deletes this whole block when the legacy
-  // `governance:` shape is removed from `AgentConfig`.
-  const legacyBlocked = checkDispatchBudgets(state, runtime, delegationDepth);
-  if (legacyBlocked) {
-    emitHiveEvent(state, "budget_exhausted", {
-      agent: runtime.config.name,
-      resource: legacyBlocked.resource,
-      scope: legacyBlocked.scope,
-      remaining: budgetRemaining(state, runtime),
-    }, caller);
-    return { output: `Delegation blocked: ${legacyBlocked.message}`, exitCode: 1, elapsed: 0 };
-  }
   // Wave 2 / F2 — new budget pre-flight via `runBudgetPreflight`. Honors
   // the new F6 nested `budgets:` shape (per-agent + per-worker/per-team
   // settings). Throws `BudgetExhaustedError` on block; translated to the
@@ -310,15 +230,6 @@ export async function dispatchAgent(
   // is used below to decide which input to pass to session.prompt(): the full
   // assembled worker context (new/fresh) or the lean task alone (resume).
   const sessionFileExisted = existsSync(runtime.sessionFile);
-  // Governance accounting is monotonic even when fresh=true archives the SDK
-  // transcript and resets its session-lifetime counters. The budget tracks
-  // either input+output only or the full token total, depending on the
-  // configured scope; default "all" preserves the legacy behavior.
-  const tokenBudgetScope = effectiveWorkerGovernance(state, runtime).tokenBudgetScope ?? "all";
-  runtime.governanceTokens ??= tokenBudgetScope === "input_output"
-    ? runtime.inputTokens + runtime.outputTokens
-    : runtime.inputTokens + runtime.outputTokens + runtime.cacheReadTokens + runtime.cacheWriteTokens + runtime.reasoningTokens;
-  runtime.governanceCostUsd ??= runtime.costUsd;
   // fresh=true starts this agent's conversation clean. Rather than DELETE the
   // prior session (which would lose the transcript of earlier runs while their
   // token/cost still count), ARCHIVE it to a numbered run file so the dashboard
@@ -366,32 +277,29 @@ export async function dispatchAgent(
   runtime.elapsedMs = 0;
   runtime.runCount++;
   runtime.startedAt = Date.now();
-  const governance = effectiveWorkerGovernance(state, runtime);
+  // Wave 5 / F9 — the legacy `WorkerGovernance.timeoutMs` per-worker
+  // timeout was removed by Wave 1B's hard cutover (G-16). The `timeout`
+  // mechanism that used to live here is gone along with the dead
+  // `governance` local.
   const runController = new AbortController();
-  let timedOut = false;
   const abortFromParent = () => runController.abort(abortSignal?.reason);
   if (abortSignal?.aborted) abortFromParent();
   else abortSignal?.addEventListener("abort", abortFromParent, { once: true });
-  const timeout = governance.timeoutMs === undefined ? undefined : setTimeout(() => {
-    timedOut = true;
-    runController.abort(new Error(`Worker timeout after ${governance.timeoutMs}ms`));
-  }, governance.timeoutMs);
-  timeout?.unref?.();
   const lifecycle = new WorkerRunLifecycle(state, runtime, runController.signal);
-  // TOK/S baselines (J8/Decision 4): lifetime token counts at run start so the UI
-  // divides the *per-run output* delta by *per-run* elapsedMs — not lifetime
-  // tokens by per-run elapsed.
+  // Run-start baselines (J8/Decision 4 + Decision 1): capture the current
+  // lifetime counters as the per-run baseline so `delegation_end` can
+  // subtract them and emit per-run deltas.
   runtime.runStartInputTokens = runtime.inputTokens;
   runtime.runStartOutputTokens = runtime.outputTokens;
-  // Full baselines so delegation_end can emit per-run deltas for every token
-  // dimension + cost (Decision 1), not just the two TOK/S needs.
   runtime.runStartCacheReadTokens = runtime.cacheReadTokens;
   runtime.runStartCacheWriteTokens = runtime.cacheWriteTokens;
   runtime.runStartReasoningTokens = runtime.reasoningTokens;
   runtime.runStartCostUsd = runtime.costUsd;
 
   const chunks: string[] = [];
-  let streamedSnapshot = "";
+  // The streaming snapshot is now tracked exclusively on `sub.streamedSnapshot`
+  // (see WorkerSubscriptionState). The post-extraction dispatchAgent reads
+  // it from the WorkerSubscriptionState object the handler updates.
   let session: any;
   let abortedByParent = false;
   let errorMessage: string | undefined;
@@ -406,6 +314,26 @@ export async function dispatchAgent(
   const toolStartedAt = new Map<string, number>();
   let lastRetryMaxAttempts: number | undefined;
   let sdkCounts: { toolCalls?: number; toolResults?: number; userMessages?: number; assistantMessages?: number } | undefined;
+
+  // Wave 5 / F9 — declared at function scope so the post-`finally` output
+  // computation below can read sub.streamedSnapshot. The handler updates
+  // sub.streamedSnapshot on every `message_update` event; the local
+  // `streamedSnapshot` string above is the pre-extraction backward-compat
+  // shadow that the worker-subscription handler no longer touches.
+  const sub: WorkerSubscriptionState = {
+    chunks,
+    streamedSnapshot: "",
+    toolStartedAt: new Map<string, number>(),
+    providersSeen,
+    apisSeen,
+    modelsSeen,
+    firstResponseId,
+    lastResponseId,
+    diagnostics,
+    lastRetryMaxAttempts,
+    sdkCounts,
+    lastStopReason,
+  };
 
   try {
   const toolNames = tools.split(",").map((t) => t.trim()).filter(Boolean);
@@ -424,50 +352,33 @@ export async function dispatchAgent(
   const allToolNames = dispatchToolNames(toolNames, hiveTools);
   const skillPaths = resolveWorkerSkillPaths(ctx.cwd, runtime.config.skills as unknown[]);
 
-  const sessionManager = SessionManager.open(runtime.sessionFile);
-
-  // createAgentSession only calls reload() when it creates its own resource
-  // loader (sdk.js). When a loader is supplied by the caller, the SDK skips
-  // reload, leaving extensionsResult empty (constructor default). Without
-  // reload the extensionFactories never run, runner.hasHandlers("tool_call")
-  // is false, beforeToolCall short-circuits, and domain enforcement is silently
-  // bypassed for every worker tool call. Call reload() here so the factory
-  // registers the tool_call handler before the session starts.
-  const workerLoader = workerResourceLoader(state, ctx.cwd, runtime.config.name, skillPaths);
-  await workerLoader.reload();
-
-  const created = await createSession({
-    cwd: ctx.cwd,
-    model: resolvedModel,
-    modelRegistry: (ctx as any).modelRegistry,
-    thinkingLevel: thinking as any,
-    tools: allToolNames,
-    customTools: hiveTools,
-    sessionManager,
-    resourceLoader: workerLoader,
+  const { session: createdSession, sessionManager } = await createWorkerSession({
+    state,
+    ctx,
+    runtime,
+    resolvedModel,
+    thinking,
+    allToolNames,
+    hiveTools,
+    skillPaths,
+    preflightPolicy,
+    runController,
+    createSession,
   });
-  session = created.session;
+  session = createdSession;
   lifecycle.attachSession(session);
 
-  // Wave 2 / F2 — install the new mid-run budget event hooks. The ledger
-  // is restored against the WORKER's `sessionManager` (writes go there,
-  // not the read-only `ctx.sessionManager`). The controller is wired to
-  // `runController` so an F3 exhaustion signal aborts the session (F2
-  // does not yet emit warnings/exhausted; this hook just updates the
-  // ledger on `message_end` / `compaction_end` / `agent_settled`).
-  const workerLedger = await BudgetLedger.restore(
+  // Wave 2 / F2 — install the new mid-run budget event hooks AFTER attaching
+  // the session to the lifecycle. If `installBudgetEventHooks` throws (e.g.
+  // `session.subscribe(...)` rejects), the lifecycle already owns the
+  // session, so `close(failed=true)` aborts and disposes it cleanly.
+  await installWorkerBudgetHooks({
+    runtime,
+    session,
     sessionManager,
-    agentSlug(runtime.config),
     preflightPolicy,
-    runController.signal,
-  );
-  installBudgetEventHooks(
-    session as unknown as Parameters<typeof installBudgetEventHooks>[0],
-    workerLedger,
-    preflightPolicy,
-    sessionManager,
     runController,
-  );
+  });
 
   const abortWorker = (): void => {
     abortedByParent = true;
@@ -536,161 +447,16 @@ export async function dispatchAgent(
   // toolCallId → startedAt, for per-call durationMs (A4). Bounded by in-flight
   // calls: deleted on tool_execution_end. Retry metadata is retained only for
   // this reserved run and cleared by the outer lifecycle cleanup.
-  const unsubscribe = session.subscribe((event: any) => {
-    if (event.type === "message_update") {
-      const delta = event.assistantMessageEvent;
-      if (delta?.type === "text_delta") {
-        // The documented SDK contract exposes incremental text on `delta`. Some
-        // event shapes also carry `text`/`message` as the full accumulated
-        // snapshot; appending that snapshot duplicates every prefix in the final
-        // worker result (e.g. "P", "Pl", "Ple" as separate lines in the TUI).
-        // Keep snapshots only for live status/fallback output, never as chunks.
-        const deltaText = typeof delta.delta === "string" ? delta.delta : "";
-        if (deltaText) chunks.push(deltaText);
-        const snapshot = textFromMessage(event.message) || (typeof delta.text === "string" ? delta.text : "");
-        if (snapshot) streamedSnapshot = snapshot;
-        const live = chunks.length ? chunks.join("") : streamedSnapshot;
-        const last = live.split("\n").filter((line: string) => line.trim()).pop();
-        if (last) runtime.lastWork = last;
-      }
-    } else if (event.type === "tool_execution_start") {
-      runtime.toolCount++;
-      const toolName = event.toolName || event.name || "unknown";
-      runtime.lastWork = `tool: ${toolName}`;
-      if (event.toolCallId) toolStartedAt.set(event.toolCallId, Date.now());
-      const argsJson = safeJson(event.args ?? {});
-      addHiveActivity(state, { kind: "tool_start", agent: runtime.config.name, toolName, status: "running" });
-      emitHiveEvent(state, "worker_tool_start", {
-        agent: runtime.config.name,
-        toolName,
-        toolCallId: event.toolCallId,
-        args: truncateMiddle(argsJson, 500),
-        truncated: argsJson.length > 500,
-      }, runtime.config.name);
-    } else if (event.type === "tool_execution_end") {
-      const startedAt = event.toolCallId ? toolStartedAt.get(event.toolCallId) : undefined;
-      if (event.toolCallId) toolStartedAt.delete(event.toolCallId);
-      const resultText = textOfResult(event.result);
-      addHiveActivity(state, { kind: "tool_end", agent: runtime.config.name, toolName: event.toolName || event.name || "unknown", status: event.isError === true ? "error" : "done", text: event.isError === true ? truncateMiddle(resultText, 160) : undefined });
-      emitHiveEvent(state, "worker_tool_end", {
-        agent: runtime.config.name,
-        toolName: event.toolName || event.name || "unknown",
-        toolCallId: event.toolCallId,
-        isError: event.isError === true,
-        resultPreview: truncateMiddle(resultText, 500),
-        truncated: resultText.length > 500,
-        durationMs: startedAt != null ? Date.now() - startedAt : undefined,
-      }, runtime.config.name);
-    } else if (event.type === "auto_retry_start") {
-      if (event.maxAttempts != null) lastRetryMaxAttempts = event.maxAttempts;
-      addHiveActivity(state, { kind: "retry", agent: runtime.config.name, status: "running", text: `retry ${event.attempt}${event.maxAttempts ? `/${event.maxAttempts}` : ""}${event.errorMessage ? `: ${truncateMiddle(String(event.errorMessage), 120)}` : ""}` });
-      emitHiveEvent(state, "worker_retry", {
-        agent: runtime.config.name,
-        attempt: event.attempt,
-        maxAttempts: event.maxAttempts,
-        errorMessage: event.errorMessage ? truncateMiddle(String(event.errorMessage), 500) : undefined,
-        // Phase 4.6: the backoff delay before this retry (W1.7: 0 is a valid delay).
-        delayMs: finiteOrUndef(event.delayMs),
-        phase: "start",
-      }, runtime.config.name);
-    } else if (event.type === "auto_retry_end") {
-      // The SDK does not carry maxAttempts on retry-end; fall back to the value
-      // captured at the matching retry-start.
-      emitHiveEvent(state, "worker_retry", {
-        agent: runtime.config.name,
-        attempt: event.attempt,
-        maxAttempts: event.maxAttempts ?? lastRetryMaxAttempts,
-        phase: "end",
-        success: event.success,
-        // Phase 4.6: the terminal error when retries are exhausted.
-        finalError: event.finalError ? truncateMiddle(String(event.finalError), 500) : undefined,
-      }, runtime.config.name);
-    } else if (event.type === "compaction_start") {
-      addHiveActivity(state, { kind: "compaction", agent: runtime.config.name, status: "running", text: `compacting${event.reason ? `: ${event.reason}` : ""}` });
-      emitHiveEvent(state, "worker_compaction", { agent: runtime.config.name, reason: event.reason, phase: "start" }, runtime.config.name);
-    } else if (event.type === "compaction_end") {
-      // Phase 4.5: keep the compaction RESULT fields, not just {reason, phase}.
-      const result = event.result || {};
-      emitHiveEvent(state, "worker_compaction", {
-        agent: runtime.config.name, reason: event.reason, phase: "end",
-        tokensBefore: finiteOrUndef(result.tokensBefore ?? event.tokensBefore),
-        estimatedTokensAfter: finiteOrUndef(result.estimatedTokensAfter ?? event.estimatedTokensAfter),
-        aborted: (result.aborted ?? event.aborted) === true ? true : undefined,
-        willRetry: (result.willRetry ?? event.willRetry) === true ? true : undefined,
-        errorMessage: (result.errorMessage ?? event.errorMessage) ? truncateMiddle(String(result.errorMessage ?? event.errorMessage), 500) : undefined,
-      }, runtime.config.name);
-    } else if (event.type === "queue_update") {
-      // Worker steering/follow-up queue depth (Phase 4). Bounded to counts — the
-      // queued message bodies are not carried into telemetry.
-      emitHiveEvent(state, "queue_update", {
-        agent: runtime.config.name,
-        steering: Array.isArray(event.steering) ? event.steering.length : 0,
-        followUp: Array.isArray(event.followUp) ? event.followUp.length : 0,
-      }, runtime.config.name);
-    } else if (event.type === "session_info_changed") {
-      emitHiveEvent(state, "session_info_changed", {
-        agent: runtime.config.name,
-        name: event.name ? truncateMiddle(String(event.name), 200) : undefined,
-      }, runtime.config.name);
-    } else if (event.type === "message_end") {
-      const message = event.message;
-      const actualModel = message?.model || message?.responseModel;
-      if (actualModel) modelsSeen.add(String(actualModel));
-      if (message?.provider) providersSeen.add(String(message.provider));
-      if (message?.api) apisSeen.add(String(message.api));
-      if (message?.responseId) {
-        const rid = String(message.responseId);
-        if (!firstResponseId) firstResponseId = rid;
-        lastResponseId = rid;
-      }
-      if (diagnostics.length < MAX_DIAGNOSTICS) {
-        // R4.3: shared bounded/undefined-omitting normalizer, capped across the run.
-        const norm = boundedDiagnostics(message?.diagnostics, MAX_DIAGNOSTICS - diagnostics.length);
-        if (norm) diagnostics.push(...norm);
-      }
-      if (message?.stopReason) lastStopReason = String(message.stopReason);
-      const usage = message?.usage;
-      if (usage) {
-        // Incremental accumulation for live display only. Authoritative totals
-        // are overwritten from getSessionStats() at run end (A1) — this avoids
-        // the historical double-count where agent_end re-added the final
-        // message's usage.
-        const u = extractUsage(usage);
-        runtime.inputTokens += u.input;
-        runtime.outputTokens += u.output;
-        runtime.cacheReadTokens += u.cacheRead;
-        runtime.cacheWriteTokens += u.cacheWrite;
-        runtime.reasoningTokens += u.reasoning;
-        runtime.costUsd += u.cost;
-
-        const remaining = budgetRemaining(state, runtime);
-        const teamLimits = state.config?.settings.teamBudgets || {};
-        const warn = (left: number | undefined, limit: number | undefined, scope: "worker" | "team", resource: "tokens" | "cost") => {
-          if (left === undefined || limit === undefined || left <= 0 || left / limit > 0.2) return;
-          const warningKey = `${scope}:${resource}:${scope === "worker" ? agentSlug(runtime.config) : "team"}`;
-          const warnings = state.budgetWarnings ||= new Set<string>();
-          if (warnings.has(warningKey)) return;
-          warnings.add(warningKey);
-          emitHiveEvent(state, "budget_warning", { agent: runtime.config.name, scope, resource, remaining: left, limit }, runtime.config.name);
-        };
-        warn(remaining.worker.tokens, governance.tokenBudget, "worker", "tokens");
-        warn(remaining.worker.costUsd, governance.costBudgetUsd, "worker", "cost");
-        warn(remaining.team.tokens, teamLimits.tokenBudget, "team", "tokens");
-        warn(remaining.team.costUsd, teamLimits.costBudgetUsd, "team", "cost");
-        const exhausted = remaining.worker.tokens === 0 ? { scope: "worker", resource: "tokens" }
-          : remaining.worker.costUsd === 0 ? { scope: "worker", resource: "cost" }
-          : remaining.team.tokens === 0 ? { scope: "team", resource: "tokens" }
-          : remaining.team.costUsd === 0 ? { scope: "team", resource: "cost" }
-          : undefined;
-        if (exhausted && !runController.signal.aborted) {
-          emitHiveEvent(state, "budget_exhausted", { agent: runtime.config.name, ...exhausted, remaining }, runtime.config.name);
-          runController.abort(new Error(`${exhausted.scope} ${exhausted.resource} budget exhausted`));
-        }
-      }
-    }
-    publishRuntimeUpdate(state);
-    writeHiveStateSnapshot(state);
+  // `sub` is declared at function scope above so the post-`finally` output
+  // computation can read sub.streamedSnapshot.
+  const handleEvent = createWorkerSubscriptionHandler({
+    state,
+    runtime,
+    sub,
+    publishRuntimeUpdate,
+    maxDiagnostics: MAX_DIAGNOSTICS,
   });
+  const unsubscribe = session.subscribe(handleEvent);
   lifecycle.attachSubscription(unsubscribe);
 
   try {
@@ -723,7 +489,7 @@ export async function dispatchAgent(
     const isNewSession = fresh || !sessionFileExisted;
     await runAtDelegationDepth(delegationDepth, () => runAsAgent(runtime.config.name, () => runWithChange(scopedChangeId, () => session.prompt(isNewSession ? prompt : task))));
     errorMessage = abortedByParent
-      ? (timedOut ? `Worker timed out after ${governance.timeoutMs}ms` : "aborted")
+      ? "aborted"
       : state.shuttingDown
         ? "aborted during session shutdown"
         : session.state.errorMessage;
@@ -746,54 +512,13 @@ export async function dispatchAgent(
   // Item 9: SessionStats also carries authoritative message/tool counts —
   // preferred over the hand-tallied toolCount so the numbers match the SDK's own.
   try {
-    const stats: any = session.getSessionStats?.();
-    if (stats) {
-      const toolCalls = Number(stats.toolCalls);
-      const toolResults = Number(stats.toolResults);
-      const userMessages = Number(stats.userMessages);
-      const assistantMessages = Number(stats.assistantMessages);
-      sdkCounts = {
-        toolCalls: Number.isFinite(toolCalls) ? toolCalls : undefined,
-        toolResults: Number.isFinite(toolResults) ? toolResults : undefined,
-        userMessages: Number.isFinite(userMessages) ? userMessages : undefined,
-        assistantMessages: Number.isFinite(assistantMessages) ? assistantMessages : undefined,
-      };
-      // R3-1.3: do NOT overwrite runtime.toolCount with stats.toolCalls here.
-      // runtime.toolCount is reset per run (see the run-start block) and tallied
-      // live from tool_execution_start, so it means "tool calls THIS run". But
-      // stats.toolCalls is session-LIFETIME — on a resumed (non-fresh) re-run it
-      // covers the whole conversation, which would make the Agents "Tools" cell and
-      // delegation_end.runtime.toolCount jump from this-run to lifetime at run end.
-      // The lifetime count is preserved separately in the `counts` payload below,
-      // which honestly documents its session-lifetime semantics.
-      const tokens = stats.tokens ?? stats.usage ?? stats;
-      const input = Number(tokens.input ?? tokens.inputTokens);
-      const output = Number(tokens.output ?? tokens.outputTokens);
-      if (Number.isFinite(input)) runtime.inputTokens = input;
-      if (Number.isFinite(output)) runtime.outputTokens = output;
-      const cacheRead = Number(tokens.cacheRead ?? tokens.cacheReadTokens);
-      const cacheWrite = Number(tokens.cacheWrite ?? tokens.cacheWriteTokens);
-      if (Number.isFinite(cacheRead)) runtime.cacheReadTokens = cacheRead;
-      if (Number.isFinite(cacheWrite)) runtime.cacheWriteTokens = cacheWrite;
-      const cost = Number(stats.cost?.total ?? stats.cost ?? stats.costUsd);
-      if (Number.isFinite(cost)) runtime.costUsd = cost;
-      // reasoning is NOT part of SessionStats.tokens (Phase 4.8): only overwrite
-      // when the SDK actually reports a POSITIVE value, otherwise keep the value
-      // accumulated from message_end. A finite 0 from stats (reasoning simply
-      // absent) must not wipe accumulation — only trust it to zero when nothing
-      // was accumulated in the first place.
-      const reasoning = Number(tokens.reasoning ?? tokens.reasoningTokens);
-      if (Number.isFinite(reasoning) && (reasoning > 0 || runtime.reasoningTokens === 0)) {
-        runtime.reasoningTokens = reasoning;
-      }
-    }
+    sdkCounts = applySessionStatsToRuntime(session, runtime);
   } catch { /* keep incremental values if stats is unavailable */ }
 
   } catch (error: any) {
     errorMessage = errorMessage || error?.message || String(error);
   } finally {
     toolStartedAt.clear();
-    if (timeout) clearTimeout(timeout);
     abortSignal?.removeEventListener("abort", abortFromParent);
     await lifecycle.close(Boolean(errorMessage));
     runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : runtime.elapsedMs;
@@ -801,7 +526,7 @@ export async function dispatchAgent(
   }
   const exitCode = errorMessage ? 1 : 0;
 
-  const output = chunks.join("").trim() || streamedSnapshot.trim() || errorMessage || "[no output]";
+  const output = chunks.join("").trim() || sub.streamedSnapshot.trim() || errorMessage || "[no output]";
   runtime.lastWork = output.split("\n").filter((line) => line.trim()).pop() || runtime.status;
   // The shared log keeps a bounded copy of the result for the dashboard. The
   // cap is intentionally high enough that normal review verdicts are not
@@ -839,69 +564,35 @@ export async function dispatchAgent(
     reasoningTokens: nonneg(runtime.reasoningTokens - (runtime.runStartReasoningTokens ?? 0)),
     costUsd: nonneg(runtime.costUsd - (runtime.runStartCostUsd ?? 0)),
   };
-  // Wave 3A / T4.2 — legacy `governanceTokens` accumulation is DELETED.
-  // The new `installBudgetEventHooks` (F2 spine) is the sole finalization
-  // path; on `agent_settled` the ledger writes a `marker: "checkpoint"`
-  // CustomEntry and that is the canonical record of end-of-run spend.
-  // The fields `runtime.governanceTokens` / `runtime.governanceCostUsd`
-  // remain on `AgentRuntime` for backwards compat (legacy `governance.ts`
-  // functions still read them) but they no longer accumulate here —
-  // Wave 5 F9 will delete `governance.ts` outright once nothing references
-  // those functions.
+  // Wave 3A / T4.2 + Wave 5 / F9 — the legacy `governanceTokens` /
+  // `governanceCostUsd` accumulation that used to live here is gone.
+  // `installBudgetEventHooks` (F2 spine) is the sole finalization path; on
+  // `agent_settled` the ledger writes a `marker: "checkpoint"` CustomEntry
+  // and that is the canonical record of end-of-run spend. The runtime
+  // fields were removed from the `AgentRuntime` type and from this file
+  // when `governance.ts` was deleted.
   if (runtime.config.agentType === "reviewer") {
-    // Persist per-artifact reviewer clearance whenever a review prompt is
-    // explicit enough to identify its target. Some dashboard-triggered review
-    // turns can run without plan-mode ambient state after a session restore; in
-    // that case, derive the change id from the OpenSpec paths in the task so the
-    // Plans UI does not reject a freshly PASSed artifact as "not ready".
-    const changeId = currentChangeId() || state.activeChangeId || inferChangeIdFromReviewTask(task) || "";
-    const artifact = inferArtifactFromReviewTask(task);
-    const verdict = inferReviewVerdict(output);
-    if (changeId && artifact && verdict) {
-      const recordPath = approvalRecordPath(ctx.cwd, changeId, artifact, "automated-review");
-      if (recordPath) {
-        await withFileMutationQueue(recordPath, async () => {
-          setAgentReviewVerdict(ctx.cwd, changeId, artifact, verdict, runtime.config.name);
-        });
-      }
-    }
+    await persistReviewerVerdict(ctx, state, runtime, task, output, caller);
   }
 
-  emitHiveEvent(state, "delegation_end", {
-    ...completion,
-    truncated: output.length > DELEGATION_EVENT_MESSAGE_LIMIT,
+  emitDelegationEnd({
+    state,
+    runtime,
+    output,
     exitCode,
-    stopReason: lastStopReason,
-    errorMessage: errorMessage ? truncateMiddle(errorMessage, 500) : undefined,
-    models: [...modelsSeen],
-    // Per-message identity the SDK exposes on AssistantMessage (Item 9 / R3-1.4):
-    // distinct providers + apis behind this run's assistant messages, the first and
-    // last responseId (run bookends), and a bounded/truncated diagnostics list.
-    providers: providersSeen.size ? [...providersSeen] : undefined,
-    apis: apisSeen.size ? [...apisSeen] : undefined,
+    errorMessage,
+    caller,
+    lastStopReason,
+    modelsSeen,
+    providersSeen,
+    apisSeen,
     firstResponseId,
     lastResponseId,
-    diagnostics: diagnostics.length ? diagnostics : undefined,
-    // Authoritative SDK message/tool counts for this session (Item 9), preferred
-    // over the hand-tallied toolCount. Session-lifetime (not per-run) — a re-run
-    // agent's stats cover the whole conversation.
-    counts: sdkCounts,
-    // Schema marker so the materializer stores per-run deltas and the dashboard
-    // never sums these rows with legacy cumulative ones (delegationsSchema=1).
-    delegationsSchema: 1,
+    diagnostics,
+    sdkCounts,
     delta,
-    runtime: runtimeSummary(state, runtime),
-  }, runtime.config.name);
-  // Surface delegation failures as the now-live `error` telemetry event (A3).
-  if (errorMessage) {
-    emitHiveEvent(state, "error", {
-      agent: runtime.config.name,
-      message: truncateMiddle(errorMessage, 500),
-      stopReason: lastStopReason,
-    }, runtime.config.name);
-  }
-  publishRuntimeUpdate(state);
-  writeHiveStateSnapshot(state);
+    messageLimit: DELEGATION_EVENT_MESSAGE_LIMIT,
+  });
   state.onRuntimeFinish?.(runtime, ctx);
   return { output, exitCode, elapsed: runtime.elapsedMs };
 }

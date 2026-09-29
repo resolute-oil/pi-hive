@@ -119,6 +119,12 @@ Rich prompt body.`);
 });
 
 test("runtime counter restoration handles sparse, corrupt, and explicit snapshots", () => {
+  // Wave 5 / F9 — the legacy `governanceTokens` / `governanceCostUsd` fields
+  // were removed from `AgentRuntime` along with their telemetry-log
+  // restoration. The SDK-aligned mirror (`inputTokens` / `outputTokens` /
+  // `cacheReadTokens` / `cacheWriteTokens` / `reasoningTokens` / `costUsd`)
+  // is now the single source of truth, overwritten from
+  // `session.getSessionStats()` at run end.
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-counter-"));
   const log = join(cwd, "events.jsonl");
   const runtime = { config: { name: "Worker", slug: "worker" } } as any;
@@ -135,7 +141,7 @@ test("runtime counter restoration handles sparse, corrupt, and explicit snapshot
     JSON.stringify({ type: "delegation_end", payload: { from: "Worker", runtime: { name: "Worker", runCount: 5 } } }),
     JSON.stringify({ type: "delegation_end", payload: { runtime: {
       slug: "worker", inputTokens: 10, outputTokens: 4, cacheReadTokens: 3, cacheWriteTokens: 2,
-      reasoningTokens: 1, costUsd: 0.5, governanceTokens: 25, governanceCostUsd: 0.75,
+      reasoningTokens: 1, costUsd: 0.5,
       runCount: 2, toolCount: 6,
     } } }),
     JSON.stringify({ type: "distill_start", payload: { agent: "Worker", distillerRunCount: 3 } }),
@@ -145,11 +151,10 @@ test("runtime counter restoration handles sparse, corrupt, and explicit snapshot
   assert.deepEqual({
     input: runtime.inputTokens, output: runtime.outputTokens, cacheRead: runtime.cacheReadTokens,
     cacheWrite: runtime.cacheWriteTokens, reasoning: runtime.reasoningTokens, cost: runtime.costUsd,
-    governanceTokens: runtime.governanceTokens, governanceCost: runtime.governanceCostUsd,
     runs: runtime.runCount, tools: runtime.toolCount, distillers: runtime.distillerRunCount,
   }, {
     input: 10, output: 4, cacheRead: 3, cacheWrite: 2, reasoning: 1, cost: 0.5,
-    governanceTokens: 25, governanceCost: 0.75, runs: 5, tools: 6, distillers: 3,
+    runs: 5, tools: 6, distillers: 3,
   });
   assert.equal(absent.inputTokens, 7);
 });

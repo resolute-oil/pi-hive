@@ -122,28 +122,24 @@ function estimateTokens(notes: string): number {
 }
 
 /**
- * Resolve the worker's token cap. Reads from the legacy
- * `progressSummaryTokenLimit` setting via cast (Wave 0's `WorkerGovernance`
- * does not yet expose this field). Falls back to the 2000-token default.
+ * Resolve the worker's token cap. The legacy `progressSummaryTokenLimit`
+ * setting (Wave 0's `WorkerGovernance`) was removed by F9 along with the
+ * rest of the legacy budget shape. Falls back to the 2000-token default
+ * until the structured-strategy config (C5, deferred to v3) lands.
  */
 function getProgressSummaryTokenLimit(_state: HiveState): number {
-  // TODO wave-1 follow-up: lift into WorkerGovernance / HiveSettings once
-  // Wave 1A (F1 primitives) lands the typed field. Until then the cast keeps
-  // a configured value visible to this tool without a type change.
+  // TODO C5: lift this into `WorkerBudgetStrategy` once the structured
+  // strategy config lands. Until then we use the constant below.
   return DEFAULT_PROGRESS_SUMMARY_TOKEN_LIMIT;
 }
 
 /**
  * Resolve the caller's effective budget strategy. The structured strategy
- * (C5) is deferred to v3, so this falls back to the legacy flat enum on
- * `governance.budgetStrategy` / `settings.workerBudgets.budgetStrategy`
- * (read via cast). Defaults to `default` when neither is set.
+ * (C5) is deferred to v3; for now we always return `"default"` since the
+ * legacy `governance.budgetStrategy` / `settings.workerBudgets.budgetStrategy`
+ * keys were removed by F9.
  */
-function resolveStrategy(state: HiveState, runtime: AgentRuntime | undefined): "default" | "compact" {
-  const fromRuntime = (runtime?.config.governance ?? {}) as { budgetStrategy?: string };
-  if (fromRuntime.budgetStrategy === "compact") return "compact";
-  const fromSettings = (state.config?.settings?.workerBudgets ?? {}) as { budgetStrategy?: string };
-  if (fromSettings.budgetStrategy === "compact") return "compact";
+function resolveStrategy(_state: HiveState, _runtime: AgentRuntime | undefined): "default" | "compact" {
   return "default";
 }
 

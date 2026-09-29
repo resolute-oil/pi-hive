@@ -10,7 +10,7 @@ import { agentSummary, teamTopology } from "../core/topology";
 import { currentAgentName } from "./session";
 import { withCrossProcessFileLock } from "../core/file-lock";
 import { redactSensitive } from "../shared/privacy";
-import { budgetRemaining } from "./governance";
+import { budgetRemaining } from "./budget/display";
 
 export type HiveObsEventType = HiveTelemetryEventType;
 export type HiveObsEvent<P = JsonRecord> = HiveTelemetryEvent<P>;
@@ -116,8 +116,14 @@ export function runtimeSummary(state: HiveState, runtime: AgentRuntime): NonNull
     cacheWriteTokens: runtime.cacheWriteTokens,
     reasoningTokens: runtime.reasoningTokens,
     costUsd: runtime.costUsd,
-    governanceTokens: runtime.governanceTokens,
-    governanceCostUsd: runtime.governanceCostUsd,
+    // Wave 5 / F9 — the legacy `governanceTokens` / `governanceCostUsd`
+    // fields on `AgentRuntime` were deleted by the Wave 1B hard cutover and
+    // are no longer populated. The display layer reads cumulative tokens
+    // / cost from the SDK-aligned mirror (inputTokens + outputTokens +
+    // cacheReadTokens + cacheWriteTokens + reasoningTokens + costUsd) and
+    // budgets from `state.config.settings.budgets.*` — see
+    // src/engine/budget/display.ts for the single-source-of-truth
+    // calculation.
     contextPct: runtime.contextPct,
     // Raw context-window fill behind contextPct (Phase 4.7) — carried through so
     // the dashboard can show tokens/window, not just the percentage.
