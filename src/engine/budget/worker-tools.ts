@@ -77,6 +77,7 @@ import { resolveWindow } from "./window-resolver";
 import { installBudgetEventHooks } from "./events";
 import type {
   BudgetExhaustedError as _BudgetExhaustedError,
+  BudgetLedgerEntry,
   DelegateAgentResult,
   RequestCompactionArgs,
   RequestCompactionResult,
@@ -589,12 +590,160 @@ export async function compactWorkerSession(
   throw new Error("not implemented");
 }
 
-/** `session.dispose() + SessionManager.create() + branchWithSummary(...)`. */
+// ---------------------------------------------------------------------------
+// === Wave 3C — F5 branch/clone cluster (T5.3, T5.5, T5.6) ===
+//
+// Resolves the §2.8 branch/clone operator commands. Each one:
+//   - Calls an SDK primitive on the worker's SessionManager / session.
+//   - Snapshots the ledger with the documented `kind` (see plan §2.3 + §2.8).
+//   - Returns a structured result whose `ledgerSnapshot` is the canonical
+//     `BudgetLedgerEntry` (customType discriminator + data with kind/marker)
+//     that the dashboard / caller can persist as the audit-trail entry.
+//
+// Deps design:
+//   - All three functions take a third `deps` argument carrying the live
+//     AgentSession / SessionManager / BudgetLedger / WorkerBudgetPolicy
+//     for the worker. Tests inject scripted versions; production callers
+//     pull these from a runtime registry / `delegateAgent` result.
+//   - The factory pattern matches `delegateAgent` (line ~540) so the test
+//     seams stay consistent across the module.
+//
+// Result-shape note (plan §2.8 + Wave 0 `BudgetLedgerEntry`):
+//   - `ledgerSnapshot` is the LAST `BudgetLedgerEntry` in `ledger.entries()`
+//     for the worker at the moment the snapshot was written. Each command
+//     writes exactly one such entry per invocation (per plan §2.3 "always"
+//     write cadence on operator actions), so `entries[entries.length - 1]`
+//     is the canonical handle.
+//   - `restoreWorkerSession` returns a discriminated union: `{ ok: true, ... }`
+//     on success OR `{ isError: true, code: "restore_failed", reason }` when
+//     `createBranchedSession` returns `undefined` (in-memory source SM, per
+//     `dist/core/session-manager.js:1296`). This matches the legacy
+//     `isError: true` envelope used by `summarize-progress` (Wave 1D).
+// ---------------------------------------------------------------------------
+
+// === T5.3 — respawnWorkerSession ===
+
+/** Result envelope for `respawnWorkerSession` — success path only. */
+export interface RespawnWorkerResult {
+  ok: true;
+  /** Session ID of the disposed (old) session. */
+  oldSessionId: string;
+  /** Session ID of the newly-created session. */
+  newSessionId: string;
+  /** The ledger entry written on the OLD SM with `kind: "respawn"`. */
+  ledgerSnapshot: BudgetLedgerEntry;
+}
+
+/** Dependency-injection seam for `respawnWorkerSession`. */
+export interface RespawnWorkerDeps {
+  /** The OLD `AgentSession` to dispose. Required. */
+  oldSession: AgentSession;
+  /** The OLD `SessionManager` (target of `branchWithSummary`). Required. */
+  oldSessionManager: SessionManager;
+  /** The OLD worker's `BudgetLedger` (target of the `kind: "respawn"` snapshot). Required. */
+  oldLedger: BudgetLedger;
+  /** The worker's resolved `WorkerBudgetPolicy`. Required. */
+  policy: WorkerBudgetPolicy;
+  /** Factory for the NEW `SessionManager`. Default: `SessionManager.create(cwd)`. */
+  sessionManagerFactory?: (cwd: string) => SessionManager;
+  /** Factory for the NEW `AgentSession`. Default: `createAgentSession`. */
+  createSession?: typeof createAgentSession;
+}
+
+/**
+ * `T5.3` — `respawnWorkerSession(agent, reason, newTask?)`.
+ *
+ * Sequence (plan §3.2):
+ *   1. Capture OLD `getSessionStats()` BEFORE any teardown.
+ *   2. Branch the OLD SM with a `branch_summary` entry (operator-driven).
+ *   3. Snapshot the OLD ledger with `kind: "respawn"`.
+ *   4. Dispose the OLD session (releases listeners / aborts in-flight work).
+ *   5. Create a NEW `SessionManager` via the factory (default `SessionManager.create`).
+ *   6. Create a NEW `AgentSession` via the factory (default `createAgentSession`).
+ *   7. Restore a FRESH `BudgetLedger` against the NEW SM (empty branch —
+ *      the bug class is structurally impossible per plan §1.1 / §2.9).
+ *   8. Install budget event hooks on the NEW session.
+ *   9. Return `{ ok, oldSessionId, newSessionId, ledgerSnapshot }`.
+ *
+ * Hard constraints honored:
+ *   - `session.dispose()` is called (NOT just `session.abort()`); per the
+ *     SDK's `dist/core/agent-session.js:822`, `dispose()` aborts the agent,
+ *     cancels in-flight retry / compaction / branch-summary / bash, and
+ *     invalidates the extension runner. The plan's T5.3 specifies
+ *     `dispose()` explicitly; `abort()` alone would leak listeners.
+ *   - `controller.signal` (per-call) is threaded into the ledger write.
+ *   - No `Math.random()` / `Date.now()` / `setTimeout()` in this path.
+ *   - The OLD SM is preserved on disk (the `branch_summary` entry +
+ *     `kind: "respawn"` ledger entry live there for audit).
+ */
 export async function respawnWorkerSession(
-  _args: RespawnWorkerArgs,
-  _ctx: ExtensionContext,
-): Promise<{ ok: true; sessionId: string; ledger: BudgetLedger }> {
-  throw new Error("not implemented");
+  args: RespawnWorkerArgs,
+  ctx: ExtensionContext,
+  deps: RespawnWorkerDeps,
+): Promise<RespawnWorkerResult> {
+  // 1. Capture OLD stats BEFORE teardown so the snapshot reflects the
+  // session's actual cumulative spend at the moment of the operator action.
+  const oldSessionId = deps.oldSession.sessionId;
+  const oldStats = deps.oldSession.getSessionStats();
+
+  // 2. Branch the OLD SM with a summary. Per plan §3.2, `branchWithSummary`
+  // is the FIRST write so the abandoned path is preserved with its
+  // summary before disposal. `getLeafId()` may return `null` for an empty
+  // session (no entries yet) — in that case we skip the branch summary
+  // (nothing to summarize) and rely on the ledger snapshot alone.
+  const leafId = deps.oldSessionManager.getLeafId();
+  if (leafId !== null) {
+    const summary = args.reason
+      ? `Respawned by operator: ${args.reason}`
+      : "Respawned by operator";
+    deps.oldSessionManager.branchWithSummary(leafId, summary);
+  }
+
+  // 3. Snapshot the OLD ledger with `kind: "respawn"` (marker: "checkpoint").
+  // `BudgetLedger.snapshot` projects the kind onto the CustomEntry payload
+  // and writes to its bound SessionManager (which is the OLD SM here).
+  deps.oldLedger.snapshot(oldStats, deps.policy, "respawn", ctx.signal);
+  const oldEntries = deps.oldLedger.entries();
+  const ledgerSnapshot = oldEntries[oldEntries.length - 1] as BudgetLedgerEntry;
+
+  // 4. Dispose the OLD session. Per `dist/core/agent-session.js:822`,
+  // `dispose()` calls `agent.abort()` and tears down the extension runner
+  // — releases listeners the `agent_settled` hooks installed. The OLD SM
+  // is NOT disposed (the branch_summary + ledger entry persist on disk).
+  deps.oldSession.dispose();
+
+  // 5. Create a fresh SessionManager. Default factory is `SessionManager.create(cwd)`
+  // which persists to disk — tests inject `SessionManager.inMemory(cwd)` for hermeticity.
+  const factory = deps.sessionManagerFactory ?? ((cwd: string) => SessionManager.create(cwd));
+  const newSessionManager = factory(ctx.cwd);
+
+  // 6. Create the new AgentSession. Default uses `createAgentSession`; tests
+  // inject a scripted session (see `tests/budget-eol.test.ts`).
+  const createSession = deps.createSession ?? createAgentSession;
+  const created = await createSession({ cwd: ctx.cwd, sessionManager: newSessionManager });
+  const newSession = created.session as AgentSession;
+
+  // 7. Restore a FRESH ledger. The NEW SM has an empty branch (a fresh
+  // session has no entries), so the ledger starts at zero cumulative spend.
+  // This is the structural reason Bug 1's bug class can't recur — there's
+  // no dual-counter to drift (plan §1.1).
+  const newLedger = await BudgetLedger.restore(
+    newSessionManager,
+    args.agent,
+    deps.policy,
+    ctx.signal,
+  );
+
+  // 8. Install event hooks on the NEW session.
+  const controller = new AbortController();
+  installBudgetEventHooks(newSession, newLedger, deps.policy, newSessionManager, controller);
+
+  return {
+    ok: true,
+    oldSessionId,
+    newSessionId: newSession.sessionId,
+    ledgerSnapshot,
+  };
 }
 
 /** `session.waitForIdle() + appendCustomEntry("pause", ...)` — resumable. */
@@ -605,20 +754,232 @@ export async function pauseWorkerSession(
   throw new Error("not implemented");
 }
 
-/** `session_manager.branchWithSummary(leafId, summary)`. */
-export async function snapshotWorkerSession(
-  _args: SnapshotWorkerArgs,
-  _ctx: ExtensionContext,
-): Promise<{ ok: true; snapshotId: string; ledger: BudgetLedger }> {
-  throw new Error("not implemented");
+// === T5.5 — snapshotWorkerSession ===
+
+/** Result envelope for `snapshotWorkerSession` — success path only. */
+export interface SnapshotWorkerResult {
+  ok: true;
+  /** Session ID of the worker's session at snapshot time. */
+  sessionId: string;
+  /**
+   * The `branch_summary` entry ID written by `branchWithSummary`. This is
+   * the navigation handle a future `restoreWorkerSession(agent, snapshotId)`
+   * passes as `snapshotLeafId` (per `dist/core/session-manager.d.ts:380`).
+   */
+  branchPath: string;
+  /** The ledger entry written with `kind: "snapshot"`. */
+  ledgerSnapshot: BudgetLedgerEntry;
 }
 
-/** `SessionManager.createBranchedSession(leafId)` — destination session emits. */
+/** Dependency-injection seam for `snapshotWorkerSession`. */
+export interface SnapshotWorkerDeps {
+  /** The worker's `SessionManager` (target of `branchWithSummary`). Required. */
+  sessionManager: SessionManager;
+  /** The worker's `BudgetLedger` (target of the `kind: "snapshot"` snapshot). Required. */
+  ledger: BudgetLedger;
+  /** The worker's `AgentSession` (source of stats for the snapshot). Required. */
+  session: AgentSession;
+  /** The worker's resolved `WorkerBudgetPolicy`. Required. */
+  policy: WorkerBudgetPolicy;
+}
+
+/**
+ * `T5.5` — `snapshotWorkerSession(agent, label)`.
+ *
+ * Sequence (plan §2.8):
+ *   1. `session_manager.branchWithSummary(leafId, label)` writes a
+ *      `branch_summary` entry as a sibling of the current leaf. The entry's
+ *      `id` becomes `branchPath` (the future-restore handle).
+ *   2. Snapshot the ledger with `kind: "snapshot"` (marker: "checkpoint").
+ *   3. Return `{ ok, sessionId, branchPath, ledgerSnapshot }`.
+ *
+ * The session itself is preserved — `snapshotWorkerSession` does NOT create
+ * a new session (unlike `respawnWorkerSession`). The operator can continue
+ * using the same session; later, `restoreWorkerSession(agent, branchPath)`
+ * can navigate to this branch.
+ *
+ * Hard constraints honored:
+ *   - `controller.signal` (per-call) is threaded into the ledger write.
+ *   - No `Math.random()` / `Date.now()` / `setTimeout()` in this path.
+ */
+export async function snapshotWorkerSession(
+  args: SnapshotWorkerArgs,
+  ctx: ExtensionContext,
+  deps: SnapshotWorkerDeps,
+): Promise<SnapshotWorkerResult> {
+  // 1. Branch the worker's current leaf with a summary. The branch_summary
+  // entry becomes a sibling of the current leaf; subsequent appends land
+  // on a NEW branch off the current leaf, leaving the snapshot path intact.
+  // Per `dist/core/session-manager.js:1176`, the SDK throws if `leafId` is
+  // non-null and not in the index; we skip the call when there's nothing
+  // to summarize (empty session).
+  const leafId = deps.sessionManager.getLeafId();
+  let branchPath = "";
+  if (leafId !== null) {
+    const summary = args.label ?? args.reason ?? `Snapshot of ${args.agent}`;
+    branchPath = deps.sessionManager.branchWithSummary(leafId, summary);
+  }
+
+  // 2. Snapshot the ledger with `kind: "snapshot"`. Stats come from the
+  // authoritative `session.getSessionStats()` (single source of truth).
+  const stats = deps.session.getSessionStats();
+  deps.ledger.snapshot(stats, deps.policy, "snapshot", ctx.signal);
+  const entries = deps.ledger.entries();
+  const ledgerSnapshot = entries[entries.length - 1] as BudgetLedgerEntry;
+
+  return {
+    ok: true,
+    sessionId: deps.session.sessionId,
+    branchPath,
+    ledgerSnapshot,
+  };
+}
+
+// === T5.6 — restoreWorkerSession ===
+
+/** Success-path result envelope for `restoreWorkerSession`. */
+export interface RestoreWorkerResult {
+  ok: true;
+  /** Session ID of the newly-opened branched session. */
+  sessionId: string;
+  /** The ledger entry written with `kind: "restore"`. */
+  ledgerSnapshot: BudgetLedgerEntry;
+}
+
+/** Error-path envelope for `restoreWorkerSession`. */
+export interface RestoreWorkerError {
+  isError: true;
+  code: "restore_failed";
+  reason: string;
+}
+
+/** Discriminated union — caller narrows on `ok` / `isError`. */
+export type RestoreWorkerOutcome = RestoreWorkerResult | RestoreWorkerError;
+
+/** Dependency-injection seam for `restoreWorkerSession`. */
+export interface RestoreWorkerDeps {
+  /**
+   * The `SessionManager` that holds the snapshot to restore. Must be a
+   * PERSISTED SM (the SDK's `createBranchedSession` returns `undefined`
+   * for in-memory sources per `dist/core/session-manager.js:1296`).
+   */
+  sourceSessionManager: SessionManager;
+  /** The leaf ID of the snapshot (the `branchPath` returned by `snapshotWorkerSession`). */
+  snapshotLeafId: string;
+  /** The worker's resolved `WorkerBudgetPolicy`. Required. */
+  policy: WorkerBudgetPolicy;
+  /**
+   * Factory that opens the branched session file. Default:
+   * `SessionManager.open(path)`. Tests inject to observe the exact path
+   * argument the SDK returned.
+   */
+  openSessionManager?: (path: string) => SessionManager;
+  /** Factory for the NEW `AgentSession`. Default: `createAgentSession`. */
+  createSession?: typeof createAgentSession;
+}
+
+/**
+ * `T5.6` — `restoreWorkerSession(agent, snapshotId)`.
+ *
+ * CRITICAL SDK chain (researched against the local SDK source):
+ *
+ *   - `SessionManager.createBranchedSession(leafId)` is declared as
+ *     returning `string | undefined` at
+ *     `dist/core/session-manager.d.ts:380` — NOT an `AgentSession`. The
+ *     return value is the new session FILE PATH (or `undefined` for
+ *     in-memory sources, per `dist/core/session-manager.js:1296`).
+ *   - To open the branched session we then call `SessionManager.open(path)`
+ *     (static, `dist/core/session-manager.d.ts:369`).
+ *   - The opened SM is then passed to `createAgentSession({ sessionManager })`
+ *     to materialize the `AgentSession`.
+ *
+ * Sequence (plan §3.3):
+ *   1. `sourceSessionManager.createBranchedSession(snapshotLeafId)`.
+ *   2. If `undefined` → return `{ isError: true, code: "restore_failed", reason }`.
+ *      (Do NOT crash; surface the error to the operator.)
+ *   3. Open the branched file via `SessionManager.open(path)`.
+ *   4. Create a NEW `AgentSession` on the branched SM.
+ *   5. Restore the ledger against the branched SM (its branch carries the
+ *      pre-snapshot `CustomEntry` history — see plan §2.8).
+ *   6. Snapshot the ledger with `kind: "restore"` (marker: "checkpoint").
+ *   7. Install event hooks.
+ *   8. Return `{ ok, sessionId, ledgerSnapshot }`.
+ *
+ * Coupling note (per plan T5.6 spec): the destination session's
+ * `installBudgetEventHooks` writes the FINAL `agent_settled` checkpoint.
+ * This call only writes the `kind: "restore"` audit entry; the `agent_settled`
+ * flow is unchanged and triggers normally.
+ *
+ * Hard constraints honored:
+ *   - `createBranchedSession` returning `undefined` → `isError: true`
+ *     (NOT a thrown exception). Per the task spec: "Do NOT crash."
+ *   - `controller.signal` (per-call) is threaded into the ledger write.
+ *   - No `Math.random()` / `Date.now()` / `setTimeout()` in this path.
+ */
 export async function restoreWorkerSession(
-  _args: RestoreWorkerArgs,
-  _ctx: ExtensionContext,
-): Promise<{ ok: true; sessionId: string; ledger: BudgetLedger }> {
-  throw new Error("not implemented");
+  args: RestoreWorkerArgs,
+  ctx: ExtensionContext,
+  deps: RestoreWorkerDeps,
+): Promise<RestoreWorkerOutcome> {
+  // 1. createBranchedSession returns string | undefined. In-memory source
+  // SMs return `undefined` (per `dist/core/session-manager.js:1296`) —
+  // surface as `isError` rather than crashing. The plan's T5.6 task spec
+  // is explicit: "createBranchedSession returns string | undefined —
+  // handle the undefined case as `isError`."
+  const branchedPath = deps.sourceSessionManager.createBranchedSession(deps.snapshotLeafId);
+  if (branchedPath === undefined) {
+    return {
+      isError: true,
+      code: "restore_failed",
+      reason:
+        "createBranchedSession returned undefined (source session is not persisted; cannot create a branched session file).",
+    };
+  }
+
+  // 2. Open the branched session file. Default factory is `SessionManager.open(path)`;
+  // tests inject to observe the exact path argument.
+  const open = deps.openSessionManager ?? ((path: string) => SessionManager.open(path));
+  const newSessionManager = open(branchedPath);
+
+  // 3. Create the new AgentSession on the branched SM. The branched SM
+  // carries the CustomEntry history (including any prior `kind: "snapshot"`
+  // entry from the source session), so `BudgetLedger.restore` reconstructs
+  // the cumulative spend from the LATEST matching entry.
+  const createSession = deps.createSession ?? createAgentSession;
+  const created = await createSession({ cwd: ctx.cwd, sessionManager: newSessionManager });
+  const newSession = created.session as AgentSession;
+
+  // 4. Restore the ledger. The branched branch carries the source's
+  // `CustomEntry` history (because `getBranch()` walks from the new leaf
+  // back to the header), so the ledger is reconstructed from the snapshot
+  // moment's cumulative spend. NO counter reset needed — the SDK's branch
+  // IS the restore primitive (plan §2.8 row).
+  const newLedger = await BudgetLedger.restore(
+    newSessionManager,
+    args.agent,
+    deps.policy,
+    ctx.signal,
+  );
+
+  // 5. Snapshot the ledger with `kind: "restore"`. This is the audit-trail
+  // entry showing "the operator navigated to leaf X". The destination's
+  // `agent_settled` will write the FINAL `kind: "checkpoint"` entry later
+  // (per the T5.6 coupling note).
+  const stats = newSession.getSessionStats();
+  newLedger.snapshot(stats, deps.policy, "restore", ctx.signal);
+  const entries = newLedger.entries();
+  const ledgerSnapshot = entries[entries.length - 1] as BudgetLedgerEntry;
+
+  // 6. Install event hooks so the branched session runs under the budget
+  // tracking umbrella.
+  const controller = new AbortController();
+  installBudgetEventHooks(newSession, newLedger, deps.policy, newSessionManager, controller);
+
+  return {
+    ok: true,
+    sessionId: newSession.sessionId,
+    ledgerSnapshot,
+  };
 }
 
 /** Counterpart to `pauseWorkerSession` — restores worker activity after a pause. */
