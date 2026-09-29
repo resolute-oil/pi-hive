@@ -67,6 +67,8 @@
 import type { AgentSession, SessionManager, SessionStats } from "@earendil-works/pi-coding-agent";
 import type { BudgetLedger } from "./ledger";
 import { checkBudgetPolicy, crossedThreshold, ratioRemaining } from "./policy";
+import { logRecord } from "../state";
+import type { HiveState } from "../../core/types";
 import type {
   BudgetBlock,
   BudgetResource,
@@ -84,6 +86,48 @@ export const WARNING_REMAINING_RATIO = 0.20;
 
 /** T3.3 — exhaustion fires at or below this remaining ratio. */
 export const EXHAUSTED_REMAINING_RATIO = 0;
+
+/**
+ * Safely call `sessionManager.appendCustomMessageEntry(...)` and log any
+ * swallowed error to the conversation log. The audit (HTML §5 B6) noted
+ * that events.ts's two hint-write try/catch blocks silently dropped
+ * sustained failures (e.g. permission denied, disk full, locked file).
+ * Silent loss is worse than a noisy log line — the worker-visible hint
+ * is part of the safety contract, and the operator deserves a record
+ * that the hint failed to deliver.
+ *
+ * On success: returns true (append was called).
+ * On failure: logs a warning record via `logRecord(state, ...)` and
+ *   returns false. The error message is included so the dashboard
+ *   timeline can surface the underlying cause.
+ * On null sessionManager: returns false without logging (defensive).
+ */
+export function safeAppendCustomMessageEntry(
+  state: HiveState | undefined,
+  sessionManager: { appendCustomMessageEntry: (customType: string, content: string, displayText: boolean, details: Record<string, unknown>) => unknown } | null | undefined,
+  customType: string,
+  content: string,
+  displayText: boolean,
+  details: Record<string, unknown>,
+): boolean {
+  if (!sessionManager || typeof sessionManager.appendCustomMessageEntry !== "function") return false;
+  try {
+    sessionManager.appendCustomMessageEntry(customType, content, displayText, details);
+    return true;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (state) {
+      logRecord(state, {
+        from: "Budget",
+        type: "warning",
+        message: `budget hint write failed (${customType}): ${message}`,
+        customType,
+        error: message,
+      });
+    }
+    return false;
+  }
+}
 
 /**
  * Safely invoke `session.abort()` and ensure a rejected Promise cannot
@@ -248,6 +292,7 @@ export function installBudgetEventHooks(
   policy: WorkerBudgetPolicy,
   sessionManager: SessionManager,
   controller: AbortController,
+  state?: HiveState,
 ): () => void {
   return session.subscribe((event: unknown) => {
     if (!event || typeof event !== "object" || !("type" in event)) return;
@@ -285,7 +330,7 @@ export function installBudgetEventHooks(
       // structured strategies land. Kept as an explicit branch so the
       // structured-strategy path has a place to diverge.
       if (policy.strategy === undefined) {
-        evaluateThresholds(session, ledger, policy, sessionManager, controller, cumulative, ledger.agentSlug);
+        evaluateThresholds(session, ledger, policy, sessionManager, controller, cumulative, ledger.agentSlug, state);
       }
 
       return;
@@ -343,6 +388,7 @@ export function evaluateThresholds(
   controller: AbortController,
   cumulative: { tokens: number; costUsd: number; runs: number },
   workerSlug: string,
+  state?: HiveState,
 ): void {
   const usage = computeWorkerAndTeamUsage(ledger, sessionManager);
 
@@ -384,24 +430,25 @@ export function evaluateThresholds(
     ) {
       ledger.warnedKeys.add(key);
       ledger.markExhaustion(cumulative, controller.signal);
-      // Worker-visible hint (best-effort; abort is the load-bearing step).
-      try {
-        sessionManager.appendCustomMessageEntry(
-          BUDGET_EXHAUSTED_CUSTOM_TYPE,
-          `${pair.scope === "worker" ? "Worker" : "Team"} ${pair.resource === "tokens" ? "tokens" : "cost"} budget exhausted (${pair.used}/${pair.cap}).`,
-          true,
-          {
-            scope: pair.scope,
-            resource: pair.resource,
-            remaining: 0,
-            cap: pair.cap,
-            interventionAvailable: false,
-          },
-        );
-      } catch {
-        // best-effort — the abort and ledger write are the load-bearing
-        // side effects; the message entry is the worker-visible hint.
-      }
+      // Worker-visible hint. The abort + ledger writes are the
+      // load-bearing side effects; the message entry is the
+      // worker-visible hint. `safeAppendCustomMessageEntry` swallows
+      // any write failure but logs it so a sustained permission/disk
+      // problem is visible in the conversation log (audit B6).
+      safeAppendCustomMessageEntry(
+        state,
+        sessionManager,
+        BUDGET_EXHAUSTED_CUSTOM_TYPE,
+        `${pair.scope === "worker" ? "Worker" : "Team"} ${pair.resource === "tokens" ? "tokens" : "cost"} budget exhausted (${pair.used}/${pair.cap}).`,
+        true,
+        {
+          scope: pair.scope,
+          resource: pair.resource,
+          remaining: 0,
+          cap: pair.cap,
+          interventionAvailable: false,
+        },
+      );
       // Abort fires synchronously here. `session.abort()` resolves to a
       // Promise; we don't await — the canonical "Pi will not continue
       // automatically" event (`agent_settled`) is what fires after, and
@@ -426,23 +473,22 @@ export function evaluateThresholds(
       ledger.warnedKeys.add(key);
       ledger.markWarning(cumulative, controller.signal);
       const percentUsed = Math.max(0, Math.min(100, (1 - ratio) * 100));
-      try {
-        sessionManager.appendCustomMessageEntry(
-          BUDGET_WARNING_CUSTOM_TYPE,
-          buildWarningMessage(pair.scope, pair.resource, percentUsed),
-          true,
-          {
-            scope: pair.scope,
-            resource: pair.resource,
-            remaining: Math.max(0, pair.cap - pair.used),
-            cap: pair.cap,
-            interventionAvailable: true,
-          },
-        );
-      } catch {
-        // best-effort — the ledger write is the durable record; the
-        // message entry is the worker-visible hint.
-      }
+      // Worker-visible warning hint. See comment above on
+      // safeAppendCustomMessageEntry for the audit B6 rationale.
+      safeAppendCustomMessageEntry(
+        state,
+        sessionManager,
+        BUDGET_WARNING_CUSTOM_TYPE,
+        buildWarningMessage(pair.scope, pair.resource, percentUsed),
+        true,
+        {
+          scope: pair.scope,
+          resource: pair.resource,
+          remaining: Math.max(0, pair.cap - pair.used),
+          cap: pair.cap,
+          interventionAvailable: true,
+        },
+      );
     }
   }
 }

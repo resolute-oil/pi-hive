@@ -524,7 +524,7 @@ export async function createBudgetAwareSession(
   // (consistent with the plan §2.4 example) and exposed via the result so
   // callers can abort it when a parent signal fires.
   const controller = new AbortController();
-  installBudgetEventHooks(session, ledger, policy, sessionManager, controller);
+  installBudgetEventHooks(session, ledger, policy, sessionManager, controller, state);
 
   // 6. Optional: production wiring — wire the F3 tool_call guard onto
   // `session.agent.beforeToolCall`. Tests leave this off (the 17 tests pin
