@@ -268,3 +268,81 @@ test("requestSnapshot writes a cooperative-snapshot ledger entry and invokes bra
   assert.equal(call.data.label, "pre-cleanup", "label recorded on the entry");
   assert.equal(call.data.snapshotId, "snap-42", "snapshotId recorded on the entry");
 });
+
+// ---------------------------------------------------------------------------
+// B3: requestEndSession / requestSnapshot distinguish "no_runtime" from
+// "session_unavailable" so the dashboard can tell whether the worker has
+// not been dispatched yet vs. the worker's session is in an unexpected
+// state. requestCompaction already returns the distinct "compact_failed"
+// reason + error string — bring the other two into the same envelope.
+// ---------------------------------------------------------------------------
+
+test("requestEndSession: no runtime returns {ok: false, reason: 'no_runtime'} (existing)", async () => {
+  const state = makeState();  // empty runtimes map
+  const result = await requestEndSession(state, "builder", { reason: "task complete" });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "no_runtime");
+});
+
+test("requestEndSession: runtime exists but session lacks abort method returns distinct reason (B3)", async () => {
+  const runtime = makeRuntime();  // default fake session IS abortable, so unset it
+  (runtime as { session: unknown }).session = undefined;
+  const state = makeState(runtime);
+  const result = await requestEndSession(state, "builder", { reason: "task complete" });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "session_unavailable", "session-unavailable must not be classified as no_runtime");
+  assert.ok(result.error && /abortable/i.test(result.error), "error string describes the missing capability");
+});
+
+test("requestSnapshot: no runtime returns {ok: false, reason: 'no_runtime'} (existing)", async () => {
+  const state = makeState();  // empty runtimes map
+  const result = await requestSnapshot(state, "builder", { label: "pre-cleanup" });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "no_runtime");
+});
+
+test("requestSnapshot: runtime exists but sessionManager lacks branchWithSummary returns distinct reason (B3)", async () => {
+  const runtime = makeRuntime();
+  (runtime as { session: unknown }).session = undefined;
+  const state = makeState(runtime);
+  const result = await requestSnapshot(state, "builder", { label: "pre-cleanup" });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "session_unavailable", "session-unavailable must not be classified as no_runtime");
+  assert.ok(result.error && /snapshotable/i.test(result.error), "error string describes the missing capability");
+});
+
+// ── B11: cooperative tools refuse when the worker's runtime has settled.
+// The audit (HTML §5 B11) flagged that requestCompaction and requestEndSession
+// invoked the SDK without checking the worker's lifecycle state. The SDK's
+// compact()/abort() do serialize concurrent calls (verified by reading
+// agent-session.js: `compact` disconnects + aborts the current agent first;
+// `abort` is idempotent via waitForIdle), but the cooperative tools should
+// still refuse when the runtime is already in a terminal state — there's
+// nothing left to compact or end, and the cooperative ledger entry would
+// just confuse the dashboard timeline.
+// ---------------------------------------------------------------------------
+
+test("B11: requestCompaction returns session_settled when runtime.status === 'done'", async () => {
+  const session = makeFakeSession();
+  const runtime = makeRuntime({ session, runCount: 1 });
+  runtime.status = "done";
+  const state = makeState(runtime);
+
+  const result = await requestCompaction(state, "builder", { notes: "compact requested" });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "session_settled", "compaction refuses on settled runtime");
+  assert.ok(result.error && /already settled/i.test(result.error));
+  assert.equal(session.compactCalls.length, 0, "session.compact() must NOT be called on settled runtime");
+});
+
+test("B11: requestEndSession returns session_settled when runtime.status === 'error'", async () => {
+  const session = makeFakeSession();
+  const runtime = makeRuntime({ session, runCount: 1 });
+  runtime.status = "error";
+  const state = makeState(runtime);
+
+  const result = await requestEndSession(state, "builder", { reason: "task complete" });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "session_settled");
+  assert.equal(session.abortCalls, 0, "session.abort() must NOT be called on error-state runtime");
+});

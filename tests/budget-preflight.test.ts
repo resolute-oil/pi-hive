@@ -202,7 +202,7 @@ test("runBudgetPreflight: returns the documented { policy, depth } shape (no led
   assert.equal(typeof result.depth, "number", "depth is a number");
   assert.equal(result.depth, 1, "depth = currentDelegationDepth() + 1 = 0 + 1 at the top level");
   // The pre-flight intentionally does NOT return a ledger — the caller restores
-  // its own ledger against the WORKER's SessionManager (see delegateAgent §2.4).
+  // its own ledger against the WORKER's SessionManager (see createBudgetAwareSession §2.4).
   assert.equal((result as { ledger?: unknown }).ledger, undefined, "no `ledger` field — callers restore their own");
 });
 

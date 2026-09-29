@@ -55,44 +55,55 @@ export interface BudgetRemaining {
 }
 
 // ---------------------------------------------------------------------------
-// New-shape readers — pull caps from `settings.budgets.*` (with the legacy
-// `settings.workerBudgets` / `settings.teamBudgets` keys kept ONLY for
-// backward compat with in-flight state objects; the Wave 1B config
-// validator no longer accepts these keys in YAML). Wave 5 / F9's gate
-// check requires this fallback to be empty, since nothing in the test
-// suite sets the legacy keys any more. Kept here as a no-op for code
-// clarity; the cleanup wave does not add or remove this branch.
+// New-shape readers — pull caps from `settings.budgets.*`. The Wave 1B
+// hard cutover (G-16) removed the legacy `settings.workerBudgets` /
+// `settings.teamBudgets` keys from the YAML validator. Verified via grep:
+// these fields are no longer read anywhere in src/ or tests/. Dead-code
+// removal (audit C2).
 // ---------------------------------------------------------------------------
 
 interface NewShapeSettings {
   budgets?: ResolvedBudgetsConfig;
-  workerBudgets?: {
-    maxRuns?: number;
-    tokenBudget?: number;
-    tokenBudgetScope?: "input_output" | "all";
-    costBudgetUsd?: number;
-    maxDelegationDepth?: number;
-    distillerRuns?: number;
-    timeoutMs?: number;
-  };
-  teamBudgets?: {
-    maxRuns?: number;
-    tokenBudget?: number;
-    tokenBudgetScope?: "input_output" | "all";
-    costBudgetUsd?: number;
+}
+
+/**
+ * Resolve the `settings.budgets:` block from `state.config` with the
+ * cast performed once. The audit (HTML §5 B5) flagged three call sites
+ * duplicating `state.config?.settings as unknown as { budgets?: ... }` —
+ * worker-tools.ts:229, display.ts:87 (readWorkerBlock), and display.ts:94
+ * (readTeamBlock). This helper centralizes the cast.
+ *
+ * The return type preserves the legacy shape (`perWorker` is the
+ * resolved runtime shape, `perTeam` is the pre-resolve `TeamBudgetConfig`)
+ * because that's what the three duplicated casts produced. The internal
+ * window-shape mismatch between `BudgetWindowSpec` (core/types) and
+ * `BudgetWindow` (budget/types) is handled by a single `as unknown as`
+ * here instead of being repeated at each call site — same lossy
+ * semantics, one place to change later if the types are unified.
+ */
+export function getBudgetsConfig(state: HiveState): {
+  perWorker: ResolvedWorkerBudgets | undefined;
+  perTeam: import("../../core/types").TeamBudgetConfig | undefined;
+} {
+  const settings = state.config?.settings as unknown as NewShapeSettings | undefined;
+  return {
+    perWorker: settings?.budgets?.perWorker,
+    perTeam: settings?.budgets?.perTeam as import("../../core/types").TeamBudgetConfig | undefined,
   };
 }
 
 function readWorkerBlock(state: HiveState, runtime: AgentRuntime): ResolvedWorkerBudgets {
-  const settings = state.config?.settings as unknown as NewShapeSettings | undefined;
-  const globalWorker = settings?.budgets?.perWorker ?? {};
+  const globalWorker = getBudgetsConfig(state).perWorker ?? {};
   const agentBlock = (runtime.config as unknown as { budgets?: ResolvedWorkerBudgets }).budgets ?? {};
   return { ...globalWorker, ...agentBlock };
 }
 
 function readTeamBlock(state: HiveState): ResolvedTeamBudgets {
-  const settings = state.config?.settings as unknown as NewShapeSettings | undefined;
-  return settings?.budgets?.perTeam ?? {};
+  // The budgets block's perTeam is a pre-resolve TeamBudgetConfig but
+  // the runtime wants ResolvedTeamBudgets. The structural compatibility
+  // is close enough (both are { tokens?, costUsd?, runs? }) that a
+  // single cast here preserves the legacy behavior of readTeamBlock.
+  return (getBudgetsConfig(state).perTeam ?? {}) as unknown as ResolvedTeamBudgets;
 }
 
 // ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ import { agentSlug, configuredChildAgents, flatAgentConfig, normalizeAgentType, 
 import { validateAgentTypes, validateHiveConfigShape } from "./schema";
 import { CONFIG_LIMITS, validateConfigSize, validateRawConfig } from "./config-validation";
 import { resolveConfiguredPath, resolveProjectPath } from "./safe-path";
+import { validateBudgetsFrontmatter } from "../agents/frontmatter";
 
 // Read an agent's .md frontmatter and copy model/thinking onto the config node
 // when the config itself does not set them. The config tree (from hive-config.
@@ -90,25 +91,36 @@ function enrichFromFrontmatter(cwd: string, agent: AgentConfig | undefined): voi
   // model/thinking) but must be validated at the config layer, so copy them
   // onto the config node whenever the node itself does not already set them.
   const needsEnrich = !agent.slug || !agent.model || !agent.thinking || agent.agentType === undefined || agent.stages === undefined || agent.network === undefined || agent.commit === undefined;
-  if (agent.path && needsEnrich) {
+  if (agent.path) {
     const promptPath = resolveConfiguredPath(cwd, agent.path, agent.allowOutsideProject === true);
     const raw = promptPath ? safeRead(promptPath.canonicalPath) : "";
     if (raw) {
       const { attrs } = parseFrontmatter(raw);
-      if (!agent.slug && attrs.slug) agent.slug = slug(String(attrs.slug));
-      if (!agent.model && attrs.model) agent.model = String(attrs.model).trim();
-      if (!agent.thinking && attrs.thinking) agent.thinking = String(attrs.thinking).trim();
-      if (agent.agentType === undefined) agent.agentType = normalizeAgentType(attrs.agentType) as AgentConfig["agentType"];
-      if (agent.stages === undefined) agent.stages = normalizePlanStages(attrs.stages) as AgentConfig["stages"];
-      // `attrs.network` is `unknown` (frontmatter is JSON-y), so the raw value
-      // passes through unchecked here — the schema validator at schema.ts:111
-      // (`.network must be true or false when provided`) catches non-booleans
-      // such as `network: yes`. We deliberately do NOT coerce with Boolean(),
-      // which would silently turn `"yes"` into `true` and bypass that check.
-      if (agent.network === undefined && attrs.network !== undefined) {
-        agent.network = attrs.network as unknown as boolean;
+      // F6 wire-up: frontmatter `budgets:` and legacy `governance:*` keys must
+      // surface as a hard config error, not a silent no-op. Mirrors the
+      // config-layer validator at src/core/config-validation.ts:185 for
+      // `settings.budgets:`. Runs unconditionally whenever the agent has a
+      // path so legacy keys are caught even when `needsEnrich` is false
+      // (e.g. model/thinking/agent-type are all already set inline in the
+      // YAML block, but a stray `governance:` in frontmatter still needs to
+      // surface as an error).
+      validateBudgetsFrontmatter(attrs as Record<string, unknown>, agent.path || agent.name || agent.slug || "agent.md");
+      if (needsEnrich) {
+        if (!agent.slug && attrs.slug) agent.slug = slug(String(attrs.slug));
+        if (!agent.model && attrs.model) agent.model = String(attrs.model).trim();
+        if (!agent.thinking && attrs.thinking) agent.thinking = String(attrs.thinking).trim();
+        if (agent.agentType === undefined) agent.agentType = normalizeAgentType(attrs.agentType) as AgentConfig["agentType"];
+        if (agent.stages === undefined) agent.stages = normalizePlanStages(attrs.stages) as AgentConfig["stages"];
+        // `attrs.network` is `unknown` (frontmatter is JSON-y), so the raw value
+        // passes through unchecked here — the schema validator at schema.ts:111
+        // (`.network must be true or false when provided`) catches non-booleans
+        // such as `network: yes`. We deliberately do NOT coerce with Boolean(),
+        // which would silently turn `"yes"` into `true` and bypass that check.
+        if (agent.network === undefined && attrs.network !== undefined) {
+          agent.network = attrs.network as unknown as boolean;
+        }
+        if (agent.commit === undefined) agent.commit = normalizeCommit(attrs.commit);
       }
-      if (agent.commit === undefined) agent.commit = normalizeCommit(attrs.commit);
     }
   }
   if (agent.stages !== undefined) agent.stages = normalizePlanStages(agent.stages) as AgentConfig["stages"];

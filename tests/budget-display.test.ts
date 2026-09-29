@@ -29,6 +29,7 @@ import { test } from "node:test";
 import {
   budgetRemaining,
   effectiveWorkerGovernance,
+  getBudgetsConfig,
 } from "../src/engine/budget/display.ts";
 import type { AgentRuntime, HiveState } from "../src/core/types.ts";
 
@@ -326,4 +327,43 @@ test("budgetRemaining: tokens / cost / runs compute independently — partial sp
   assert.equal(result.team.tokens, 9500, "team.tokens: 10000 - (200 + 300)");
   assert.equal(result.team.costUsd, 49.25, "team.costUsd: 50 - (0.5 + 0.25)");
   assert.equal(result.team.runs, 18, "team.runs: 20 - (1 + 1)");
+});
+
+// ── B5: getBudgetsConfig(state) centralizes the duplicated
+//     `state.config?.settings as unknown as { budgets?: ... }` cast.
+//     Three call sites in worker-tools.ts and display.ts used to repeat
+//     this cast; the helper returns the cast-once value.
+// ---------------------------------------------------------------------------
+
+test("getBudgetsConfig: returns perWorker + perTeam from settings.budgets when present", () => {
+  const state = makeState({
+    perWorker: { tokens: 100, costUsd: 5, runs: 3 },
+    perTeam: { tokens: 1000, costUsd: 50, runs: 20 },
+  });
+  const result = getBudgetsConfig(state);
+  assert.deepEqual(result.perWorker, {
+    tokens: { resource: "tokens", cap: 100 },
+    costUsd: { resource: "costUsd", cap: 5 },
+    runs: { resource: "runs", cap: 3 },
+  });
+  assert.deepEqual(result.perTeam, {
+    tokens: { resource: "tokens", cap: 1000 },
+    costUsd: { resource: "costUsd", cap: 50 },
+    runs: { resource: "runs", cap: 20 },
+  });
+});
+
+test("getBudgetsConfig: returns empty objects when the budgets block exists but is unpopulated", () => {
+  const state = makeState();  // default: empty perWorker/perTeam blocks present
+  const result = getBudgetsConfig(state);
+  assert.deepEqual(result.perWorker, {}, "perWorker is the empty object the budgets block carries");
+  assert.deepEqual(result.perTeam, {}, "perTeam is the empty object the budgets block carries");
+});
+
+test("getBudgetsConfig: returns undefined when state.config is missing entirely", () => {
+  const state = makeState();
+  state.config = null;
+  const result = getBudgetsConfig(state);
+  assert.equal(result.perWorker, undefined);
+  assert.equal(result.perTeam, undefined);
 });

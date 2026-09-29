@@ -24,25 +24,32 @@ The new design makes the cap the cap: the only place tokens/cost are sourced is 
 
 ## Lifecycle
 
-The budget hooks attach in `delegateAgent` (`src/engine/budget/worker-tools.ts`) and detach when the session disposes or the operator calls the unsubscribe returned by `installBudgetEventHooks`.
+The budget hooks attach in `createBudgetAwareSession` (`src/engine/budget/worker-tools.ts`) — the F2 spine called by `dispatchAgent` — and detach when the session disposes or the operator calls the unsubscribe returned by `installBudgetEventHooks`.
 
 ```
-delegateAgent(agentName, task, { fresh? }, ctx)
+createBudgetAwareSession(state, agentName, { fresh? }, ctx, deps)
   │
   ├─ 1. resolveWorkerBudgetPolicy(state, agentName)  → WorkerBudgetPolicy
   ├─ 2. runBudgetPreflight(...)                      → throws BudgetExhaustedError on block
   │       │
   │       └─ checkBudgetPolicy(ledger, policy, branch, depth)
   ├─ 3. SessionManager.create(cwd) | .continueRecent(cwd) | .open(path)
-  ├─ 4. createAgentSession({ sessionManager, cwd })
-  ├─ 5. BudgetLedger.restore(sessionManager, agentSlug, policy, ctx.signal)
+  ├─ 4. BudgetLedger.restore(sessionManager, agentSlug, policy, ctx.signal)
   │       │
   │       └─ walks getBranch(), filters customType="pi-hive-budget-ledger",
   │          takes the latest entry for this agentSlug (or zeros for fresh)
+  ├─ 5. createAgentSession({ sessionManager, cwd, ledger, ... })  via deps.createSession
+  │       │
+  │       └─ production deps.createSession adds model/tools/customTools/
+  │          resourceLoader and merges the F5 worker-only tool set
   ├─ 6. installBudgetEventHooks(session, ledger, policy, sessionManager, controller)
   │       │
   │       └─ subscribes to the session; handler dispatches on event.type
-  └─ 7. returns DelegateAgentResult { sessionId, session, ledger, controller }
+  ├─ 7. if deps.installWorkerHooks: installWorkerBudgetHooks({ session,
+  │       sessionManager, policy, ledger, controller, currentDelegationDepth })
+  │       │
+  │       └─ wires createBudgetToolCallGuard onto session.agent.beforeToolCall
+  └─ 8. returns CreateBudgetAwareSessionResult { sessionId, session, sessionManager, ledger, controller }
 ```
 
 ### Event hook contract (`src/engine/budget/events.ts`)
@@ -171,7 +178,7 @@ The F7 invariants (`tests/budget-races.test.ts`) pin the load-bearing guarantees
 The F8 invariants (`tests/budget-reload.test.ts`) pin that the ledger survives `/reload`, `/tree`, and `/fork`:
 
 - **T8.1 — `/reload` re-derives the ledger from session state.** After reload, `BudgetLedger.restore` walks the branch from scratch and reconstructs cumulative spend from the latest `CustomEntry`. The in-memory `warnedKeys` Set is empty after reload (warnings can re-fire), but the throttling state (`lastSnapshottedTokens` etc.) is re-seeded from the branch so a reload does NOT immediately re-write on the next `message_end`.
-- **T8.2 — pre-reload `BudgetExhaustedError` blocks post-reload.** The `BudgetExhaustedError` (duck-typed via `error.name`) is surfaced to the caller of `delegateAgent`; a reload between the block and the next attempt does not unblock it because the ledger persists the cumulative spend.
+- **T8.2 — pre-reload `BudgetExhaustedError` blocks post-reload.** The `BudgetExhaustedError` (duck-typed via `error.name`) is surfaced to the caller of `createBudgetAwareSession`; a reload between the block and the next attempt does not unblock it because the ledger persists the cumulative spend.
 - **T8.3 — paused session resumes after `/reload`.** `resumeWorkerSession` re-attaches `installBudgetEventHooks` on the existing session reference. Fresh listeners consult `getSessionStats()` on each event, so any `message_end` fired after resume reads the current authoritative totals.
 - **T8.4 — audit closure-captured state.** No mutable counters in `installBudgetEventHooks`. The factory closes over the `ledger` and `policy` parameters; tests assert the closures don't capture module-level state.
 - **T8.5 — `/tree` re-derives from new branch (G-11).** Switching to a tree branch re-runs `BudgetLedger.restore` against the new branch. If the new branch has no matching entries, the ledger starts at zero (matches the "new branch starts fresh" intent).
@@ -197,7 +204,7 @@ The invariants above are pinned by dedicated test files. Run them with `just tes
 | `tests/budget-reload.test.ts` | T8.1–T8.6 — reload-stable ledger across `/reload`, `/tree`, `/fork`. |
 | `tests/budget-strategy-resolver.test.ts` | C5 placeholder: `resolveWorkerBudgetStrategy` always returns `undefined`; `strategyRequestsWrapUp` / `strategyRequestsCompactOnExhaustion` always return `false`. |
 | `tests/budget-tool-call-wiring.test.ts` | `createBudgetToolCallGuard` end-to-end: blocks the four mutating tools when exhausted, passes through everything else, returns `BudgetBlock` JSON in the `reason`. |
-| `tests/budget-worker-tools.test.ts` | `delegateAgent` spine: pre-flight + open + restore + install hooks + return shape; dependency-injection seams for `sessionManagerFactory` and `createSession`. |
+| `tests/budget-worker-tools.test.ts` | `createBudgetAwareSession` spine: pre-flight + open + restore + install hooks + return shape; dependency-injection seams for `sessionManagerFactory`, `createSession`, `installWorkerHooks`. |
 | `tests/cooperative-eol.test.ts` | The three cooperative tools: `requestCompaction`, `requestEndSession`, `requestSnapshot` — write `cooperative-*` ledger entry BEFORE invoking the SDK primitive. |
 | `tests/config-schema.test.ts` | The typebox `BudgetCapSchema` discriminated union (T6.7); v1 flat keys rejected; `cost-usd.window.kind: rolling` requires `duration`; `all-time` rejects `duration`. |
 
@@ -302,5 +309,5 @@ const respawn = await respawnWorkerSession({ agent: "engine-coder", reason: "end
 
 - **Schema template (canonical).** [`tmp/budget-config-v2-template.md`](../tmp/budget-config-v2-template.md) — the complete reference for `settings.budgets:` and frontmatter `budgets:` blocks, including `window:` object semantics and the runtime-flat-string → YAML-object mapping.
 - **Migration from v1.** [`docs/migrations/budget-config-v2.md`](migrations/budget-config-v2.md) — the side-by-side v1 → v2 examples, manual fix checklist, and rollback options.
-- **Source code.** `src/engine/budget/` — `types.ts` (data contracts), `ledger.ts` (`BudgetLedger` class), `policy.ts` (`checkBudgetPolicy`, `teamUsage`, helpers), `events.ts` (`installBudgetEventHooks`, `createBudgetToolCallGuard`), `worker-tools.ts` (operator commands + cooperative tools + `delegateAgent` + `runBudgetPreflight`), `strategy.ts` (C5 placeholder), `window-resolver.ts` (`resolveWindow` — the object→string seaming layer), `display.ts` (legacy v1 contract shims for TUI consumers).
+- **Source code.** `src/engine/budget/` — `types.ts` (data contracts), `ledger.ts` (`BudgetLedger` class), `policy.ts` (`checkBudgetPolicy`, `teamUsage`, helpers), `events.ts` (`installBudgetEventHooks`, `createBudgetToolCallGuard`), `worker-tools.ts` (operator commands + cooperative tools + `createBudgetAwareSession` + `runBudgetPreflight`), `strategy.ts` (C5 placeholder), `window-resolver.ts` (`resolveWindow` — the object→string seaming layer), `display.ts` (legacy v1 contract shims for TUI consumers).
 - **Authoritative spec.** [`.worktrees/review-budget-redesign/docs/reviews/28-09-2026-budget-review/04-refactor-plan.md`](../../.worktrees/review-budget-redesign/docs/reviews/28-09-2026-budget-review/04-refactor-plan.md) — the original refactor plan. §2.6 covers the mid-run handler, §2.7 the end-of-run, §2.8 the operator commands, §3 the workflow end-to-end, §6 the open risks (G-01..G-29) that motivated the design.

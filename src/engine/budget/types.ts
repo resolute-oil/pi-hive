@@ -18,7 +18,7 @@
  * payloads can be discriminated by kind without a schema change.
  */
 
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { BudgetLedger } from "./ledger";
 
 // ---------------------------------------------------------------------------
@@ -43,7 +43,7 @@ export type UsageKey = "input" | "output" | "cacheRead" | "cacheWrite" | "reason
 
 /**
  * Flat-string window consumed by the F1 runtime layer (BudgetLedger,
- * checkBudgetPolicy, installBudgetEventHooks, delegateAgent).
+ * checkBudgetPolicy, installBudgetEventHooks, createBudgetAwareSession).
  *
  * Contract-drift reconciliation (Wave 2 / F2):
  *
@@ -87,13 +87,50 @@ export interface DepthCap {
 export type BudgetCap = TokensCap | CostUsdCap | RunsCap | DepthCap;
 
 // ---------------------------------------------------------------------------
-// §2.13 C5 — Structured strategies. PLACEHOLDER ONLY; v3 unless user overrides.
+// §2.13 C5 — Structured strategies (full implementation).
+//
+// Source of truth: docs/reviews/28-09-2026-budget-review/04-refactor-plan.md
+//   §2.13 C5 (structured strategies) — decouples warning behavior from EOL
+//          behavior; extensible without breaking changes.
+//
+// Resolved shape (always populated; defaults applied when absent in config):
+//   onApproachingLimit: { action: "wrap-up" | "compact" | "none", threshold?, hint? }
+//   onExhaustion:       { action: "compact" | "abort" | "none", customInstructions? }
+//   summary:            { maxTokens? }
+//
+// Field names mirror kebab-case YAML via auto-camelization
+// (`on-approaching-limit` → `onApproachingLimit`).
 // ---------------------------------------------------------------------------
 
-/** TODO C5: deferred to v3 unless user overrides. */
+export type ApproachingLimitAction = "wrap-up" | "compact" | "none";
+export type ExhaustionAction = "compact" | "abort" | "none";
+
+/** Resolved approaching-limit block. */
+export interface ResolvedApproachingLimitStrategy {
+  action: ApproachingLimitAction;
+  /** Fraction in [0.0, 1.0]; default 0.20 (i.e. 20% remaining). */
+  threshold: number;
+  /** Optional prompt hint surfaced to the worker when the threshold is crossed. */
+  hint?: string;
+}
+
+/** Resolved exhaustion block. */
+export interface ResolvedExhaustionStrategy {
+  action: ExhaustionAction;
+  /** Only honored when `action: compact`; prepended to the /compact prompt. */
+  customInstructions?: string;
+}
+
+/** Resolved summary block (tuning for the `summarize_progress` tool). */
+export interface ResolvedSummaryStrategy {
+  /** Per-call cap for `notes:`; default 2000 tokens. */
+  maxTokens: number;
+}
+
 export interface WorkerBudgetStrategy {
-  // TODO C5: deferred to v3 unless user overrides
-  readonly _placeholder: never;
+  onApproachingLimit: ResolvedApproachingLimitStrategy;
+  onExhaustion: ResolvedExhaustionStrategy;
+  summary: ResolvedSummaryStrategy;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,17 +250,18 @@ export interface BudgetBlock {
   limit: BudgetLimit;
 }
 
-/** Thrown by `delegateAgent` to refuse per Pi docs §2 ("Throw from execute() to produce a failed tool result"). */
-export class BudgetExhaustedError extends Error {
-  constructor(
-    public readonly reason: string,
-    public readonly scope: BudgetScope,
-    public readonly resource: BudgetResource,
-  ) {
-    super(reason);
-    this.name = "BudgetExhaustedError";
-  }
-}
+/**
+ * Budget violation shape thrown by `createBudgetAwareSession` and
+ * `runBudgetPreflight`. The runtime path duck-types this — it builds the
+ * error ad hoc with `error.name = "BudgetExhaustedError"` and attaches
+ * `.scope` and `.resource`. No `instanceof BudgetExhaustedError` checks
+ * exist; consumers should compare `error.name === "BudgetExhaustedError"`.
+ *
+ * The `BudgetExhaustedError` CLASS that previously lived here was removed
+ * in audit C1: never instantiated, only documented. The duck-typed
+ * envelope is what callers actually use. See `BUDGET_EXHAUSTED_ERROR_NAME`
+ * in `worker-tools.ts` for the canonical sentinel string.
+ */
 
 // ---------------------------------------------------------------------------
 // Team-usage aggregation across the branch.
@@ -278,19 +316,21 @@ export interface RequestCompactionResult {
   compacted: boolean;
   estimatedTokens: number;
   limit: number;
-  reason?: "no_runtime" | "over_cap" | "compact_failed";
+  reason?: "no_runtime" | "over_cap" | "compact_failed" | "session_unavailable" | "session_settled";
   error?: string;
 }
 
 export interface RequestEndSessionResult {
   ok: boolean;
-  reason?: "no_runtime";
+  reason?: "no_runtime" | "session_unavailable" | "session_settled";
+  error?: string;
 }
 
 export interface RequestSnapshotResult {
   ok: boolean;
   snapshotId?: string;
-  reason?: "no_runtime";
+  reason?: "no_runtime" | "session_unavailable";
+  error?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -301,14 +341,16 @@ export interface RequestSnapshotResult {
 // §2.4 / §2.6 — Return shapes from the new delegation flow.
 // ---------------------------------------------------------------------------
 
-export interface DelegateAgentResult {
+export interface CreateBudgetAwareSessionResult {
   sessionId: string;
   session: AgentSession;
+  /** Worker's SessionManager — exposed so callers can thread it through lifecycle. */
+  sessionManager: SessionManager;
   ledger: BudgetLedger;
   /**
-   * Wave 2 / F2 — controller owned by `delegateAgent` and exposed here so
-   * callers can abort the session mid-run (e.g., parent-tool abort). The
-   * signal is threaded into every ledger write per plan §2.12.
+   * Wave 2 / F2 — controller owned by `createBudgetAwareSession` and exposed
+   * here so callers can abort the session mid-run (e.g., parent-tool abort).
+   * The signal is threaded into every ledger write per plan §2.12.
    */
   controller: AbortController;
 }

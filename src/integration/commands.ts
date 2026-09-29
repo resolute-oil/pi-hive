@@ -8,6 +8,29 @@ import { renderHiveDoctor } from "../engine/doctor";
 import { dashboardUrl, ensureDashboard, readDaemonToken, stopDashboard } from "../engine/dashboard";
 import * as openspec from "../engine/openspec";
 import { truncateMiddle } from "../core/utils";
+import { invokeOperatorCommand, OPERATOR_COMMANDS, OperatorCommandError, type OperatorCommandName } from "../engine/budget/operator-commands";
+
+/**
+ * Render an operator command result envelope into a short TUI notification.
+ * The dispatch is a tagged union; we surface the most relevant id per
+ * command shape.
+ */
+function renderOperatorResult(result: import("../engine/budget/operator-commands").OperatorCommandEnvelope, agent: string): string {
+  // RestoreWorkerOutcome is a discriminated union (ok / isError).
+  if ("isError" in result && result.isError) {
+    return `restore ${agent}: ${result.reason}`;
+  }
+  if ("oldSessionId" in result && "newSessionId" in result) {
+    return `respawn ${agent}: old=${result.oldSessionId}, new=${result.newSessionId}`;
+  }
+  if ("branchPath" in result) {
+    return `snapshot ${agent}: branch=${result.branchPath ?? "?"}, session=${result.sessionId}`;
+  }
+  if ("sessionId" in result) {
+    return `ok ${agent}: session=${result.sessionId}`;
+  }
+  return `ok ${agent}`;
+}
 
 function listChangeIds(cwd: string, api: typeof openspec): string[] {
   return api.listChanges(cwd).map((c) => c.name);
@@ -247,4 +270,51 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: 
       }
     },
   });
+
+  // F5b — operator commands as Pi slash commands. Each takes the agent name as
+  // its first argument; the helper resolves the runtime + ledger + policy and
+  // dispatches to the existing operator function. Errors surface via the
+  // OperatorCommandError envelope (printed to the TUI).
+  for (const op of OPERATOR_COMMANDS) {
+    const cmdName = `hive:worker-${op.name}`;
+    pi.registerCommand(cmdName, {
+      description: `${op.description} (usage: /${cmdName} <agent> [reason])`,
+      handler: async (args: string, ctx: ExtensionContext) => {
+        const trimmed = args.trim();
+        if (!trimmed) {
+          if (ctx.hasUI) ctx.ui.notify(`Usage: /${cmdName} <agent> [reason]`, "warning");
+          return;
+        }
+        const parts = trimmed.split(/\s+/);
+        const agent = parts[0] ?? "";
+        const rest = parts.slice(1);
+        const reason = rest.join(" ").trim() || undefined;
+        try {
+          const result = await invokeOperatorCommand(
+            state,
+            op.name as OperatorCommandName,
+            // RestoreWorkerArgs requires snapshotId; other commands ignore it.
+            // Provide a placeholder so the union type compiles; restore
+            // validates snapshotId explicitly inside `depsForRestore` and
+            // throws OperatorCommandError if missing — so this default is
+            // only reached when the operator name happens to be restore.
+            { agent, reason, snapshotId: "" },
+            ctx,
+          );
+          if (ctx.hasUI) {
+            // Render the result envelope per command shape. The dispatch is
+            // tagged-union; we surface the most relevant id field per command.
+            const summary = renderOperatorResult(result, agent);
+            ctx.ui.notify(summary, "info");
+          }
+        } catch (error) {
+          if (error instanceof OperatorCommandError) {
+            if (ctx.hasUI) ctx.ui.notify(`${op.name} ${agent}: ${error.message}`, "error");
+          } else {
+            throw error;
+          }
+        }
+      },
+    });
+  }
 }

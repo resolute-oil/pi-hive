@@ -23,7 +23,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -38,6 +38,7 @@ import {
 import {
   BUDGET_WARNING_CUSTOM_TYPE,
   createBudgetToolCallGuard,
+  safeAppendCustomMessageEntry,
   installBudgetEventHooks,
 } from "../src/engine/budget/events.ts";
 import type {
@@ -585,7 +586,7 @@ test("createBudgetToolCallGuard: T3.4 blocks 'bash' when budget is exhausted (Bu
   );
 
   // Seed cumulative so checkBudgetPolicy returns a block.
-  ledger.recordEvent("message_end", { tokens: cap, costUsd: 0, runs: 1 }, controller.signal);
+  ledger.recordEvent("message_end", { tokens: cap, costUsd: 0, runs: 1 });
 
   const result = await guard({ toolName: "bash", input: { command: "echo hi" } });
   assert.ok(result, "guard returned a non-undefined result");
@@ -609,7 +610,7 @@ test("createBudgetToolCallGuard: T3.4 blocks edit, write, read; passes through g
   });
   const { ledger, sm } = await makeLedger(policy);
   const controller = new AbortController();
-  ledger.recordEvent("message_end", { tokens: cap, costUsd: 0, runs: 1 }, controller.signal);
+  ledger.recordEvent("message_end", { tokens: cap, costUsd: 0, runs: 1 });
   const guard = createBudgetToolCallGuard(ledger, policy, sm, controller, () => 1);
 
   // The four blocking targets — each must return a block.
@@ -636,7 +637,7 @@ test("createBudgetToolCallGuard: T3.4 returns undefined (allow) when budget is w
   const { ledger, sm } = await makeLedger(policy);
   const controller = new AbortController();
   // Cumulative below cap (100 < 100_000) → no block.
-  ledger.recordEvent("message_end", { tokens: 100, costUsd: 0.01, runs: 1 }, controller.signal);
+  ledger.recordEvent("message_end", { tokens: 100, costUsd: 0.01, runs: 1 });
   const guard = createBudgetToolCallGuard(ledger, policy, sm, controller, () => 1);
 
   const r = await guard({ toolName: "bash", input: {} });
@@ -652,7 +653,7 @@ test("createBudgetToolCallGuard: T3.4 short-circuits when the controller is alre
   controller.abort();
   // Cumulative at the cap — would normally block, but the abort short-circuit
   // lets the in-flight call resolve so the agent can finish settling.
-  ledger.recordEvent("message_end", { tokens: 1_000_000, costUsd: 0, runs: 1 }, controller.signal);
+  ledger.recordEvent("message_end", { tokens: 1_000_000, costUsd: 0, runs: 1 });
   const guard = createBudgetToolCallGuard(ledger, policy, sm, controller, () => 1);
 
   const r = await guard({ toolName: "bash", input: {} });
@@ -685,4 +686,120 @@ test("agent_settled: T4.1 writes a single checkpoint CustomEntry (F4 sole finali
   assert.equal(last.cumulative.tokens, 1234);
   assert.equal(last.cumulative.costUsd, 0.25);
   assert.equal(last.kind, undefined, "no specific kind — sentinel means 'canonical end-of-run'");
+});
+
+// ── B2: rejection-safe session.abort() on the exhaustion path ──────────────
+
+test("message_end: T3.3 session.abort() rejection does not surface as unhandledRejection (B2)", async () => {
+  const cap = 1_000;
+  const policy = makePolicy({
+    tokens: { resource: "tokens", cap },
+  });
+  const { ledger, sm } = await makeLedger(policy);
+  // Session whose abort() returns a rejected Promise — simulates an SDK
+  // teardown step failing after the worker has already exhausted its budget.
+  // Mutate the existing makeSession object so we don't lose the closure that
+  // captures `abortCallCount`.
+  const session = makeSession(makeStats(0, 0));
+  session.abort = (): Promise<void> => {
+    session.abortCallCount += 1;
+    return Promise.reject(new Error("synthetic abort failure"));
+  };
+  installBudgetEventHooks(session, ledger, policy, sm, new AbortController());
+
+  // Watch for unhandled rejections during the exhausted-path emit.
+  const unhandled: unknown[] = [];
+  const handler = (reason: unknown) => unhandled.push(reason);
+  process.on("unhandledRejection", handler);
+  try {
+    session.stats = makeStats(cap, 0);
+    session.emit({ type: "message_end" });
+    // Let the microtask queue drain so the rejection (if any) lands.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(unhandled.length, 0, `unexpected unhandledRejection: ${unhandled.map((r) => (r as Error)?.message ?? String(r)).join("; ")}`);
+    assert.equal(session.abortCallCount, 1, "session.abort() called exactly once despite rejection");
+  } finally {
+    process.off("unhandledRejection", handler);
+  }
+});
+
+// ── B6: safeAppendCustomMessageEntry logs swallowed errors ─────────────
+//
+// The audit (HTML §5 B6) noted that events.ts's two
+// `try { sessionManager.appendCustomMessageEntry(...) } catch { /* ignore */ }`
+// blocks silently swallow sustained write failures (e.g. permission
+// denied, disk full, locked file). The worker-visible hint is part of
+// the safety contract — silent loss is worse than a noisy log line.
+// Extract the try/catch + logRecord pattern into safeAppendCustomMessageEntry.
+// ---------------------------------------------------------------------------
+
+test("safeAppendCustomMessageEntry: when append throws, the error is written to the conversation log (B6)", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-hive-b6-"));
+  const conversationLog = join(cwd, "conversation.jsonl");
+  const sm = {
+    appendCustomMessageEntry: () => {
+      throw new Error("synthetic permission denied");
+    },
+  };
+  const state = {
+    session: { sessionId: "s1", sessionDir: cwd, conversationLog, observabilityLog: join(cwd, "e.jsonl") },
+    config: null,
+  } as any;
+  // Must NOT throw — the helper swallows + logs.
+  safeAppendCustomMessageEntry(state, sm, "budget_warning", "message", true, { scope: "worker", resource: "tokens" });
+  const logContent = readFileSync(conversationLog, "utf-8");
+  assert.match(logContent, /budget hint write failed/i, "log contains the swallowed-error marker");
+  assert.match(logContent, /synthetic permission denied/, "log includes the underlying error message");
+  assert.match(logContent, /"type":"warning"/, "log record is typed 'warning'");
+});
+
+test("safeAppendCustomMessageEntry: when append succeeds, no log line is written", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-hive-b6-ok-"));
+  const conversationLog = join(cwd, "conversation.jsonl");
+  let appended = false;
+  const sm = {
+    appendCustomMessageEntry: () => {
+      appended = true;
+    },
+  };
+  const state = {
+    session: { sessionId: "s1", sessionDir: cwd, conversationLog, observabilityLog: join(cwd, "e.jsonl") },
+    config: null,
+  } as any;
+  safeAppendCustomMessageEntry(state, sm, "budget_warning", "message", true, { scope: "worker" });
+  assert.equal(appended, true, "appendCustomMessageEntry was called");
+  let exists = true;
+  try {
+    readFileSync(conversationLog, "utf-8");
+  } catch {
+    exists = false;
+  }
+  // The log file may or may not exist on success — that's fine. We only assert
+  // that no failure-record was written. If the file exists, it must NOT contain
+  // the failure marker.
+  if (exists) {
+    const content = readFileSync(conversationLog, "utf-8");
+    assert.doesNotMatch(content, /budget hint write failed/i, "no failure record on successful append");
+  }
+});
+
+test("safeAppendCustomMessageEntry: null sessionManager is a no-op (no log, no throw)", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-hive-b6-null-"));
+  const conversationLog = join(cwd, "conversation.jsonl");
+  const state = {
+    session: { sessionId: "s1", sessionDir: cwd, conversationLog, observabilityLog: join(cwd, "e.jsonl") },
+    config: null,
+  } as any;
+  // Must NOT throw.
+  safeAppendCustomMessageEntry(state, null, "budget_warning", "message", true, {});
+  let exists = true;
+  try {
+    readFileSync(conversationLog, "utf-8");
+  } catch {
+    exists = false;
+  }
+  if (exists) {
+    const content = readFileSync(conversationLog, "utf-8");
+    assert.doesNotMatch(content, /budget hint write failed/i, "no failure record on null sessionManager");
+  }
 });

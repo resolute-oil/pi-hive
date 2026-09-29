@@ -79,10 +79,12 @@ export function rejectLegacyGovernanceFrontmatter(attrs: Record<string, unknown>
  * block is absent (the agent inherits the team's defaults).
  */
 export function validateBudgetsFrontmatter(attrs: Record<string, unknown>, label: string): unknown {
-  if (attrs.budgets === undefined) return undefined;
-  // Legacy-key check runs FIRST so the user sees a "rename" message instead of
-  // a generic schema error when they paste old frontmatter next to a new key.
+  // Legacy-key check runs FIRST — even when `budgets:` is absent — so a user
+  // with only legacy keys (no `budgets:` block at all) still surfaces a hard
+  // "rename" message. Without this the early-return below would silently
+  // accept `governance:` / `tokenBudget:` / etc. as a no-op.
   rejectLegacyGovernanceFrontmatter(attrs, label);
+  if (attrs.budgets === undefined) return undefined;
   if (!Value.Check(AgentBudgetsOverrideSchema, attrs.budgets)) {
     const errors = Value.Errors(AgentBudgetsOverrideSchema, attrs.budgets);
     const first = errors[0];

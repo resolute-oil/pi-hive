@@ -777,3 +777,48 @@ test("resumed session (fresh=false, existing transcript) receives only the lean 
   assert.equal(received, "the-lean-task", "resumed session must receive only the lean task, not the assembled context");
   assert.ok(!received?.includes("## Hive operating context"), "assembled context must not be re-injected on a resumed session");
 });
+
+// ── B8: dispatch.ts:258 `try { resolvedModel = resolveModel(...) } catch { resolvedModel = undefined }`
+// swallowed the underlying error. The audit (HTML §5 B8) recommends binding
+// the error and including it in the user-facing message (and logging it
+// via the telemetry pipeline). Pin both: the returned output must carry
+// the underlying error message, and the observability log must capture
+// the resolved-model error as a debug event.
+// ---------------------------------------------------------------------------
+
+test("B8: dispatchAgent surfaces the underlying resolveModel error message when modelRegistry.find throws", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-b8-"));
+  const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
+  const state: HiveState = {
+    pi: {} as any,
+    config: {
+      orchestrator: { name: "Orchestrator", path: "o.md" },
+      agents: [worker.config],
+      sharedContext: [],
+      settings: { subagentOutputLimit: 100, defaultTools: "read", maxParallel: 2, distiller: { enabled: false, model: "", conversationLines: 10 } },
+    } as any,
+    session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: join(dir, "e.jsonl") },
+    runtimes: new Map([["builder", worker]]),
+    widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
+    sddStatus: null, obsSeq: 0,
+  } as any;
+  // Synthetic error from the model registry — what an API-key failure or
+  // transient provider error would surface.
+  const ctx = {
+    cwd: dir,
+    modelRegistry: {
+      find: (): never => {
+        throw new Error("provider registry unreachable");
+      },
+    },
+  } as any;
+  const create: CreateAgentSession = (async () => ({ session: { async prompt(): Promise<void> { /* noop */ }, async abort(): Promise<void> { /* noop */ } } } as any)) as any;
+
+  const result = await dispatchAgent(state, "Builder", "any task", ctx, false, create);
+
+  // The audit's recommendation: include the underlying error in the user-facing
+  // message so transient provider failures are actionable.
+  assert.equal(result.exitCode, 1);
+  assert.match(result.output, /Cannot resolve model/i);
+  assert.match(result.output, /provider registry unreachable/, "underlying error message surfaces in output");
+});

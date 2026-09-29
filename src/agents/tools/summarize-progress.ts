@@ -122,25 +122,25 @@ function estimateTokens(notes: string): number {
 }
 
 /**
- * Resolve the worker's token cap. The legacy `progressSummaryTokenLimit`
- * setting (Wave 0's `WorkerGovernance`) was removed by F9 along with the
- * rest of the legacy budget shape. Falls back to the 2000-token default
- * until the structured-strategy config (C5, deferred to v3) lands.
+ * Resolve the worker's token cap from the structured C5 strategy
+ * (`summary.maxTokens`). Falls back to the 2000-token default when the
+ * structured config is absent or the field is missing.
  */
-function getProgressSummaryTokenLimit(_state: HiveState): number {
-  // TODO C5: lift this into `WorkerBudgetStrategy` once the structured
-  // strategy config lands. Until then we use the constant below.
-  return DEFAULT_PROGRESS_SUMMARY_TOKEN_LIMIT;
+function getProgressSummaryTokenLimit(state: HiveState): number {
+  const strategies = (state.config?.settings?.budgets as { strategies?: { summary?: { maxTokens?: number } } } | undefined)?.strategies;
+  return strategies?.summary?.maxTokens ?? DEFAULT_PROGRESS_SUMMARY_TOKEN_LIMIT;
 }
 
 /**
- * Resolve the caller's effective budget strategy. The structured strategy
- * (C5) is deferred to v3; for now we always return `"default"` since the
- * legacy `governance.budgetStrategy` / `settings.workerBudgets.budgetStrategy`
- * keys were removed by F9.
+ * Resolve the caller's effective budget strategy. C5 (refactor plan §2.13)
+ * makes the strategy a structured shape; the `compact: true` flag on
+ * `summarize_progress` is honored only when `on-exhaustion.action` is
+ * `"compact"`. Returns the named legacy preset when the config matches it,
+ * or a derived label otherwise.
  */
-function resolveStrategy(_state: HiveState, _runtime: AgentRuntime | undefined): "default" | "compact" {
-  return "default";
+function resolveStrategyLabel(state: HiveState, _runtime: AgentRuntime | undefined): "default" | "compact" {
+  const exhaustionAction = (state.config?.settings?.budgets as { strategies?: { onExhaustion?: { action?: string } } } | undefined)?.strategies?.onExhaustion?.action;
+  return exhaustionAction === "compact" ? "compact" : "default";
 }
 
 /**
@@ -224,48 +224,12 @@ export function buildSummarizeProgressTool(
       //    operator interventions see the latest wrap-up state.
       getProgressNotesMap(state)[callerName] = notes;
 
-      // 4. Compact-mode branch: validate strategy, then either inject via
-      //    appendCustomMessageEntry or return compact_failed.
-      if (compactRequested) {
-        const strategy = resolveStrategy(state, runtime);
-        if (strategy !== "compact") {
-          return {
-            content: [{
-              type: "text",
-              text: `summarize_progress: compact flag ignored under "${strategy}" strategy — operator drives intervention. Notes stored.`,
-            }],
-            details: {
-              ok: false,
-              caller: callerName,
-              reason: "compact_failed",
-              strategy,
-              compactRequested: true,
-              estimatedTokens,
-              limit,
-            },
-            isError: true,
-          };
-        }
-        const sessionManager = (
-          runtime.session as { sessionManager?: { appendCustomMessageEntry?: (...args: unknown[]) => unknown } } | undefined
-        )?.sessionManager;
-        if (sessionManager?.appendCustomMessageEntry) {
-          sessionManager.appendCustomMessageEntry(
-            "progress_note",
-            notes,
-            false,
-            { tokenCount: estimatedTokens, caller: callerName },
-          );
-        }
-      }
-
-      // 5. Ledger write — best-effort; the typed `BudgetLedgerKind` union
+      // 4. Ledger write — best-effort; the typed `BudgetLedgerKind` union
       // does not include `progress_notes` so we cast to widen the snapshot's
       // `kind` parameter to `string` (G-08 forward-compat). The try/catch
-      // keeps the tool working when the Wave 0 ledger stub throws. The
-      // `stats` and `policy` arguments are unused by the snapshot's marker
-      // path (it stamps `marker: "checkpoint"` and writes the cumulative
-      // from `this.cumulative`), so empty placeholders are fine.
+      // keeps the tool working when the Wave 0 ledger stub throws. Runs
+      // BEFORE the compact branch so both honor and silent-ignore paths
+      // produce a dashboard timeline entry per the original T5.7 spec.
       try {
         const snapshotAny = ledger.snapshot as unknown as (
           stats: unknown,
@@ -278,18 +242,47 @@ export function buildSummarizeProgressTool(
         // Stub or unsupported ledger — don't fail the tool.
       }
 
+      // 5. Compact-mode branch: under C5 structured strategies, `compact: true`
+      //    is honored ONLY when `on-exhaustion.action === "compact"`. Under
+      //    `abort` / `none` the flag is silently ignored — notes are stored
+      //    (above) and the ledger entry is written (above); the operator
+      //    drives intervention. This replaces the legacy `compact_failed`
+      //    isError path with the spec-correct "silent ignore" semantics.
+      let compactHonored = false;
+      if (compactRequested) {
+        const strategy = resolveStrategyLabel(state, runtime);
+        if (strategy === "compact") {
+          const sessionManager = (
+            runtime.session as { sessionManager?: { appendCustomMessageEntry?: (...args: unknown[]) => unknown } } | undefined
+          )?.sessionManager;
+          if (sessionManager?.appendCustomMessageEntry) {
+            sessionManager.appendCustomMessageEntry(
+              "progress_note",
+              notes,
+              false,
+              { tokenCount: estimatedTokens, caller: callerName },
+            );
+            compactHonored = true;
+          }
+        }
+        // Under non-compact strategy: continue to the success return below
+        // with compactHonored=false. The response shape is identical to the
+        // happy path with `compactRequested: true` and `compacted: false`.
+      }
+
       // 6. Success.
-      const strategy = compactRequested ? "compact" : resolveStrategy(state, runtime);
+      const strategy = resolveStrategyLabel(state, runtime);
+      const baseText = `summarize_progress: stored ${estimatedTokens}/${limit} tokens of notes for "${callerName}"`;
+      const text = compactRequested && !compactHonored
+        ? `${baseText} (compact flag ignored under "${strategy}" strategy — operator drives intervention).`
+        : `${baseText}${compactHonored ? " (compact honored)" : ""}.`;
       return {
-        content: [{
-          type: "text",
-          text: `summarize_progress: stored ${estimatedTokens}/${limit} tokens of notes for "${callerName}"${compactRequested ? " (compact honored)" : ""}.`,
-        }],
+        content: [{ type: "text", text }],
         details: {
           ok: true,
           caller: callerName,
           stored: true,
-          compacted: compactRequested,
+          compacted: compactHonored,
           compactRequested,
           estimatedTokens,
           limit,

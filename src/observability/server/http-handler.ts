@@ -5,6 +5,7 @@ import {
   PACKAGE_VERSION, PROJECT_CWD, PROTOCOL_VERSION, REGISTRY_PATH,
   STARTUP_NONCE, expectedHostHeader,
 } from "./config";
+import { handleOperatorRpc } from "./operator-rpc";
 import { encoder, eventFrame, SSE_BUFFER_BYTES, subscribers } from "./sse";
 import type { Subscriber } from "./types";
 import {
@@ -141,6 +142,23 @@ export function createDashboardHttpHandler(options: DashboardHttpHandlerOptions 
         const savedLabel = label.slice(0, 120);
         setProjectOverride(projectId, project.project_root, savedLabel, new Date().toISOString());
         return json({ ok: true, projectId, label: savedLabel });
+      }
+      // F5c — operator command RPC stub. POST /api/operator/<commandName>
+      // with body { agent, reason? }. Validates the command name and body
+      // against OPERATOR_COMMANDS, returns 501 with a structured envelope
+      // (session-bridge not implemented; deferred to F13 dashboard UI work).
+      // The Pi slash commands (`/hive:worker-end`, etc.) are the in-session
+      // surface; this endpoint is the dashboard-side placeholder.
+      const operatorMatch = url.pathname.match(/^\/api\/operator\/([a-z-]+)$/);
+      if (operatorMatch) {
+        let body: any = {};
+        try { body = await req.json(); } catch { return json({ error: "invalid json body" }, 400); }
+        const commandName = operatorMatch[1];
+        const result = await handleOperatorRpc(commandName, {
+          agent: typeof body.agent === "string" ? body.agent : undefined,
+          reason: typeof body.reason === "string" ? body.reason : undefined,
+        });
+        return result;
       }
       return json({ error: "not found" }, 404);
     }

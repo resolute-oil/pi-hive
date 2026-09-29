@@ -61,11 +61,25 @@ import {
   pauseWorkerSession,
   resumeWorkerSession,
 } from "../src/engine/budget/worker-tools.ts";
+import type { OperatorCommandAborted } from "../src/engine/budget/worker-tools.ts";
 import type {
   BudgetLedgerData,
   BudgetLedgerEntry,
   WorkerBudgetPolicy,
 } from "../src/engine/budget/types.ts";
+
+/**
+ * Narrow `OperatorCommandResult | OperatorCommandAborted` to the success
+ * path. The early-exit guard (audit B7) widens the return type to include
+ * the aborted envelope; the existing T5.x tests only exercise the success
+ * path and use this helper to skip the type narrowing at every assertion.
+ */
+function expectOk<T extends object>(r: T | OperatorCommandAborted): Exclude<T, OperatorCommandAborted> {
+  if ("isError" in r) {
+    throw new Error(`expected success, got isError envelope: ${r.code} (${r.reason})`);
+  }
+  return r as Exclude<T, OperatorCommandAborted>;
+}
 
 // ---------------------------------------------------------------------------
 // Stubs / fixtures.
@@ -224,11 +238,11 @@ function ledgerEntries(sm: SessionManagerType): BudgetLedgerEntry[] {
 test("T5.1 endWorkerSession: snapshot kind is 'end'", async () => {
   const { session, ledger, sessionManager, policy } = await makeHandle(42, 0.01);
   const ctx = makeCtx();
-  const result = await endWorkerSession({ agent: "eol-worker" }, ctx, {
+  const result = expectOk(await endWorkerSession({ agent: "eol-worker" }, ctx, {
     session: session as unknown as AgentSession,
     ledger,
     policy,
-  });
+  }));
   const entries = ledgerEntries(sessionManager);
   assert.equal(entries.length, 1);
   assert.equal(entries[0]!.data.kind, "end");
@@ -254,11 +268,11 @@ test("T5.1 endWorkerSession: session.abort() was called (and NOT disposed — pl
 test("T5.1 endWorkerSession: result shape is { sessionId, ledgerSnapshot: BudgetLedgerEntry }", async () => {
   const { session, ledger, policy } = await makeHandle(7, 0.001);
   const ctx = makeCtx();
-  const result = await endWorkerSession({ agent: "eol-worker" }, ctx, {
+  const result = expectOk(await endWorkerSession({ agent: "eol-worker" }, ctx, {
     session: session as unknown as AgentSession,
     ledger,
     policy,
-  });
+  }));
   assert.equal(result.sessionId, session.sessionId);
   // Discriminated union: BudgetLedgerEntry is { type: "custom"; customType: "pi-hive-budget-ledger"; data: ... }
   assert.equal(result.ledgerSnapshot.type, "custom");
@@ -274,11 +288,11 @@ test("T5.1 endWorkerSession: result shape is { sessionId, ledgerSnapshot: Budget
 test("T5.2 compactWorkerSession: snapshot kind is 'compact'", async () => {
   const { session, ledger, sessionManager, policy } = await makeHandle(123, 0.05);
   const ctx = makeCtx();
-  const result = await compactWorkerSession({ agent: "eol-worker" }, ctx, {
+  const result = expectOk(await compactWorkerSession({ agent: "eol-worker" }, ctx, {
     session: session as unknown as AgentSession,
     ledger,
     policy,
-  });
+  }));
   const entries = ledgerEntries(sessionManager);
   assert.equal(entries.length, 1);
   assert.equal(entries[0]!.data.kind, "compact");
@@ -288,11 +302,11 @@ test("T5.2 compactWorkerSession: snapshot kind is 'compact'", async () => {
 test("T5.2 compactWorkerSession: session.compact() was called and result.compaction is the SDK return", async () => {
   const { session, ledger, policy } = await makeHandle(100, 0.01);
   const ctx = makeCtx();
-  const result = await compactWorkerSession({ agent: "eol-worker" }, ctx, {
+  const result = expectOk(await compactWorkerSession({ agent: "eol-worker" }, ctx, {
     session: session as unknown as AgentSession,
     ledger,
     policy,
-  });
+  }));
   assert.equal(session.compactCalls.length, 1, "compact() was called exactly once");
   // result.compaction must be the SDK's CompactionResult — pass through unchanged.
   assert.equal(result.compaction.summary, "compacted");
@@ -319,11 +333,11 @@ test("T5.2 compactWorkerSession: customInstructions are forwarded to session.com
 test("T5.4 pauseWorkerSession: snapshot kind is 'pause'", async () => {
   const { session, ledger, sessionManager, policy } = await makeHandle(50, 0.02);
   const ctx = makeCtx();
-  const result = await pauseWorkerSession({ agent: "eol-worker" }, ctx, {
+  const result = expectOk(await pauseWorkerSession({ agent: "eol-worker" }, ctx, {
     session: session as unknown as AgentSession,
     ledger,
     policy,
-  });
+  }));
   const entries = ledgerEntries(sessionManager);
   assert.equal(entries.length, 1);
   assert.equal(entries[0]!.data.kind, "pause");
@@ -355,11 +369,11 @@ test("T5.4 pauseWorkerSession: session.waitForIdle() was called BEFORE the snaps
 test("T5.4 pauseWorkerSession: result shape includes ledgerSnapshot (post-pause BudgetLedgerEntry)", async () => {
   const { session, ledger, policy } = await makeHandle(200, 0.07);
   const ctx = makeCtx();
-  const result = await pauseWorkerSession({ agent: "eol-worker" }, ctx, {
+  const result = expectOk(await pauseWorkerSession({ agent: "eol-worker" }, ctx, {
     session: session as unknown as AgentSession,
     ledger,
     policy,
-  });
+  }));
   assert.equal(result.sessionId, session.sessionId);
   // Snapshot records the authoritative totals — getSessionStats() is the single source of truth.
   assert.equal(result.ledgerSnapshot.data.cumulative.tokens, 200);
@@ -374,11 +388,11 @@ test("T5.4 pauseWorkerSession: result shape includes ledgerSnapshot (post-pause 
 test("T5.8 resumeWorkerSession: snapshot kind is 'resume'", async () => {
   const { session, ledger, sessionManager, policy } = await makeHandle(33, 0.005);
   const ctx = makeCtx();
-  const result = await resumeWorkerSession({ agent: "eol-worker" }, ctx, {
+  const result = expectOk(await resumeWorkerSession({ agent: "eol-worker" }, ctx, {
     session: session as unknown as AgentSession,
     ledger,
     policy,
-  });
+  }));
   const entries = ledgerEntries(sessionManager);
   assert.equal(entries.length, 1);
   assert.equal(entries[0]!.data.kind, "resume");
@@ -403,11 +417,11 @@ test("T5.8 resumeWorkerSession: snapshot uses current getSessionStats() (works a
   // mutate stats to reflect fresh authoritative totals.
   session.stats = makeStats(9999, 4.2, session.sessionId);
   const ctx = makeCtx();
-  const result = await resumeWorkerSession({ agent: "eol-worker" }, ctx, {
+  const result = expectOk(await resumeWorkerSession({ agent: "eol-worker" }, ctx, {
     session: session as unknown as AgentSession,
     ledger,
     policy,
-  });
+  }));
   // The resume snapshot reads CURRENT totals, not stale ones.
   assert.equal(result.ledgerSnapshot.data.cumulative.tokens, 9999);
   assert.equal(result.ledgerSnapshot.data.cumulative.costUsd, 4.2);
@@ -422,11 +436,11 @@ test("T5.8 resumeWorkerSession: snapshot uses current getSessionStats() (works a
 test("T5.9 abortWorkerCompaction: snapshot kind is 'compact-aborted'", async () => {
   const { session, ledger, sessionManager, policy } = await makeHandle(8, 0.001);
   const ctx = makeCtx();
-  const result = await abortWorkerCompaction({ agent: "eol-worker" }, ctx, {
+  const result = expectOk(await abortWorkerCompaction({ agent: "eol-worker" }, ctx, {
     session: session as unknown as AgentSession,
     ledger,
     policy,
-  });
+  }));
   const entries = ledgerEntries(sessionManager);
   assert.equal(entries.length, 1);
   assert.equal(entries[0]!.data.kind, "compact-aborted");
@@ -449,11 +463,11 @@ test("T5.9 abortWorkerCompaction: session.abortCompaction() was called", async (
 test("T5.9 abortWorkerCompaction: snapshot is written with current authoritative totals", async () => {
   const { session, ledger, sessionManager, policy } = await makeHandle(1234, 0.5);
   const ctx = makeCtx();
-  const result = await abortWorkerCompaction({ agent: "eol-worker" }, ctx, {
+  const result = expectOk(await abortWorkerCompaction({ agent: "eol-worker" }, ctx, {
     session: session as unknown as AgentSession,
     ledger,
     policy,
-  });
+  }));
   // The aborted compaction did not rewrite the branch — getSessionStats()
   // returns the pre-compaction totals.
   assert.equal(result.ledgerSnapshot.data.cumulative.tokens, 1234);

@@ -4,6 +4,13 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import { Type, type TSchema } from "typebox";
 import { resolve } from "node:path";
 import type { AgentType, HiveState, ReviewVerdictLevel } from "../core/types";
+import type { BudgetLedger } from "../engine/budget/ledger";
+import {
+  requestCompaction,
+  requestEndSession,
+  requestSnapshot,
+} from "../engine/budget/worker-tools";
+import { buildSummarizeProgressTool } from "./tools/summarize-progress";
 import {
   extractFinalAnswer,
   hexAnsi,
@@ -20,7 +27,7 @@ import { emitHiveEvent } from "../engine/observability";
 import * as openspec from "../engine/openspec";
 import { agentRef, agentRoster, resolveRuntime } from "../engine/agent-lookup";
 import { agentSlug } from "../core/utils";
-import { budgetRemaining, effectiveWorkerGovernance } from "../engine/budget/display";
+import { budgetRemaining } from "../engine/budget/display";
 
 type ToolUpdate = AgentToolUpdateCallback<object>;
 // Replaced the local `ToolRenderOptions` shape with the SDK's
@@ -102,7 +109,17 @@ function contextAdvice(contextPct?: number): "resume-ok" | "consider-fresh" | "f
 // diverges between "the orchestrator's delegate_agent" and "a worker's own
 // delegate_agent" (nested delegation intentionally grants workers this tool
 // too — see normalizeWorkerTools's comment in core/normalize.ts).
-export function buildHiveTools(state: HiveState, callerName: string): ToolDefinition[] {
+//
+// F5 wiring: an optional `ledger` parameter, when present, enables the
+// worker-only tools (`summarize_progress` + the 3 cooperative tools). The
+// orchestrator does not pass a ledger because it has no per-worker
+// `BudgetLedger`; workers receive the ledger after `createBudgetAwareSession`
+// restores it on their session manager.
+export function buildHiveTools(
+  state: HiveState,
+  callerName: string,
+  ledger?: BudgetLedger,
+): ToolDefinition[] {
   // Render an agent's name in ITS OWN configured color (matching the status
   // modal), falling back to the theme accent if no/invalid hex is configured.
   const agentColored = (name: string, theme: Theme): string => {
@@ -152,12 +169,12 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
         task: runtime.task,
         lastWork: runtime.lastWork,
         costUsd: runtime.costUsd,
-        // Show the same number the budget tracks. Under the default "all"
-        // scope this includes cache reads/writes and reasoning; under
-        // tokenBudgetScope: "input_output" it's the input/output total only.
-        tokens: effectiveWorkerGovernance(state, runtime).tokenBudgetScope === "input_output"
-          ? runtime.inputTokens + runtime.outputTokens
-          : runtime.inputTokens + runtime.outputTokens + runtime.cacheReadTokens + runtime.cacheWriteTokens + runtime.reasoningTokens,
+        // Show the same number the budget tracks. Post-F9 (G-16 cutover)
+        // the only scope is the full sum: input + output + cache reads/writes
+        // + reasoning. The legacy `tokenBudgetScope: "input_output"` branch
+        // was unreachable since `effectiveWorkerGovernance(...)` returns
+        // `Object.freeze({})` — see audit B4 (HTML §5).
+        tokens: runtime.inputTokens + runtime.outputTokens + runtime.cacheReadTokens + runtime.cacheWriteTokens + runtime.reasoningTokens,
         contextPct: runtime.contextPct,
         contextTokens: runtime.contextTokens,
         contextWindow: runtime.contextWindow,
@@ -509,7 +526,76 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
     }));
   }
 
-  return [...baseTools, ...typeScopedTools];
+  // F5 wiring — worker-only tools. Registered when a `ledger` is supplied
+  // (i.e. the caller is a worker session, not the orchestrator). The ledger
+  // argument lets the cooperative tools + summarize_progress persist their
+  // progress_notes / cooperative-* entries against the worker's session
+  // manager.
+  //
+  // Cooperative tools (refactor plan §2.8): request_compaction,
+  // request_end_session, request_snapshot. Each wraps the corresponding
+  // `requestCompaction` / `requestEndSession` / `requestSnapshot` in
+  // `src/engine/budget/worker-tools.ts`. The worker invokes these tools
+  // itself to ask for a graceful shutdown / compact / branch; each one
+  // writes a `cooperative-*` ledger entry FIRST so the dashboard timeline
+  // captures intent even if the SDK call throws.
+  const workerTools: ToolDefinition[] = [];
+  if (ledger) {
+    workerTools.push(
+      defineTool({
+        name: "request_compaction",
+        label: "Request Compaction",
+        description:
+          "Self-driven SDK compaction. Writes a `cooperative-compact` ledger entry, then invokes `session.compact(notes)` so the dashboard distinguishes this from an operator-driven `compactWorkerSession`. Use when you want to free context mid-run without aborting.",
+        parameters: Type.Object({
+          notes: Type.String({ description: "Wrap-up notes injected into the compact prompt. Captures current task, decisions, files touched, validation status, and the explicit next step." }),
+        }),
+        async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+          const p = (params ?? {}) as { notes?: string };
+          const notes = typeof p.notes === "string" ? p.notes : "";
+          const result = await requestCompaction(state, callerName, { notes });
+          return { content: [{ type: "text", text: result.ok ? `request_compaction: compact honored (estimated ${result.estimatedTokens} tokens).` : `request_compaction: ${result.reason ?? "failed"}${result.error ? ` — ${result.error}` : ""}.` }], details: result };
+        },
+      }),
+      defineTool({
+        name: "request_end_session",
+        label: "Request End Session",
+        description:
+          "Graceful self-shutdown of your worker session. Writes a `cooperative-end` ledger entry, then invokes `session.abort()`. The session reference stays valid for a follow-up `resumeWorkerSession` from the operator.",
+        parameters: Type.Object({
+          reason: Type.String({ description: "Why the worker is self-ending (recorded on the cooperative-end ledger entry)." }),
+        }),
+        async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+          const p = (params ?? {}) as { reason?: string };
+          const reason = typeof p.reason === "string" ? p.reason : "";
+          const result = await requestEndSession(state, callerName, { reason });
+          return { content: [{ type: "text", text: result.ok ? "request_end_session: end honored." : `request_end_session: ${result.reason ?? "failed"}.` }], details: result };
+        },
+      }),
+      defineTool({
+        name: "request_snapshot",
+        label: "Request Snapshot",
+        description:
+          "Branch your session for later restore. Writes a `cooperative-snapshot` ledger entry with the produced snapshot id, then invokes `sessionManager.branchWithSummary(leafId, label)`. The operator can `restoreWorkerSession(snapshotId)` to navigate back here.",
+        parameters: Type.Object({
+          label: Type.Optional(Type.String({ description: "Short label for the snapshot (recorded on the cooperative-snapshot ledger entry and the branched leaf)." })),
+        }),
+        async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+          const p = (params ?? {}) as { label?: string };
+          const label = typeof p.label === "string" ? p.label : undefined;
+          const result = await requestSnapshot(state, callerName, { label });
+          return { content: [{ type: "text", text: result.ok ? `request_snapshot: snapshot created (id: ${result.snapshotId ?? "?"}).` : `request_snapshot: ${result.reason ?? "failed"}.` }], details: result };
+        },
+      }),
+      // summarize_progress (T5.7 + C5). The factory closes over the worker's
+      // `state` and `callerName`; the ledger argument is the worker's
+      // restored `BudgetLedger` which receives a `progress_notes` kind entry
+      // on every successful call.
+      buildSummarizeProgressTool(state, callerName, ledger),
+    );
+  }
+
+  return [...baseTools, ...typeScopedTools, ...workerTools];
 }
 
 export function registerTools(pi: ExtensionAPI, state: HiveState) {
