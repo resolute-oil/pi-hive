@@ -4,7 +4,7 @@
 **Baseline:** `feat/budget-strategy` at `9f950fb` (PR #54 still open, awaiting user merge — **recommended: close in favor of the refactor** per §6.2)
 **Generated:** 2026-09-28
 **SDK version:** Validated against `@earendil-works/pi-coding-agent@0.99.1` on 2026-09-29 (project devDep bump, commit ea9c54a on `refactor/budget`). See `raw-evidence/pi-sdk-session-api.md` §0 for the SDK 0.99.1 vs 0.80.x diff and its impact on the prescriptions in this review.
-**Status:** **Refactor plan is implementation-ready.** All 30 gaps from the spec-flow review have user-confirmed resolutions applied to the plan. All 13 prior open questions (§6.2) are now DECIDED. The 4 critical gaps and 7 high gaps are addressed with concrete tasks in the plan. Implementation deferred to the next session on a fresh branch `refactor/budget-pi-native` off `main`.
+**Status:** **Refactor plan is implementation-ready.** All 30 gaps from the spec-flow review have user-confirmed resolutions applied to the plan. All 13 prior open questions (§6.2) are now DECIDED. The 4 critical gaps and 7 high gaps are addressed with concrete tasks in the plan. Implementation runs as one coordinator session + worker sessions in per-phase worktrees under `APP_ROOT/.worktrees/`, with each worktree based off the current HEAD of `refactor-budget` (NOT `main`). See `README.md` §1 and `05-parallelization-analysis.md` §0.5 for the working conventions.
 
 > **2026-09-29 update (SDK 0.99.1 alignment):** The `UsageEntry` / `appendUsage` prescriptions in the synthesis and refactor plan are now directly implementable against the SDK the project pins. The 0.99.1 alignment does NOT change the diagnosis (Issues 1–9, bug timeline, pi-docs alignment gaps) — only the SDK surface available to implement the prescriptions. The reader picking up this review should also check `origin/fix/fresh-rebuild`, which (per its commit messages) shipped a v2 `BudgetLedger` refactor after this review was written and may supersede parts of the planned work.
 
@@ -249,28 +249,33 @@ git status --short                                        # confirm clean workin
 
 ### 6.2 Implementation work (recommended next step)
 
+**Updated 2026-09-29:** Implementation runs as **one coordinator session + worker sessions in per-phase worktrees**, NOT on a single `refactor/budget-pi-native` mega-branch. The full working conventions are in `README.md`; the canonical worktree-creation pattern is in `05-parallelization-analysis.md` §0.5.
+
 The next session should:
 
-1. **Close PR #54** via web UI or `gh pr close 54 --repo resolute-oil/pi-hive` (per plan §6.2 decision).
-2. **Read `04-refactor-plan.md`** (1,582 lines, 13 features, 69 task checkboxes) — the authoritative plan.
-3. **Open a fresh worktree off `main`** (PR #54 closure precedes this):
-   ```sh
-   APP_ROOT=/Users/cgrant/.pi/agent/git/github.com/demetere/pi-hive
-   git worktree add .worktrees/refactor-budget-pi-native -b refactor/budget-pi-native main
-   ln -s "$APP_ROOT/node_modules" "$APP_ROOT/.worktrees/refactor-budget-pi-native/node_modules"
-   ln -s "$APP_ROOT/ui/web/node_modules" "$APP_ROOT/.worktrees/refactor-budget-pi-native/ui/web/node_modules"
-   ```
-4. **Execute Phase 1 (F1)** — Budget primitives (T1.1-T1.3). Each task has its own gate; don't move on until the gate passes.
-5. **Execute Phase 2 (F2-F6)** — `delegate_agent`, live tracking, end-of-run, 10 EOL/cooperative commands, config schema.
-6. **Execute Phase 3 (F7-F11)** — race-safe accounting, reload-stable, legacy cleanup, reviewer sign-off, PR merge.
-7. **Commit per task**, push branch to origin, open a single PR (or one per phase — user preference).
-8. **Wait for user merge** per AGENTS.md.
+1. **Read `README.md`** first — working conventions (worktree naming, TDD, no-defer, ask_user, removal policy, session logs).
+2. **Read `04-refactor-plan.md`** — the authoritative plan; the plan's §0.5 calls out the removal policy and §0.6 calls out the regression-test policy.
+3. **Read `05-parallelization-analysis.md`** — coordinator + worker model, per-phase worktrees, wave structure.
+4. **Read `INDEX.md`** for the reading order if uncertain where to start.
+5. **Close PR #54** via web UI or `gh pr close 54 --repo resolute-oil/pi-hive` (per plan §6.2 decision) — this is the first action item, before any worktree is opened.
+6. **Pick a coordinator or worker role.** If you're a fresh session, ask the user whether to be the coordinator (owning the plan + sessions/) or a worker (picking up the next phase). If the coordinator already exists, take a worker role and pick up the next phase from `sessions/`.
+7. **Open the worktree for your assigned phase or task** with the correct naming convention. The base is the **current HEAD of the local `refactor-budget` staging branch** (NOT `main`, NOT a remote ref). Examples:
+   - Coordinator (wave 0 contracts): `git worktree add .worktrees/refactor-budget-f0-contracts -b refactor/budget-f0-contracts origin/refactor/budget`
+   - Worker (F1 primitives): `git worktree add .worktrees/refactor-budget-f1-primitives -b refactor/budget-f1-primitives origin/refactor/budget`
+   - Worker (F5 T5.3 respawn): `git worktree add .worktrees/refactor-budget-t5-3-respawn-dispose -b refactor/budget-t5-3-respawn-dispose origin/refactor/budget`
+   - Each worktree: `ln -s ../../node_modules node_modules` (per AGENTS.md; the worktree is two levels under `APP_ROOT/`).
+   - See `README.md` §1 for the canonical pattern, including a `REFACTOR_BUDGET=$(git rev-parse origin/refactor/budget)` helper so each command captures the current base.
+8. **Work TDD-style** (red-green-refactor) per task in the plan. Each task has a gate — don't move on until the gate passes.
+9. **Write a session log** in `sessions/<date>-<your-role>-<phase>.md` before ending the session. The template is in `sessions/README.md`.
+10. **Commit per task, push to `origin` (not `upstream` per AGENTS.md), open a PR.** Do NOT merge — coordinator + user review per AGENTS.md.
+11. **Tick the plan** when tasks complete: the coordinator updates `[ ]` to `[x]` in `04-refactor-plan.md` once the worker's PR has its gate verified.
 
 ### 6.3 Branch and worktree conventions
 
+- **The implementation does NOT happen on a single mega-branch.** Each phase or task gets its own worktree under `APP_ROOT/.worktrees/refactor-budget-<phase>-<task>/` with branch `refactor/budget-<phase>-<task>`. See `README.md` §1 and `05-parallelization-analysis.md` §0.5.
 - The review branch `review/budget-redesign-2026-09-28` is for documentation only. **Do not push it to origin.**
-- New implementation work happens on a NEW branch `refactor/budget-pi-native`, in a NEW worktree, off `main` (per the hard cutover decision).
 - Per AGENTS.md: never push to `upstream`; all pushes go to `origin` (the fork).
+- The `refactor/budget` worktree on `ea9c54a` (SDK 0.99.1 bump + hive:version fix) is the staging branch for *documentation* updates only. Implementation work does NOT happen on this branch.
 
 ### 6.4 Verification gates for implementation work
 
@@ -335,8 +340,14 @@ APP_ROOT HEAD:    9f950fb
 APP_ROOT state:   clean (HANDOFF.md is gitignored)
 
 Open PRs:         #54 (feat/budget-strategy) — recommended CLOSE in favor of refactor
-                  No refactor PR yet — implementation session opens it on refactor/budget-pi-native
+                  No refactor PR yet — coordinator + workers open per-phase PRs from
+                  per-phase worktrees under APP_ROOT/.worktrees/, each based off the
+                  current HEAD of the refactor-budget staging branch.
 
-Next action:      Implementation session — close PR #54, open refactor/budget-pi-native worktree,
-                  execute Phases 1-4 per the plan's task list and completion guards.
+Next action:      Coordinator session picks up, reads README.md (working conventions),
+                  closes PR #54, and opens the Wave 0 contracts worktree
+                  (.worktrees/refactor-budget-f0-contracts/) based off the current
+                  refactor-budget HEAD. Worker sessions pick up subsequent phases
+                  per the wave structure in 05-parallelization-analysis.md §1.
+                  See README.md §1 for the worktree naming convention.
 ```
