@@ -131,6 +131,16 @@ export async function installWorkerBudgetHooks(opts: {
     preflightPolicy,
     runController.signal,
   );
+  // `installBudgetEventHooks` returns the unsubscribe handle from
+  // `session.subscribe(...)`. We intentionally do NOT capture it: the
+  // dispatch lifecycle (`WorkerRunLifecycle.close()`) invokes
+  // `session.dispose()` on every dispatch, and the SDK's
+  // `agent-session.js#dispose` clears `_eventListeners` wholesale — so the
+  // budget subscription is dropped alongside the dispatch's own
+  // `handleEvent` subscription. The discarded unsubscribe is therefore safe
+  // under the current lifecycle contract. If a future refactor separates
+  // dispose from event teardown (e.g. session reuse across dispatches),
+  // wire the unsubscribe through `lifecycle.attachSubscription` instead.
   installBudgetEventHooks(
     session as Parameters<typeof installBudgetEventHooks>[0],
     workerLedger,

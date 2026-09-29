@@ -297,9 +297,6 @@ export interface RequestSnapshotResult {
 // §2.8 ledger kind for cooperative tools + operator commands.
 // ---------------------------------------------------------------------------
 
-/** Maps operator / cooperative action → §2.3 ledger kind. */
-export type OperatorLedgerKind = BudgetLedgerKind;
-
 // ---------------------------------------------------------------------------
 // §2.4 / §2.6 — Return shapes from the new delegation flow.
 // ---------------------------------------------------------------------------
@@ -314,17 +311,6 @@ export interface DelegateAgentResult {
    * signal is threaded into every ledger write per plan §2.12.
    */
   controller: AbortController;
-}
-
-// ---------------------------------------------------------------------------
-// §2.11 Worker-facing visibility — typed payload for `appendCustomMessageEntry("budget_warning", ...)`.
-// ---------------------------------------------------------------------------
-
-export interface BudgetWarningDetails {
-  scope: BudgetScope;
-  resource: BudgetResource;
-  remaining: number;
-  cap: number | undefined;
 }
 
 // ---------------------------------------------------------------------------

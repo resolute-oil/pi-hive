@@ -78,7 +78,6 @@ import { resolveWindow } from "./window-resolver";
 import { installBudgetEventHooks } from "./events";
 import type {
   BudgetLedgerEntry,
-  BudgetExhaustedError as _BudgetExhaustedError,
   BudgetLedgerCumulative,
   BudgetLedgerData,
   BudgetLedgerKind,
@@ -1137,12 +1136,13 @@ function cumulativeFromRuntime(runtime: {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  reasoningTokens: number;
   costUsd: number;
   runCount: number;
 }): BudgetLedgerCumulative {
   return {
     tokens:
-      runtime.inputTokens + runtime.outputTokens + runtime.cacheReadTokens + runtime.cacheWriteTokens,
+      runtime.inputTokens + runtime.outputTokens + runtime.cacheReadTokens + runtime.cacheWriteTokens + runtime.reasoningTokens,
     costUsd: runtime.costUsd,
     runs: runtime.runCount,
   };
