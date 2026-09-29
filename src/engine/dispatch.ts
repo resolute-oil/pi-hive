@@ -30,6 +30,9 @@ import { resolveConfiguredPath } from "../core/safe-path";
 import { acquireWorkerSlot, budgetRemaining, checkDispatchBudgets, effectiveWorkerGovernance, releaseWorkerSlot } from "./governance";
 import { WorkerRunLifecycle } from "./worker-lifecycle";
 import { modelKey, resolveModel } from "./model-resolution";
+import { BUDGET_EXHAUSTED_ERROR_NAME, runBudgetPreflight } from "./budget/worker-tools";
+import { installBudgetEventHooks } from "./budget/events";
+import { BudgetLedger } from "./budget/ledger";
 
 // Dashboard activity should show reviewer/worker conclusions without confusing
 // middle elision in normal cases. Keep a high hard cap to avoid unbounded shared
@@ -212,10 +215,43 @@ export async function dispatchAgent(
     return { output: `${runtime.config.name} is already running.`, exitCode: 1, elapsed: runtime.elapsedMs };
   }
   const delegationDepth = currentDelegationDepth() + 1;
-  const blocked = checkDispatchBudgets(state, runtime, delegationDepth);
-  if (blocked) {
-    emitHiveEvent(state, "budget_exhausted", { agent: runtime.config.name, resource: blocked.resource, scope: blocked.scope, remaining: budgetRemaining(state, runtime) }, caller);
-    return { output: `Delegation blocked: ${blocked.message}`, exitCode: 1, elapsed: 0 };
+  // LEGACY pre-flight — `checkDispatchBudgets` honors the v1
+  // `WorkerGovernance` shape that the Wave 1B hard cutover removed from
+  // config validation but that legacy state objects (test fixtures, in-flight
+  // dispatches during the rollout window) still carry. Kept alongside the
+  // new path below so existing tests asserting the legacy message format
+  // continue to pass. Wave 5 / F9 deletes this whole block when the legacy
+  // `governance:` shape is removed from `AgentConfig`.
+  const legacyBlocked = checkDispatchBudgets(state, runtime, delegationDepth);
+  if (legacyBlocked) {
+    emitHiveEvent(state, "budget_exhausted", {
+      agent: runtime.config.name,
+      resource: legacyBlocked.resource,
+      scope: legacyBlocked.scope,
+      remaining: budgetRemaining(state, runtime),
+    }, caller);
+    return { output: `Delegation blocked: ${legacyBlocked.message}`, exitCode: 1, elapsed: 0 };
+  }
+  // Wave 2 / F2 — new budget pre-flight via `runBudgetPreflight`. Honors
+  // the new F6 nested `budgets:` shape (per-agent + per-worker/per-team
+  // settings). Throws `BudgetExhaustedError` on block; translated to the
+  // existing `{ output, exitCode: 1 }` envelope so the tool harness keeps
+  // its contract.
+  let preflightPolicy;
+  try {
+    const preflight = await runBudgetPreflight(state, agentName, ctx);
+    preflightPolicy = preflight.policy;
+  } catch (error: any) {
+    if (error?.name === BUDGET_EXHAUSTED_ERROR_NAME) {
+      emitHiveEvent(state, "budget_exhausted", {
+        agent: runtime.config.name,
+        resource: error.resource,
+        scope: error.scope,
+        remaining: budgetRemaining(state, runtime),
+      }, caller);
+      return { output: `Delegation blocked: ${error?.message || String(error)}`, exitCode: 1, elapsed: 0 };
+    }
+    throw error;
   }
   const willQueue = state.config.settings.maxParallel !== undefined
     && state.activeRuns >= state.config.settings.maxParallel
@@ -238,11 +274,24 @@ export async function dispatchAgent(
     releaseWorkerSlot(state);
     return { output: `${runtime.config.name} is already running.`, exitCode: 1, elapsed: runtime.elapsedMs };
   }
-  const queuedBlock = checkDispatchBudgets(state, runtime, delegationDepth);
-  if (queuedBlock) {
+  // Re-run the budget pre-flight after slot acquisition. Another delegation
+  // (or a ledger write from a settled worker) may have drained the budget
+  // while we were queued; the pre-flight must run against the current
+  // branch, not the snapshot we read above.
+  try {
+    await runBudgetPreflight(state, agentName, ctx);
+  } catch (error: any) {
     releaseWorkerSlot(state);
-    emitHiveEvent(state, "budget_exhausted", { agent: runtime.config.name, resource: queuedBlock.resource, scope: queuedBlock.scope, remaining: budgetRemaining(state, runtime) }, caller);
-    return { output: `Delegation blocked: ${queuedBlock.message}`, exitCode: 1, elapsed: 0 };
+    if (error?.name === BUDGET_EXHAUSTED_ERROR_NAME) {
+      emitHiveEvent(state, "budget_exhausted", {
+        agent: runtime.config.name,
+        resource: error.resource,
+        scope: error.scope,
+        remaining: budgetRemaining(state, runtime),
+      }, caller);
+      return { output: `Delegation blocked: ${error?.message || String(error)}`, exitCode: 1, elapsed: 0 };
+    }
+    throw error;
   }
 
   let prompt: string;
@@ -399,6 +448,26 @@ export async function dispatchAgent(
   });
   session = created.session;
   lifecycle.attachSession(session);
+
+  // Wave 2 / F2 — install the new mid-run budget event hooks. The ledger
+  // is restored against the WORKER's `sessionManager` (writes go there,
+  // not the read-only `ctx.sessionManager`). The controller is wired to
+  // `runController` so an F3 exhaustion signal aborts the session (F2
+  // does not yet emit warnings/exhausted; this hook just updates the
+  // ledger on `message_end` / `compaction_end` / `agent_settled`).
+  const workerLedger = await BudgetLedger.restore(
+    sessionManager,
+    agentSlug(runtime.config),
+    preflightPolicy,
+    runController.signal,
+  );
+  installBudgetEventHooks(
+    session as unknown as Parameters<typeof installBudgetEventHooks>[0],
+    workerLedger,
+    preflightPolicy,
+    sessionManager,
+    runController,
+  );
 
   const abortWorker = (): void => {
     abortedByParent = true;

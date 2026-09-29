@@ -91,11 +91,19 @@ function latestCumulativeFor(branch: SessionEntry[], agentSlug: string): BudgetL
  * (e.g., someone passed a bare `ResolvedTeamBudgets` instead). The
  * typebox-level validation lives here so callers get a clear runtime error
  * rather than a silent `undefined` policy field access.
+ *
+ * Depth cap (T2.3, plan §3.2): enforced inline via the `currentDepth`
+ * argument — `delegateAgent` passes `currentDelegationDepth() + 1` so this
+ * stays a pure function (no module-level reads). Per C4 the depth cap is a
+ * worker-only resource (no team aggregate), so it lives in the worker
+ * branch and never reads `teamUsage()`. The check fires when the dispatch
+ * would push depth past the cap (strict greater-than — equal depth is OK).
  */
 export function checkBudgetPolicy(
   ledger: BudgetLedger,
   policy: WorkerBudgetPolicy,
   branch: SessionEntry[],
+  currentDepth: number,
 ): BudgetBlock | undefined {
   if (!isWorkerBudgetPolicy(policy)) {
     throw new TypeError(
@@ -138,9 +146,23 @@ export function checkBudgetPolicy(
     };
   }
 
+  // Depth cap — T2.3. Per C4 the `resource` discriminator is `"depth"` and
+  // the cap is a positive integer (validator enforces `minimum: 1`). A
+  // configured cap means "the depth THIS dispatch would create must be
+  // ≤ cap"; we fire when it would exceed (strict greater-than) so a cap of
+  // N permits N nested levels.
+  const workerDepthCap = policy.worker.depth?.cap;
+  if (workerDepthCap !== undefined && currentDepth > workerDepthCap) {
+    return {
+      reason: `Worker depth budget exhausted: depth=${currentDepth} > cap=${workerDepthCap}`,
+      scope: "worker",
+      resource: "depth",
+      remaining: {},
+      limit: { depth: workerDepthCap },
+    };
+  }
+
   // Team scope — sum the latest cumulative across every worker in the branch.
-  // Depth is intentionally NOT checked here: it's a dispatch-time concern,
-  // enforced by `currentDelegationDepth()` in `worker-tools.ts` (Wave 2 T2.3).
   const team = teamUsage(branch);
   const teamTokensCap = policy.team.tokens?.cap;
   if (teamTokensCap !== undefined && team.tokens >= teamTokensCap) {
