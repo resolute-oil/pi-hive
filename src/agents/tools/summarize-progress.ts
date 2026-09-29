@@ -144,24 +144,15 @@ function resolveStrategy(_state: HiveState, _runtime: AgentRuntime | undefined):
 }
 
 /**
- * Record a `progress_notes` kind entry on the worker's ledger. The legacy
- * typed `BudgetLedgerKind` union does not include `progress_notes`; the cast
+ * Record a `progress_notes` kind entry on the worker's ledger. The typed
+ * `BudgetLedgerKind` union does not include `progress_notes`; the cast
  * widens it to the G-08 `kind?: string` forward-compat string. The
  * try/catch keeps the tool working when the Wave 0 ledger stub throws.
+ *
+ * NOTE — this is an inlined one-liner at the call site (was a
+ * `recordProgressLedgerEntry` helper pre-Round 3 of F10). The cast is
+ * unchanged.
  */
-function recordProgressLedgerEntry(ledger: BudgetLedger, signal: AbortSignal | undefined): void {
-  try {
-    const snapshotAny = ledger.snapshot as unknown as (
-      stats: unknown,
-      policy: unknown,
-      kind: string,
-      sig?: AbortSignal,
-    ) => void;
-    snapshotAny({}, {}, "progress_notes", signal);
-  } catch {
-    // Stub or unsupported ledger — don't fail the tool.
-  }
-}
 
 /**
  * Build the `summarize_progress` tool definition for a worker.
@@ -268,8 +259,24 @@ export function buildSummarizeProgressTool(
         }
       }
 
-      // 5. Ledger write — best-effort; the Wave 0 stub may throw.
-      recordProgressLedgerEntry(ledger, signal);
+      // 5. Ledger write — best-effort; the typed `BudgetLedgerKind` union
+      // does not include `progress_notes` so we cast to widen the snapshot's
+      // `kind` parameter to `string` (G-08 forward-compat). The try/catch
+      // keeps the tool working when the Wave 0 ledger stub throws. The
+      // `stats` and `policy` arguments are unused by the snapshot's marker
+      // path (it stamps `marker: "checkpoint"` and writes the cumulative
+      // from `this.cumulative`), so empty placeholders are fine.
+      try {
+        const snapshotAny = ledger.snapshot as unknown as (
+          stats: unknown,
+          policy: unknown,
+          kind: string,
+          sig?: AbortSignal,
+        ) => void;
+        snapshotAny({}, {}, "progress_notes", signal);
+      } catch {
+        // Stub or unsupported ledger — don't fail the tool.
+      }
 
       // 6. Success.
       const strategy = compactRequested ? "compact" : resolveStrategy(state, runtime);
