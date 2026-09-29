@@ -83,16 +83,44 @@ interface NewShapeSettings {
   };
 }
 
-function readWorkerBlock(state: HiveState, runtime: AgentRuntime): ResolvedWorkerBudgets {
+/**
+ * Resolve the `settings.budgets:` block from `state.config` with the
+ * cast performed once. The audit (HTML §5 B5) flagged three call sites
+ * duplicating `state.config?.settings as unknown as { budgets?: ... }` —
+ * worker-tools.ts:229, display.ts:87 (readWorkerBlock), and display.ts:94
+ * (readTeamBlock). This helper centralizes the cast.
+ *
+ * The return type preserves the legacy shape (`perWorker` is the
+ * resolved runtime shape, `perTeam` is the pre-resolve `TeamBudgetConfig`)
+ * because that's what the three duplicated casts produced. The internal
+ * window-shape mismatch between `BudgetWindowSpec` (core/types) and
+ * `BudgetWindow` (budget/types) is handled by a single `as unknown as`
+ * here instead of being repeated at each call site — same lossy
+ * semantics, one place to change later if the types are unified.
+ */
+export function getBudgetsConfig(state: HiveState): {
+  perWorker: ResolvedWorkerBudgets | undefined;
+  perTeam: import("../../core/types").TeamBudgetConfig | undefined;
+} {
   const settings = state.config?.settings as unknown as NewShapeSettings | undefined;
-  const globalWorker = settings?.budgets?.perWorker ?? {};
+  return {
+    perWorker: settings?.budgets?.perWorker,
+    perTeam: settings?.budgets?.perTeam as import("../../core/types").TeamBudgetConfig | undefined,
+  };
+}
+
+function readWorkerBlock(state: HiveState, runtime: AgentRuntime): ResolvedWorkerBudgets {
+  const globalWorker = getBudgetsConfig(state).perWorker ?? {};
   const agentBlock = (runtime.config as unknown as { budgets?: ResolvedWorkerBudgets }).budgets ?? {};
   return { ...globalWorker, ...agentBlock };
 }
 
 function readTeamBlock(state: HiveState): ResolvedTeamBudgets {
-  const settings = state.config?.settings as unknown as NewShapeSettings | undefined;
-  return settings?.budgets?.perTeam ?? {};
+  // The budgets block's perTeam is a pre-resolve TeamBudgetConfig but
+  // the runtime wants ResolvedTeamBudgets. The structural compatibility
+  // is close enough (both are { tokens?, costUsd?, runs? }) that a
+  // single cast here preserves the legacy behavior of readTeamBlock.
+  return (getBudgetsConfig(state).perTeam ?? {}) as unknown as ResolvedTeamBudgets;
 }
 
 // ---------------------------------------------------------------------------

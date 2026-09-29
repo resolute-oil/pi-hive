@@ -103,6 +103,7 @@ import type {
   RunsCap,
   TokensCap,
 } from "./types";
+import { getBudgetsConfig } from "./display";
 
 // ---------------------------------------------------------------------------
 // §2.13 C4 — adapter from the F6 schema layer's per-resource cap shape to
@@ -228,14 +229,7 @@ function mergeWorkerOverrides(
  * the new tests use the new shape end-to-end.
  */
 export function resolveWorkerBudgetPolicy(state: HiveState, agentName: string): WorkerBudgetPolicy {
-  const settings = state.config?.settings as unknown as {
-    budgets?: {
-      perWorker?: ResolvedWorkerBudgets;
-      perTeam?: import("../../core/types").TeamBudgetConfig;
-    };
-  } | undefined;
-  const globalWorker = settings?.budgets?.perWorker;
-  const globalTeam = settings?.budgets?.perTeam;
+  const { perWorker: globalWorker, perTeam: globalTeam } = getBudgetsConfig(state);
 
   // Find the agent's per-agent override. `state.config.agents` is the flat
   // list; the orchestrator's members/children hold nested reports. Walk the
