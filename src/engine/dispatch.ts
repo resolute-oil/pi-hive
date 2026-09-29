@@ -17,7 +17,6 @@ import { agentRoster, resolveRuntime } from "./agent-lookup";
 import { addHiveActivity } from "../ui/tui/activity";
 import { resolveConfiguredPath } from "../core/safe-path";
 import { acquireWorkerSlot, releaseWorkerSlot } from "./worker-queue";
-import { budgetRemaining } from "./budget/display";
 import { WorkerRunLifecycle } from "./worker-lifecycle";
 import { persistReviewerVerdict } from "./reviewer-verdict";
 import { createWorkerSubscriptionHandler, type WorkerSubscriptionState } from "./worker-subscription";
@@ -25,7 +24,7 @@ import { applySessionStatsToRuntime } from "./runtime-stats";
 import { emitDelegationEnd } from "./delegation-end";
 import { isPendingArtifactRevisionTask } from "./dispatch-helpers";
 import { modelKey, resolveModel } from "./model-resolution";
-import { BUDGET_EXHAUSTED_ERROR_NAME, runBudgetPreflight, createBudgetAwareSession } from "./budget/worker-tools";
+import { BUDGET_EXHAUSTED_ERROR_NAME, buildBudgetExhaustedEnvelope, runBudgetPreflight, createBudgetAwareSession } from "./budget/worker-tools";
 // Hard cap to keep shared telemetry rows from blowing up on accidental
 // multi-hundred-KB worker dumps. 64 KB is high enough that normal review
 // verdicts are not middle-elided in the web UI.
@@ -164,9 +163,8 @@ export async function dispatchAgent(
         agent: runtime.config.name,
         resource: error.resource,
         scope: error.scope,
-        remaining: budgetRemaining(state, runtime),
       }, caller);
-      return { output: `Delegation blocked: ${error?.message || String(error)}`, exitCode: 1, elapsed: 0 };
+      return buildBudgetExhaustedEnvelope(error);
     }
     throw error;
   }
@@ -204,9 +202,8 @@ export async function dispatchAgent(
         agent: runtime.config.name,
         resource: error.resource,
         scope: error.scope,
-        remaining: budgetRemaining(state, runtime),
       }, caller);
-      return { output: `Delegation blocked: ${error?.message || String(error)}`, exitCode: 1, elapsed: 0 };
+      return buildBudgetExhaustedEnvelope(error);
     }
     throw error;
   }

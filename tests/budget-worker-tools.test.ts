@@ -43,6 +43,7 @@ import type { ExtensionContext, SessionStats } from "@earendil-works/pi-coding-a
 import { runAtDelegationDepth } from "../src/engine/session.ts";
 import {
   BUDGET_EXHAUSTED_ERROR_NAME,
+  buildBudgetExhaustedEnvelope,
   createBudgetAwareSession,
   resolveWorkerBudgetPolicy,
 } from "../src/engine/budget/worker-tools.ts";
@@ -675,4 +676,25 @@ test("resolveWindow: object form flattens to BudgetWindow string (F2 reconciliat
   assert.equal(resolveWindow({ kind: "rolling", duration: 12 * 60 * 60 * 1000 }), "per-day");
   assert.equal(resolveWindow({ kind: "rolling", duration: 48 * 60 * 60 * 1000 }), "per-session");
   assert.equal(resolveWindow(undefined), undefined);
+});
+
+// ── B1: buildBudgetExhaustedEnvelope (dispatch handler deduplication) ──────
+
+test("buildBudgetExhaustedEnvelope: returns {output, exitCode: 1, elapsed: 0} with error message in output", () => {
+  const error = Object.assign(
+    new Error("Worker tokens budget exhausted (1500/1000)."),
+    { name: "BudgetExhaustedError", scope: "worker", resource: "tokens" },
+  );
+  const envelope = buildBudgetExhaustedEnvelope(error);
+  assert.equal(envelope.output, "Delegation blocked: Worker tokens budget exhausted (1500/1000).");
+  assert.equal(envelope.exitCode, 1);
+  assert.equal(envelope.elapsed, 0);
+});
+
+test("buildBudgetExhaustedEnvelope: tolerates an error without a message (defensive)", () => {
+  const error = { name: "BudgetExhaustedError" };
+  const envelope = buildBudgetExhaustedEnvelope(error);
+  assert.equal(envelope.exitCode, 1);
+  assert.equal(envelope.elapsed, 0);
+  assert.match(envelope.output, /Delegation blocked/);
 });

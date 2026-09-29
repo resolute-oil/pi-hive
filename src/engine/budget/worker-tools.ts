@@ -1368,3 +1368,36 @@ export const BUDGET_EXHAUSTED_ERROR_NAME = "BudgetExhaustedError";
 // Re-export so callers (dispatchAgent, future waves) can read the ledger kind
 // without re-importing from ./ledger.
 export { BUDGET_LEDGER_CUSTOM_TYPE };
+
+/**
+ * Build the standard `{output, exitCode: 1, elapsed: 0}` envelope returned
+ * by `dispatchAgent` when the budget pre-flight refuses a delegation. Both
+ * the pre-slot and post-slot call sites use this; the duck-typed error
+ * shape (`.name === BUDGET_EXHAUSTED_ERROR_NAME` + `.scope` + `.resource`)
+ * is read directly so callers can build the telemetry payload without
+ * re-checking the error type.
+ *
+ * Per the audit (HTML §5): the previous duplicated handlers also passed
+ * `remaining: budgetRemaining(state, runtime)` to the telemetry event. That
+ * value is misleading when pre-flight refused — the agent never had a chance
+ * to spend, so the remaining total is whatever the cap was minus zero. The
+ * telemetry payload now omits `remaining`; the ledger entry written by
+ * `evaluateThresholds` carries the truthful cumulative when it fires.
+ */
+export function buildBudgetExhaustedEnvelope(error: unknown): { output: string; exitCode: 1; elapsed: 0 } {
+  const message = extractErrorMessage(error);
+  return {
+    output: `Delegation blocked: ${message}`,
+    exitCode: 1,
+    elapsed: 0,
+  };
+}
+
+function extractErrorMessage(error: unknown): string {
+  if (error === null || error === undefined) return "";
+  if (typeof error === "string") return error;
+  if (typeof error !== "object") return String(error);
+  const obj = error as { message?: unknown };
+  if (typeof obj.message === "string" && obj.message.length > 0) return obj.message;
+  return String(error);
+}
