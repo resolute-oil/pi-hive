@@ -170,8 +170,6 @@ export interface TelemetryAgentRuntime {
   cacheWriteTokens?: number;
   reasoningTokens?: number;
   costUsd?: number;
-  governanceTokens?: number;
-  governanceCostUsd?: number;
   contextPct?: number;
   // Raw context-window fill behind contextPct (Phase 4.7): the tokens currently
   // in context and the model's window. Threaded from the worker poll / main

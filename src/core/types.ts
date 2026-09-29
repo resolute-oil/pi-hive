@@ -134,9 +134,11 @@ export interface AgentConfig {
   // config, NOT agent-type. There is no "commit ⇒ lead" enforcement — a small
   // project may deliberately let a leaf agent commit. Do not add a type gate here.
   commit?: string;
-  // Optional worker-governance overrides. Omitted fields inherit settings.workerBudgets;
-  // if neither level provides a value, that resource is intentionally unlimited.
-  governance?: WorkerGovernance;
+  // ── Wave 1B — F6 config schema (C1) — per-agent override block. ───────────
+  // Per-agent override for the team's budget caps. Optional fields inherit
+  // `settings.budgets.perWorker` (global defaults); absent block means every
+  // resource is intentionally unlimited. See §2.13 C1 in the refactor plan.
+  budgets?: AgentBudgetsOverride;
   // Derived grouping label: the name of the top-level agent (the orchestrator's
   // direct report) whose subtree this agent belongs to. Not configured.
   groupName?: string;
@@ -160,33 +162,12 @@ export interface TelemetrySettings {
   redactSensitiveData: boolean;
 }
 
-export interface WorkerGovernance {
-  timeoutMs?: number;
-  maxDelegationDepth?: number;
-  maxRuns?: number;
-  tokenBudget?: number;
-  // What `tokenBudget` counts. "all" (default) keeps the original cumulative-
-  // of-everything-Pi-reports accounting (input + output + cacheRead + cacheWrite
-  // + reasoning). "input_output" restricts to just the input + output tokens,
-  // which is what fills the model's context window on each call. Pick the
-  // mode that matches how the agent's workload is metered — for an agent
-  // with heavy prompt caching, "input_output" lets a 1M-token budget roughly
-  // track the model's 1M-token context window instead of being dominated by
-  // cached-read reuse.
-  tokenBudgetScope?: "input_output" | "all";
-  costBudgetUsd?: number;
-  distillerRuns?: number;
-}
-
-export interface TeamBudgets {
-  maxRuns?: number;
-  tokenBudget?: number;
-  // Same semantics as WorkerGovernance.tokenBudgetScope; configurable per
-  // tier so a project can mix a worker that budgets on input/output with a
-  // team that budgets on the full token total.
-  tokenBudgetScope?: "input_output" | "all";
-  costBudgetUsd?: number;
-}
+// REMOVED per F9: WorkerGovernance / TeamBudgets — replaced by the new
+// nested `settings.budgets:` shape (see BudgetsConfig below). The legacy
+// flat-key fields were deleted from config-validation's allowlist by the
+// Wave 1B hard cutover (G-16); F9 deletes the types. Wave 5A callers that
+// used to read these now read `state.config.settings.budgets.perWorker`
+// / `.perTeam` directly (see src/engine/budget/display.ts).
 
 export interface HiveSettings {
   subagentOutputLimit: number;
@@ -195,8 +176,10 @@ export interface HiveSettings {
   // hidden default. queueSize only activates fair waiting when maxParallel is hit.
   maxParallel?: number;
   queueSize?: number;
-  workerBudgets?: WorkerGovernance;
-  teamBudgets?: TeamBudgets;
+  // REMOVED per F9: legacy `workerBudgets` / `teamBudgets` keys. The new
+  // shape lives below at `budgets?: BudgetsConfig`; the Wave 1B config
+  // validator rejects the old keys outright.
+  budgets?: BudgetsConfig;
   telemetry?: TelemetrySettings;
   // Project-relative paths that no worker may read or mutate, even when a broad
   // domain would otherwise allow them. Absolute paths are supported for
@@ -243,10 +226,12 @@ export interface AgentRuntime {
   // authoritative overwrite must PRESERVE this accumulated value.
   reasoningTokens: number;
   costUsd: number;
-  // Monotonic governance accounting. Unlike session-lifetime SDK counters these
-  // never reset on fresh=true, so a fresh transcript cannot bypass budgets.
-  governanceTokens?: number;
-  governanceCostUsd?: number;
+  // REMOVED per F9: the legacy `governanceTokens` / `governanceCostUsd`
+  // monotonic counters were the dual-source-of-truth bug class the refactor
+  // plan targets. The SDK-aligned mirror above (`inputTokens`,
+  // `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `reasoningTokens`,
+  // `costUsd`) is overwritten from `session.getSessionStats()` at run end
+  // and is the single source of truth for cumulative spend.
   contextPct: number;
   // Raw context-window fill (Phase 4.7): the tokens/window behind contextPct.
   contextTokens?: number;
@@ -398,4 +383,127 @@ export interface HiveState {
   // branch point for the hive→normal restore. Reset on each entry transition so
   // its presence reliably means "a snapshot was taken for the current cycle."
   hiveCycleSnapshotLeafId?: string;
+}
+
+// ===========================================================================
+// Wave 1B — F6 config schema types (T6.1).
+//
+// §2.10/§2.13 of docs/reviews/28-09-2026-budget-review/04-refactor-plan.md.
+// Hard cutover per G-16: no dual-format, no `schema_version`, no deprecation
+// alias. Legacy flat keys (`tokenBudget`, `tokenBudgetScope`, `costBudgetUsd`,
+// `maxRuns`, `maxDelegationDepth`, `distillerRuns`, `timeoutMs`, `governance:`)
+// are rejected by the validator.
+//
+// The companion typebox schema lives in src/core/schema.ts (see
+// BudgetCapSchema, BudgetsConfigSchema, etc.). The validator that drives these
+// types from raw YAML lives in src/core/config-validation.ts
+// (validateBudgets).
+//
+// YAML keys are kebab-case (cost-usd, per-day, on-approaching-limit). TS field
+// names are camelCase. The auto-camelizing parser in src/core/yaml.ts handles
+// the conversion at parse time, so a YAML `cost-usd:` reaches this layer as
+// `costUsd: ...`.
+// ===========================================================================
+
+/**
+ * §2.13 C2 — Usage keys eligible for a `tokens` cap's `include:` list.
+ *
+ * Replaces the legacy `scope: input_output | all` enum. Mirrors Pi SDK's
+ * `Usage` shape (input, output, cacheRead, cacheWrite) plus `cost` so a future
+ * cost-included token cap is straightforward.
+ */
+export type IncludeKeys = "input" | "output" | "cacheRead" | "cacheWrite" | "cost";
+
+/**
+ * §2.13 C6 — Explicit `window` shape. Object form (not a flat string) so that
+ * a future `duration?` axis (e.g., per-hour, per-day length) can attach without
+ * a schema break.
+ *
+ * TODO C6 resolution: the Wave 0 contract (`src/engine/budget/types.ts`) uses
+ * a flat `BudgetWindow` string literal at the resolved-policy layer. Future
+ * waves should reconcile by flattening this spec to `BudgetWindow` at policy
+ * consumption time (or by widening BudgetWindow to accept this object shape).
+ */
+export type WindowKind = "rolling" | "per-day" | "all-time";
+
+/** §2.13 C6 — Explicit window spec; `duration` is window-length in ms. */
+export interface BudgetWindowSpec {
+  kind: WindowKind;
+  /** Optional duration in milliseconds for windowed caps (per-hour, per-day). */
+  duration?: number;
+}
+
+/**
+ * §2.13 C4 — Discriminated union via the `resource` literal. Each variant
+ * carries exactly the fields valid for that resource, so impossible combos
+ * (e.g. `tokens.window: "all-time"` when `tokens` doesn't accept that kind)
+ * are caught by the typebox schema at config-load, not by runtime crashes.
+ */
+export interface TokensCap {
+  resource: "tokens";
+  cap: number;
+  window?: BudgetWindowSpec;
+  include?: IncludeKeys[];
+}
+
+export interface CostUsdCap {
+  resource: "costUsd";
+  cap: number;
+  window?: BudgetWindowSpec;
+}
+
+export interface RunsCap {
+  resource: "runs";
+  cap: number;
+  window?: BudgetWindowSpec;
+}
+
+export interface DepthCap {
+  resource: "depth";
+  cap: number;
+}
+
+export type BudgetCap = TokensCap | CostUsdCap | RunsCap | DepthCap;
+
+/**
+ * §2.13 C1 — Per-agent override block. Replaces the legacy `governance:`
+ * frontmatter key on `.pi/hive/agents/*.md` files. Omitted resources inherit
+ * the team's defaults; absent block inherits `settings.budgets` defaults.
+ */
+export interface AgentBudgetsOverride {
+  tokens?: TokensCap;
+  costUsd?: CostUsdCap;
+  runs?: RunsCap;
+  depth?: DepthCap;
+}
+
+/** §2.10 — Per-worker budgets. `depth` is worker-only (no team aggregate). */
+export interface WorkerBudgetConfig {
+  tokens?: TokensCap;
+  costUsd?: CostUsdCap;
+  runs?: RunsCap;
+  depth?: DepthCap;
+}
+
+/** §2.10 — Per-team budgets. `depth` is intentionally absent (per-worker only). */
+export interface TeamBudgetConfig {
+  tokens?: TokensCap;
+  costUsd?: CostUsdCap;
+  runs?: RunsCap;
+}
+
+/**
+ * §2.10/§2.13 — Root budgets block. Lives at `settings.budgets:` in
+ * `hive-config.yaml`. PerWorker / PerTeam are optional; absent block means
+ * every resource is intentionally unlimited (no defaults — C3 was skipped).
+ *
+ * `strategies?: never` is a placeholder for §2.13 C5 (structured strategies).
+ * Not implemented in Wave 1B; the slot is reserved so a future wire can land
+ * without a schema change.
+ */
+export interface BudgetsConfig {
+  perWorker?: WorkerBudgetConfig;
+  perTeam?: TeamBudgetConfig;
+  /** §2.13 C5 placeholder; deferred to v3 unless user overrides. */
+  strategies?: never;
 }

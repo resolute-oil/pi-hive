@@ -3,7 +3,7 @@ import { BODY_CATEGORIES } from "../core/mental-model";
 import type { AgentRuntime, HiveState, KnowledgeRef } from "../core/types";
 import { buildSharedContext, renderDomainScopes, renderKnowledgeRefs } from "../core/prompting";
 import { plannerOperatingTemplate, REVIEWER_OPERATING_TEMPLATE } from "../agents/role-templates";
-import { budgetRemaining } from "./governance";
+import { budgetRemaining } from "./budget/display";
 
 // The type-specific operating contract injected into a worker's prompt. States
 // the capability boundary the enforcer also mechanically applies, so the model

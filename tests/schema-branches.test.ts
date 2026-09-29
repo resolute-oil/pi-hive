@@ -63,14 +63,17 @@ test("shape validation rejects malformed optional collections and scalar fields"
     [config({ agents: "bad" }), /agents must be a list/],
     [config({ settings: "bad" }), /settings must be an object/],
     [config({ settings: { maxParallel: Number.NaN } }), /finite number/],
-    [config({ settings: { workerBudgets: [] } }), /workerBudgets must be an object/],
-    [config({ settings: { teamBudgets: [] } }), /teamBudgets must be an object/],
     [config({ settings: { secretPaths: [""] } }), /secretPaths\[0\]/],
     [config({ settings: { distiller: { enabled: "yes" } } }), /enabled must be true or false/],
-    [config({ settings: { workerBudgets: { tokenBudgetScope: "inpt_output" } } }), /tokenBudgetScope must be one of input_output, all/],
-    [config({ settings: { workerBudgets: { tokenBudgetScope: 7 } } }), /tokenBudgetScope must be one of input_output, all/],
-    [config({ settings: { teamBudgets: { tokenBudgetScope: "everything" } } }), /tokenBudgetScope must be one of input_output, all/],
-    [config({ orchestrator: agent("O", { governance: { tokenBudgetScope: "cache_only" } }) }), /tokenBudgetScope must be one of input_output, all/],
+    // Wave 5 / F9 — replaced with the new nested `budgets:` shape. The legacy
+    // `workerBudgets` / `teamBudgets` / `governance` keys are gone from the
+    // schema validator's allowlist; errors below surface from the typebox
+    // schema validator, which prefixes the failing field with the full path.
+    [config({ settings: { budgets: { perWorker: [] } } }), /settings\.budgets\.perWorker must be object/],
+    [config({ settings: { budgets: { perTeam: [] } } }), /settings\.budgets\.perTeam must be object/],
+    [config({ settings: { budgets: { perWorker: { tokens: { cap: 100, include: ["bogus"] } } } } }), /settings\.budgets\.perWorker\.tokens\.include\.0 must be equal/],
+    [config({ settings: { budgets: { perWorker: { tokens: { cap: 100, window: { kind: "weird" } } } } } }), /settings\.budgets\.perWorker\.tokens\.window\.kind must be equal/],
+    [config({ orchestrator: agent("O", { budgets: { tokens: { cap: 100, include: ["bogus"] } } }) }), /orchestrator\.budgets\.tokens\.include\.0 must be equal/],
   ];
   for (const [value, expected] of invalid) assert.throws(() => validateHiveConfigShape(value), expected);
 });
