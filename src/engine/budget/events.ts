@@ -85,6 +85,33 @@ export const WARNING_REMAINING_RATIO = 0.20;
 /** T3.3 — exhaustion fires at or below this remaining ratio. */
 export const EXHAUSTED_REMAINING_RATIO = 0;
 
+/**
+ * Safely invoke `session.abort()` and ensure a rejected Promise cannot
+ * become an unhandledRejection (which crashes the Node 26 process by
+ * default). If abort is undefined or returns void, this is a no-op. If
+ * abort throws synchronously, the throw is swallowed (the comment on
+ * the call site explains why fakes do this).
+ *
+ * Per the audit (HTML §5 B2): the prior code used `void session.abort()`,
+ * which discards the Promise. The SDK's `session.abort(): Promise<void>`
+ * can reject asynchronously during teardown (e.g. an internal dispose
+ * step fails) — a rejection on a `void`-discarded Promise becomes an
+ * unhandledRejection. dispatch.ts:393 already uses the `?.catch(...)`
+ * pattern; this helper centralizes it for events.ts:382.
+ */
+export function safelyAbortSession(session: { abort?: () => Promise<void> | void } | null | undefined): void {
+  if (!session || typeof session.abort !== "function") return;
+  try {
+    const result = session.abort();
+    if (result && typeof (result as { catch?: unknown }).catch === "function") {
+      (result as Promise<void>).catch((): undefined => undefined);
+    }
+  } catch {
+    // synchronous throw — best-effort cancel; controller signal carries the
+    // cancel for real workers.
+  }
+}
+
 /** T3.4 — tool names whose execution is blocked when the worker budget is exhausted. */
 const TOOL_CALL_BLOCK_TOOLS: ReadonlySet<string> = new Set<string>([
   "bash",
@@ -379,13 +406,11 @@ export function evaluateThresholds(
       // Promise; we don't await — the canonical "Pi will not continue
       // automatically" event (`agent_settled`) is what fires after, and
       // the T3.6 ordering test pins that ordering by emitting both
-      // events through a deterministic fake.
-      try {
-        void session.abort();
-      } catch {
-        // Some fakes throw synchronously on abort; ignore and let the
-        // controller signal carry the cancel.
-      }
+      // events through a deterministic fake. The Promise's rejection (if
+      // any) must be handled inline — `void session.abort()` would let it
+      // become an unhandledRejection. `safelyAbortSession` centralizes the
+      // try/catch + .catch pattern.
+      safelyAbortSession(session);
       continue;
     }
 

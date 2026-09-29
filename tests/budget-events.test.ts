@@ -686,3 +686,38 @@ test("agent_settled: T4.1 writes a single checkpoint CustomEntry (F4 sole finali
   assert.equal(last.cumulative.costUsd, 0.25);
   assert.equal(last.kind, undefined, "no specific kind — sentinel means 'canonical end-of-run'");
 });
+
+// ── B2: rejection-safe session.abort() on the exhaustion path ──────────────
+
+test("message_end: T3.3 session.abort() rejection does not surface as unhandledRejection (B2)", async () => {
+  const cap = 1_000;
+  const policy = makePolicy({
+    tokens: { resource: "tokens", cap },
+  });
+  const { ledger, sm } = await makeLedger(policy);
+  // Session whose abort() returns a rejected Promise — simulates an SDK
+  // teardown step failing after the worker has already exhausted its budget.
+  // Mutate the existing makeSession object so we don't lose the closure that
+  // captures `abortCallCount`.
+  const session = makeSession(makeStats(0, 0));
+  session.abort = (): Promise<void> => {
+    session.abortCallCount += 1;
+    return Promise.reject(new Error("synthetic abort failure"));
+  };
+  installBudgetEventHooks(session, ledger, policy, sm, new AbortController());
+
+  // Watch for unhandled rejections during the exhausted-path emit.
+  const unhandled: unknown[] = [];
+  const handler = (reason: unknown) => unhandled.push(reason);
+  process.on("unhandledRejection", handler);
+  try {
+    session.stats = makeStats(cap, 0);
+    session.emit({ type: "message_end" });
+    // Let the microtask queue drain so the rejection (if any) lands.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(unhandled.length, 0, `unexpected unhandledRejection: ${unhandled.map((r) => (r as Error)?.message ?? String(r)).join("; ")}`);
+    assert.equal(session.abortCallCount, 1, "session.abort() called exactly once despite rejection");
+  } finally {
+    process.off("unhandledRejection", handler);
+  }
+});
