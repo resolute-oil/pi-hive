@@ -1,11 +1,31 @@
 # Budget Strategies Review — Current Codebase and Active Refactor
 
-**Date:** 2026-09-28 (review); 2026-09-29 (refactor redesign)
+**Date:** 2026-09-28 (review); 2026-09-29 (refactor redesign); 2026-09-29 (local-only constraint added)
 **Branch:** `review/budget-redesign-2026-09-28` (off `feat/budget-strategy` at `9f950fb`)
-**Active refactor branch:** per-phase worktrees — see **Working conventions** below.
+**Active refactor branch:** per-phase worktrees under `APP_ROOT/.worktrees/` — see **Working conventions** below.
 **SDK reference verified against:** `@earendil-works/pi-coding-agent@0.99.1` (commit `ea9c54a` on `refactor/budget`). Earlier draft referenced v0.87.1 in the plan header; that has been corrected to 0.99.1 in `04-refactor-plan.md`.
 
 **Trigger:** Multiple-session failure to fix the `fresh=true` budget-reset bug in `delegate_agent`. User requested a thorough review of the current codebase and how the budget system works, plus a full refactor plan using Pi Best Practices. The current budget system is being **entirely replaced**, not patched.
+
+## LOCAL-ONLY constraint — read first
+
+**All work for this refactor stays local to this `APP_ROOT`. Nothing is pushed.** No `git push`, no PRs, no remote PR activity of any kind. This applies to:
+
+- The `review/budget-redesign-2026-09-28` branch (documentation).
+- The `refactor/budget` staging branch (SDK bump, hive:version test fix, these review docs).
+- Every per-phase worktree branch (`refactor/budget-<phase>-<task>`) created during implementation.
+- Every session's session log.
+
+**Why this constraint exists.** The GitHub repo on `origin` is in a state that needs cleanup before any of this work can land there — many commits on `origin/main` need to be unwound to return the repo to the state this worktree's branch was based on. Until that cleanup happens, **pushing this branch would entangle the local refactor with the messy upstream history**. The user has decided the cleanup is out of scope for this session; pushing is therefore out of scope too.
+
+**What this means in practice:**
+
+- Workers commit per task to their per-phase branch, but **the branch stays local**. The commit is on the local ref; no `git push` is performed.
+- Per-phase branches live in this `APP_ROOT` only. They are NOT shared across machines, NOT mirrored to `origin`.
+- The coordinator's session log records branch state in local terms (`branch: refactor/budget-f5-eol-commands @ <local SHA>`).
+- If a future session wants to land any of this work on `origin`, it must first do the repo cleanup (the user will instruct) — only then do `git push` make sense. The local commits are preserved across the cleanup as long as the worktree lives on.
+
+**AGENTS.md's "never push to upstream" rule still applies** (`AGENTS.md` §Repository boundaries). It is now joined by "never push to origin either, for this branch." Local-only is the default for the duration of this refactor.
 
 ## Scope
 
@@ -79,20 +99,22 @@ This refactor runs as **one coordinator session** that owns the plan and a strea
 **Coordinator session responsibilities:**
 - Owns `04-refactor-plan.md`. Ticks `[ ]` boxes to `[x]` as tasks complete (per the skill's checkbox update rule).
 - Owns `sessions/` directory. Maintains a session log per session that touches the refactor.
-- Reviews worker PR diffs before merging. Uses `ask_user` for ambiguous decisions the worker escalated.
+- Reviews worker branch diffs in the worktree (locally — no `origin`). Uses `ask_user` for ambiguous decisions the worker escalated.
+- Verifies per-phase worktree is correctly named (matches the naming convention) and correctly based off `refactor-budget` HEAD (per §1).
 - Never defers — if a worker hands off a deferred item without explicit user permission, the coordinator either asks the user or routes it back to the worker.
+- Never pushes (per the LOCAL-ONLY constraint at the top of this document).
 
 **Worker session responsibilities:**
 - Picks up a phase or task from the plan (one or more contiguous task checkboxes).
-- Works in a per-phase worktree under `APP_ROOT/.worktrees/`.
+- Works in a per-phase worktree under `APP_ROOT/.worktrees/` (NOT on `main`, NOT on `refactor-budget` directly — the worktree's own branch).
 - Writes the test first (TDD red step).
 - Implements to green.
-- Refactors, commits per-task, pushes to `origin` (not `upstream` — see AGENTS.md).
-- Opens a PR. Does NOT merge. Wait for coordinator + user approval.
-- Writes a session log in `sessions/<date>-<agent>-<phase>.md` covering: what was done, what was learned, blockers, next steps.
+- Refactors, commits per-task **on the local per-phase branch**. Does NOT `git push`. Does NOT open a PR (no remote PRs for this refactor).
+- Hands off to the coordinator when the phase's gates are green. The coordinator reviews locally.
+- Writes a session log in `sessions/<date>-<agent>-<phase>.md` covering: what was done, what was learned, blockers, next steps, files touched, tests added.
 - Uses `ask_user` for ambiguous decisions, not guesses. Never defers — if blocked, asks.
 
-**Sub-agent invocations** within a worker session (per `05-parallelization-analysis.md`) follow the same conventions: TDD, regression tests, no defer, ask_user, session log entries for each sub-agent invocation.
+**Sub-agent invocations** within a worker session (per `05-parallelization-analysis.md`) follow the same conventions: TDD, regression tests, no defer, ask_user, session log entries for each sub-agent invocation. Sub-agents do NOT push branches or open PRs (none would be possible given the local-only constraint); the parent worker session owns the branch.
 
 ### 5. ask_user for ambiguous decisions
 
