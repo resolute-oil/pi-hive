@@ -55,32 +55,15 @@ export interface BudgetRemaining {
 }
 
 // ---------------------------------------------------------------------------
-// New-shape readers — pull caps from `settings.budgets.*` (with the legacy
-// `settings.workerBudgets` / `settings.teamBudgets` keys kept ONLY for
-// backward compat with in-flight state objects; the Wave 1B config
-// validator no longer accepts these keys in YAML). Wave 5 / F9's gate
-// check requires this fallback to be empty, since nothing in the test
-// suite sets the legacy keys any more. Kept here as a no-op for code
-// clarity; the cleanup wave does not add or remove this branch.
+// New-shape readers — pull caps from `settings.budgets.*`. The Wave 1B
+// hard cutover (G-16) removed the legacy `settings.workerBudgets` /
+// `settings.teamBudgets` keys from the YAML validator. Verified via grep:
+// these fields are no longer read anywhere in src/ or tests/. Dead-code
+// removal (audit C2).
 // ---------------------------------------------------------------------------
 
 interface NewShapeSettings {
   budgets?: ResolvedBudgetsConfig;
-  workerBudgets?: {
-    maxRuns?: number;
-    tokenBudget?: number;
-    tokenBudgetScope?: "input_output" | "all";
-    costBudgetUsd?: number;
-    maxDelegationDepth?: number;
-    distillerRuns?: number;
-    timeoutMs?: number;
-  };
-  teamBudgets?: {
-    maxRuns?: number;
-    tokenBudget?: number;
-    tokenBudgetScope?: "input_output" | "all";
-    costBudgetUsd?: number;
-  };
 }
 
 /**
