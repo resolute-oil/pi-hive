@@ -1296,7 +1296,11 @@ export async function requestEndSession(
   const session = runtime.session as CooperativeSession | undefined;
   const sessionManager = session?.sessionManager;
   if (!session || !sessionManager || typeof session.abort !== "function") {
-    return { ok: false, reason: "no_runtime" };
+    return {
+      ok: false,
+      reason: "session_unavailable",
+      error: "session is not abortable (runtime has no session, or session lacks abort() method)",
+    };
   }
 
   const cumulative = cumulativeFromRuntime(runtime);
@@ -1329,7 +1333,11 @@ export async function requestSnapshot(
   const session = runtime.session as CooperativeSession | undefined;
   const sessionManager = session?.sessionManager;
   if (!session || !sessionManager || typeof sessionManager.getLeafId !== "function") {
-    return { ok: false, reason: "no_runtime" };
+    return {
+      ok: false,
+      reason: "session_unavailable",
+      error: "session is not snapshotable (runtime has no session/sessionManager, or sessionManager lacks getLeafId/branchWithSummary)",
+    };
   }
 
   const cumulative = cumulativeFromRuntime(runtime);

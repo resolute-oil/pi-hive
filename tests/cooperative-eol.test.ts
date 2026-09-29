@@ -268,3 +268,45 @@ test("requestSnapshot writes a cooperative-snapshot ledger entry and invokes bra
   assert.equal(call.data.label, "pre-cleanup", "label recorded on the entry");
   assert.equal(call.data.snapshotId, "snap-42", "snapshotId recorded on the entry");
 });
+
+// ---------------------------------------------------------------------------
+// B3: requestEndSession / requestSnapshot distinguish "no_runtime" from
+// "session_unavailable" so the dashboard can tell whether the worker has
+// not been dispatched yet vs. the worker's session is in an unexpected
+// state. requestCompaction already returns the distinct "compact_failed"
+// reason + error string — bring the other two into the same envelope.
+// ---------------------------------------------------------------------------
+
+test("requestEndSession: no runtime returns {ok: false, reason: 'no_runtime'} (existing)", async () => {
+  const state = makeState();  // empty runtimes map
+  const result = await requestEndSession(state, "builder", { reason: "task complete" });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "no_runtime");
+});
+
+test("requestEndSession: runtime exists but session lacks abort method returns distinct reason (B3)", async () => {
+  const runtime = makeRuntime();  // default fake session IS abortable, so unset it
+  (runtime as { session: unknown }).session = undefined;
+  const state = makeState(runtime);
+  const result = await requestEndSession(state, "builder", { reason: "task complete" });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "session_unavailable", "session-unavailable must not be classified as no_runtime");
+  assert.ok(result.error && /abortable/i.test(result.error), "error string describes the missing capability");
+});
+
+test("requestSnapshot: no runtime returns {ok: false, reason: 'no_runtime'} (existing)", async () => {
+  const state = makeState();  // empty runtimes map
+  const result = await requestSnapshot(state, "builder", { label: "pre-cleanup" });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "no_runtime");
+});
+
+test("requestSnapshot: runtime exists but sessionManager lacks branchWithSummary returns distinct reason (B3)", async () => {
+  const runtime = makeRuntime();
+  (runtime as { session: unknown }).session = undefined;
+  const state = makeState(runtime);
+  const result = await requestSnapshot(state, "builder", { label: "pre-cleanup" });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "session_unavailable", "session-unavailable must not be classified as no_runtime");
+  assert.ok(result.error && /snapshotable/i.test(result.error), "error string describes the missing capability");
+});

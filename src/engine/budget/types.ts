@@ -315,19 +315,21 @@ export interface RequestCompactionResult {
   compacted: boolean;
   estimatedTokens: number;
   limit: number;
-  reason?: "no_runtime" | "over_cap" | "compact_failed";
+  reason?: "no_runtime" | "over_cap" | "compact_failed" | "session_unavailable";
   error?: string;
 }
 
 export interface RequestEndSessionResult {
   ok: boolean;
-  reason?: "no_runtime";
+  reason?: "no_runtime" | "session_unavailable";
+  error?: string;
 }
 
 export interface RequestSnapshotResult {
   ok: boolean;
   snapshotId?: string;
-  reason?: "no_runtime";
+  reason?: "no_runtime" | "session_unavailable";
+  error?: string;
 }
 
 // ---------------------------------------------------------------------------
