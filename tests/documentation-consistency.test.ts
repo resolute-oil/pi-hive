@@ -26,6 +26,7 @@ const expectedCommands = [
   "hive:plan",
   "hive:plan-mode",
   "hive:toggle",
+  "hive:version",
 ];
 
 const expectedTools = [
