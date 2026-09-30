@@ -575,12 +575,12 @@ export async function dispatchAgent(
   runtime.elapsedMs = 0;
   runtime.runCount++;
   runtime.startedAt = Date.now();
-  // timeoutMs is not modeled in WorkerBudgetPolicy (it's a per-agent
-  // concurrency setting, not a budget cap), so the policy resolver can't
-  // supply it — keep using the legacy merge shim for this field alone.
-  // Migrated tokenBudgetScope callers to resolveWorkerBudgetPolicy above
-  // (see tokenScopeFromPolicy); tokenBudgetScope is the only effectiveWorkerGovernance
-  // field represented in the policy shape.
+  // timeoutMs is the one budget-shaped field still consumed from
+  // effectiveWorkerGovernance rather than from resolveWorkerBudgetPolicy —
+  // WorkerBudgetPolicy models caps (token/cost/runs/depth), not concurrency
+  // timeouts. tokenBudgetScope was migrated to the policy resolver earlier
+  // and is read once at line 394 above; the rest of the budget-tier fields
+  // are already policy-only at this point.
   const governance = effectiveWorkerGovernance(state, runtime);
   const runController = new AbortController();
   let timedOut = false;
