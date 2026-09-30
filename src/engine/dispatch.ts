@@ -644,6 +644,11 @@ export async function dispatchAgent(
   });
 
   // Tick elapsedMs + live context fill + dashboard snapshot every 1s so the
+  // dashboard's live view stays fresh for the duration of the worker run.
+  // The helper itself is defined at the top of this module; .unref() so the
+  // timer never holds the Node event loop open after the run ends.
+  runtime.timer = startElapsedTimer(state, runtime);
+  runtime.timer.unref?.();
 
   // Non-budget session event subscription: streaming text, tool telemetry,
   // retry, compaction telemetry, agent_end text fallback, per-message
