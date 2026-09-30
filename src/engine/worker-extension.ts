@@ -2,6 +2,7 @@ import { DefaultResourceLoader, getAgentDir } from "@earendil-works/pi-coding-ag
 import type { HiveState } from "../core/types";
 import { enforceDomainForTool } from "./domain";
 import { emitHiveEvent } from "./observability";
+import { buildBudgetToolCallHandler } from "./budget/events";
 
 export function normalizeWorkerSkillPaths(skillPaths: unknown[] = []): string[] {
   return skillPaths.map((entry, index) => {
@@ -50,6 +51,19 @@ export function workerResourceLoader(state: HiveState, cwd: string, callerName: 
     noThemes: true,
     extensionFactories: [
       (pi: any) => {
+        // T3.4 (G-01) — wire the budget tool_call blocker per worker. The
+        // handler looks up its budget context by `callerName` from the
+        // module-level map populated by `installBudgetEventHooks`. Returns
+        // `{ block: true, reason, terminate: false }` for `bash` / `edit` /
+        // `write` / `read` when workerTokensRemaining ≤ 0 or
+        // workerCostUsdRemaining ≤ 0; otherwise returns undefined and the
+        // tool runs. Registered BEFORE domain enforcement so a budget
+        // block fires first; if both gates could block, budget is cheaper
+        // to evaluate (a Map lookup + arithmetic) and surfaces the
+        // authoritative cap-driven reason. The Pi runner composes handlers
+        // in registration order (per extension-patterns-reference.md §5);
+        // the first `{ block: true }` short-circuits the chain.
+        pi.on("tool_call", buildBudgetToolCallHandler(callerName));
         pi.on("tool_call", async (event: any, ctx: any) => enforceDomainForTool(state, event, ctx));
         // Only non-2xx responses (429/529 rate-limit/overload), mirroring the
         // orchestrator handler — successes would flood one row per call.
