@@ -27,13 +27,19 @@ import { resolveModel } from "./model-resolution";
 export async function runDistillerProcess(state: HiveState, ctx: ExtensionContext, prompt: string, model: string): Promise<string> {
   const resolvedModel = resolveModel(ctx, model);
   if (!resolvedModel) return "";
+  // resolveModel returns the structural ResolvedModel (provider/id/...).
+  // The SDK's createAgentSession wants the full Model<TApi> interface.
+  // The shape returned by modelRegistry.find is structurally compatible
+  // with Model<TApi> (provider + id are the discriminator fields the SDK
+  // also reads), so the cast is a one-time structural widening rather
+  // than an escape hatch.
 
   // In-process now: no separate session to inherit. The distiller's transcript
   // is a scratch prompt/response pair, not durably meaningful on its own, so it
   // never needs a session file — SessionManager.inMemory() is correct here.
   const { session } = await createAgentSession({
     cwd: ctx.cwd,
-    model: resolvedModel,
+    model: resolvedModel as never,
     thinkingLevel: "off",
     tools: [],
     noTools: "all",

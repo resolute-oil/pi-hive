@@ -1,4 +1,4 @@
-import { withFileMutationQueue, type AgentSession, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { withFileMutationQueue, type AgentSession, type ExtensionContext, type SessionStats, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { existsSync, readdirSync, renameSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -29,7 +29,7 @@ import { addHiveActivity } from "../ui/tui/activity";
 import { resolveConfiguredPath } from "../core/safe-path";
 import { acquireWorkerSlot, effectiveWorkerGovernance, releaseWorkerSlot } from "./governance";
 import { WorkerRunLifecycle } from "./worker-lifecycle";
-import { modelKey, resolveModel } from "./model-resolution";
+import { modelKey, resolveModel, type ResolvedModel } from "./model-resolution";
 import { delegateAgent as delegateAgentFn, BudgetExhaustedError, type DelegateAgentThinkingLevel } from "./budget/worker-tools";
 import { installBudgetEventHooks } from "./budget/events";
 import { wireDispatchSubscription, makeDispatchStreamState } from "./dispatch-subscribe";
@@ -310,12 +310,23 @@ export async function dispatchAgent(
   // it also means an unresolvable model aborts cleanly: no run-start field —
   // runCount, startedAt, elapsedMs, the token baselines — is touched for a run
   // that never happens (M-misc), so the previous run's stats stay intact.
-  let resolvedModel: any;
-  try { resolvedModel = resolveModel(ctx, model); } catch { resolvedModel = undefined; }
+  // TS I11: typed ResolvedModel (was `any`), explicit catch that captures
+  // the resolution error in a sibling variable so the dispatcher surfaces a
+  // structured "Cannot resolve model" message rather than swallowing the
+  // cause silently.
+  let resolvedModel: ResolvedModel | undefined;
+  let resolveModelError: string | undefined;
+  try {
+    resolvedModel = resolveModel(ctx, model);
+  } catch (error) {
+    resolveModelError = error instanceof Error ? error.message : String(error);
+    resolvedModel = undefined;
+  }
   if (!resolvedModel) {
     runtime.status = "error";
     releaseWorkerSlot(state);
-    return { output: `Cannot resolve model "${model}" for ${runtime.config.name}.`, exitCode: 1, elapsed: 0 };
+    const reason = resolveModelError ? ` (${resolveModelError})` : "";
+    return { output: `Cannot resolve model "${model}" for ${runtime.config.name}${reason}.`, exitCode: 1, elapsed: 0 };
   }
 
   // Wave 2 fixup — delegateAgent owns the budget pre-flight + session creation
@@ -630,8 +641,12 @@ export async function dispatchAgent(
   // stats throws, the incremental values already on the runtime are kept.
   // Item 9: SessionStats also carries authoritative message/tool counts —
   // preferred over the hand-tallied toolCount so the numbers match the SDK's own.
+  // TS I14: typed stats: SessionStats | undefined (was `any` with a fallback
+  // chain). The SDK returns the documented SessionStats shape; the legacy
+  // `tokens ?? stats.usage ?? stats` fallbacks were a stopgap from before
+  // the SDK pinned its surface and are no longer reachable.
   try {
-    const stats: any = session.getSessionStats?.();
+    const stats: SessionStats | undefined = session.getSessionStats?.();
     if (stats) {
       const toolCalls = Number(stats.toolCalls);
       const toolResults = Number(stats.toolResults);
@@ -651,26 +666,23 @@ export async function dispatchAgent(
       // delegation_end.runtime.toolCount jump from this-run to lifetime at run end.
       // The lifetime count is preserved separately in the `counts` payload below,
       // which honestly documents its session-lifetime semantics.
-      const tokens = stats.tokens ?? stats.usage ?? stats;
-      const input = Number(tokens.input ?? tokens.inputTokens);
-      const output = Number(tokens.output ?? tokens.outputTokens);
+      const { tokens, cost } = stats;
+      const input = Number(tokens.input);
+      const output = Number(tokens.output);
       if (Number.isFinite(input)) runtime.inputTokens = input;
       if (Number.isFinite(output)) runtime.outputTokens = output;
-      const cacheRead = Number(tokens.cacheRead ?? tokens.cacheReadTokens);
-      const cacheWrite = Number(tokens.cacheWrite ?? tokens.cacheWriteTokens);
+      const cacheRead = Number(tokens.cacheRead);
+      const cacheWrite = Number(tokens.cacheWrite);
       if (Number.isFinite(cacheRead)) runtime.cacheReadTokens = cacheRead;
       if (Number.isFinite(cacheWrite)) runtime.cacheWriteTokens = cacheWrite;
-      const cost = Number(stats.cost?.total ?? stats.cost ?? stats.costUsd);
-      if (Number.isFinite(cost)) runtime.costUsd = cost;
-      // reasoning is NOT part of SessionStats.tokens (Phase 4.8): only overwrite
-      // when the SDK actually reports a POSITIVE value, otherwise keep the value
-      // accumulated from message_end. A finite 0 from stats (reasoning simply
-      // absent) must not wipe accumulation — only trust it to zero when nothing
-      // was accumulated in the first place.
-      const reasoning = Number(tokens.reasoning ?? tokens.reasoningTokens);
-      if (Number.isFinite(reasoning) && (reasoning > 0 || runtime.reasoningTokens === 0)) {
-        runtime.reasoningTokens = reasoning;
-      }
+      const costUsd = Number(cost);
+      if (Number.isFinite(costUsd)) runtime.costUsd = costUsd;
+      // reasoning is NOT part of SessionStats.tokens (Phase 4.8): the SDK
+      // surface returns {input, output, cacheRead, cacheWrite, total} only.
+      // Reasoning is accumulated from message_end events in the dispatch
+      // subscribe handler and preserved across runs here. The fallback
+      // `tokens.reasoning ?? tokens.reasoningTokens` chain was a stopgap;
+      // removed by TS I14.
     }
   } catch { /* keep incremental values if stats is unavailable */ }
 
