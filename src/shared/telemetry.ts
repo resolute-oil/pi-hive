@@ -61,6 +61,10 @@ export type HiveTelemetryEventType =
   | "distill_end"
   | "budget_warning"
   | "budget_exhausted"
+  // Wave 0 contract stub — the ledger persistence event (G-22 hard cutover
+  // replaces the legacy telemetry event shapes with a single budget_ledger
+  // event carrying the full CustomEntry payload).
+  | "budget_ledger"
   | "queue_update"
   // Plan-store events. Emitted by the core (which cannot reach bun:sqlite) and
   // materialized into typed plan_* tables by the dashboard on ingest (§7.4).
@@ -102,8 +106,20 @@ export interface HiveTelemetryEvent<P = JsonRecord> {
   payload: P;
 }
 
+// Wave 0 contract stub — Slice 10 telemetry event shape. The dashboard
+// hard-cutovers (per G-22) to the new budget_ledger event in the same refactor
+// as the engine. The event carries the full CustomEntry so the dashboard's
+// per-worker timeline can render caps/cumulative/marker/kind without
+// re-walking the session JSONL. Wave 3 emits; Wave 5 dashboard ingests.
+//
+// Lives in shared/telemetry.ts (not observability/server/runtime.ts) so the
+// Node test config can typecheck it without pulling in bun:sqlite.
+export interface BudgetLedgerTelemetryEvent extends HiveTelemetryEvent {
+  type: "budget_ledger";
+  payload: { agentSlug: string; entry: import("../core/types").BudgetLedgerEntry };
+}
+
 export interface TelemetryRegistryRow {
-  registered_at?: string;
   session_id?: string;
   project_id?: string;
   project_root?: string;

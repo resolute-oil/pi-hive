@@ -399,3 +399,135 @@ export interface HiveState {
   // its presence reliably means "a snapshot was taken for the current cycle."
   hiveCycleSnapshotLeafId?: string;
 }
+
+// ── Budget refactor (Wave 0 contract stubs) ─────────────────────────────────
+//
+// The types below are pinned here so the engine/budget/* stubs compile against
+// a stable contract. Slice 3 / 4 / 7 / 8 will refine them (WorkerBudgetPolicy
+// gets Strategies/etc., BudgetLedgerEntry gets the full data schema); the
+// initial shapes match the plan §2.5 / §2.10 / §2.13 / §2.14 enough for
+// compilation. Forward-reference is fine (per the Wave 0 contract notes).
+
+// Slice 3 — WorkerBudgetPolicy (the resolved policy object). Composed of
+// worker + team blocks, each with optional tokens/costUsd/runs/depth caps
+// (per §2.10 nested shape). The WindowKind / IncludeKeys / Strategies fields
+// land in slice 7 but are forward-referenced here so the slice 3 stub
+// typechecks. `strategies` is optional because most projects will rely on
+// the global strategies default.
+export interface WorkerBudgetPolicy {
+  worker: {
+    tokens?: { cap: number; window?: WindowKind; include?: IncludeKeys };
+    costUsd?: { cap: number; window?: WindowKind };
+    runs?: { cap: number };
+    depth?: { cap: number };
+  };
+  team: {
+    tokens?: { cap: number; window?: WindowKind; include?: IncludeKeys };
+    costUsd?: { cap: number; window?: WindowKind };
+    runs?: { cap: number };
+  };
+  strategies?: Strategies;
+}
+
+// Slice 8 — BudgetLedgerEntry. The persisted CustomEntry shape that
+// BudgetLedger writes via appendCustomEntry. Caps are keyed by the §2.3
+// documented names (workerTokens, workerCostUsd, workerRuns, workerDepth,
+// teamTokens, teamCostUsd, teamRuns); marker and kind are optional so the
+// throttled-cadence writes (no marker / no kind) compose with the operator
+// + cooperative writes (marker: "checkpoint", kind: <documented kind>).
+// G-08 fix: kind is typed (not `string`) so a typo in a Wave 3 call site
+// fails typecheck before runtime.
+export type BudgetLedgerKind =
+  | "end"
+  | "compact"
+  | "respawn"
+  | "pause"
+  | "snapshot"
+  | "restore"
+  | "resume"
+  | "compact-aborted"
+  | "force-kill"
+  | "force-end"
+  | "tear-down-all"
+  | "cooperative-compact"
+  | "cooperative-end"
+  | "cooperative-snapshot";
+
+export interface BudgetLedgerEntry {
+  type: "custom";
+  customType: "pi-hive-budget-ledger";
+  data: {
+    caps: {
+      workerTokens?: number;
+      workerCostUsd?: number;
+      workerRuns?: number;
+      workerDepth?: number;
+      teamTokens?: number;
+      teamCostUsd?: number;
+      teamRuns?: number;
+    };
+    cumulative: { tokens: number; costUsd: number; runs: number };
+    writtenAt: number;
+    agentSlug: string;
+    marker?: "warning" | "exhausted" | "checkpoint";
+    kind?: BudgetLedgerKind;
+  };
+}
+
+// Slice 4 — BudgetBlock. The discriminated union describing a budget refusal;
+// returned by checkBudgetPolicy() when a worker/team cap is exceeded. The full
+// shape is finalized here (slice 4) so policy.ts can import it directly.
+export interface BudgetBlock {
+  reason: string;
+  scope: "worker" | "team";
+  resource: "tokens" | "costUsd" | "runs" | "depth";
+  remaining: { tokens?: number; costUsd?: number; runs?: number };
+  limit: { tokens?: number; costUsd?: number; runs?: number; depth?: number };
+}
+
+// Slice 7 — IncludeKeys (the C2 typebox-projected shape from §2.13). The
+// WindowKind / Strategies shape lands in slice 7; the include list is needed
+// here for workerConsumedTokens.
+export type IncludeKey = "input" | "output" | "cacheRead" | "cacheWrite" | "reasoning";
+export type IncludeKeys = IncludeKey[];
+
+// Slice 7 — WindowKind + Strategies + per-tier config shapes. The full
+// structured-strategies shape lands here (C5 conditional — the type is
+// unconditionally available; runtime honors the user's strategies block when
+// present and falls back to the legacy "default" | "compact" strategy enum
+// otherwise).
+export type WindowKind = "per-session" | "per-run" | "per-day" | "per-team-lifetime";
+
+export interface Strategies {
+  onApproachingLimit: { action: "wrap-up" | "compact" | "none"; threshold: number; hint: string };
+  onExhaustion: { action: "compact" | "abort" | "none"; customInstructions?: string };
+  summary: { maxTokens: number };
+}
+
+export interface BudgetsConfig {
+  defaultsEnabled?: boolean;
+  perWorker: WorkerBudgetPolicy["worker"];
+  perTeam: WorkerBudgetPolicy["team"];
+  strategies?: Strategies;
+}
+
+// Per-agent and per-team config shapes for the typebox schema projection.
+// These mirror the worker/team sub-blocks of WorkerBudgetPolicy but are exposed
+// as standalone types so the schema can reference them without cycling.
+export interface WorkerBudgetConfig {
+  tokens?: { cap: number; window?: WindowKind; include?: IncludeKeys };
+  costUsd?: { cap: number; window?: WindowKind };
+  runs?: { cap: number };
+  depth?: { cap: number };
+}
+
+export interface TeamBudgetConfig {
+  tokens?: { cap: number; window?: WindowKind; include?: IncludeKeys };
+  costUsd?: { cap: number; window?: WindowKind };
+  runs?: { cap: number };
+}
+
+// Slice 3 — WorkerBudgetStrategy (the flat enum that the strategies: object
+// in §2.13/C5 projects to). Two values: default vs compact EOL behavior.
+// (Strategies / BudgetsConfig are declared in the slice 7 block above.)
+export type WorkerBudgetStrategy = "default" | "compact";
