@@ -68,6 +68,22 @@ export interface DelegateAgentInternals {
   installBudgetEventHooks: typeof installBudgetEventHooksFn;
   sessionManagerCreate: (cwd: string) => SessionManager;
   sessionManagerContinueRecent: (cwd: string) => SessionManager;
+  // Production-side seam: when supplied, delegateAgent uses it to create the
+  // AgentSession instead of going through SessionManager.create()/continueRecent()
+  // .toAgentSession(). The dispatcher passes the existing CreateAgentSession
+  // through so the test seam in dispatch.ts keeps working — tests stub this
+  // hook and the dispatcher does not need its own session-factory code.
+  // Signature matches createAgentSession (cwd, model, thinkingLevel, tools,
+  // customTools, sessionManager, resourceLoader) → { session }.
+  createSession?: (opts: {
+    cwd: string;
+    model: unknown;
+    thinkingLevel: unknown;
+    tools: unknown[];
+    customTools: unknown[];
+    sessionManager: SessionManager;
+    resourceLoader: unknown;
+  }) => Promise<{ session: AgentSession }>;
 }
 
 const defaultInternals: DelegateAgentInternals = {
@@ -78,6 +94,12 @@ const defaultInternals: DelegateAgentInternals = {
   sessionManagerCreate: (cwd) => SessionManagerClass.create(cwd),
   sessionManagerContinueRecent: (cwd) => SessionManagerClass.continueRecent(cwd),
 };
+
+// Re-export the default internals so the production dispatcher can spread them
+// and override only the createSession seam (preserving the 565-test session
+// factory). Tests that need full control still pass an entire internals
+// object as the 6th arg of delegateAgent.
+export const defaultDelegateAgentInternals: DelegateAgentInternals = defaultInternals;
 
 // ── delegateAgent ──────────────────────────────────────────────────────────
 //
@@ -101,9 +123,18 @@ export async function delegateAgent(
   options: {
     controller?: AbortController;
     depthFn?: () => number;
-    depthCap?: number;
+    // Production-side session-factory inputs (passed through to
+    // internals.createSession). The dispatcher collects these from its
+    // existing pre-prompt wiring (model, thinkingLevel, tools, customTools,
+    // resourceLoader) and forwards them. When absent, delegateAgent uses
+    // the SessionManager.toAgentSession() fallback.
+    model?: unknown;
+    thinkingLevel?: unknown;
+    tools?: unknown[];
+    customTools?: unknown[];
+    resourceLoader?: unknown;
   } = {},
-): Promise<{ sessionId: string; session: AgentSession; ledger: BudgetLedger; controller: AbortController }> {
+): Promise<{ sessionId: string; session: AgentSession; ledger: BudgetLedger; controller: AbortController; sessionManager: SessionManager }> {
   void task; // task is consumed by session.prompt() in the production wiring (Cycle 2 above the dispatch.ts refactor).
 
   // 1. Resolve the worker's WorkerBudgetPolicy from the active config.
@@ -153,22 +184,51 @@ export async function delegateAgent(
     throw new BudgetExhaustedError(blocked);
   }
 
-  // 5. Open the session. fresh=true → SessionManager.create(); default →
-  //    SessionManager.continueRecent(). The .toAgentSession() chain is the
-  //    SDK's documented factory.
-  const session: AgentSession = (sessionManager as unknown as { toAgentSession: () => AgentSession }).toAgentSession();
+  // 5. Open the session. Production wires a session-factory seam (createSession)
+  //    through the dispatcher so the 565 existing tests continue to drive
+  //    AgentSession creation from tests/*.test.ts. When no createSession is
+  //    supplied, fall back to SessionManager.toAgentSession() (the SDK's
+  //    documented factory).
+  let session: AgentSession;
+  if (internals.createSession) {
+    const created = await internals.createSession({
+      cwd: ctx.cwd,
+      model: options.model,
+      thinkingLevel: options.thinkingLevel,
+      tools: options.tools ?? [],
+      customTools: options.customTools ?? [],
+      sessionManager,
+      resourceLoader: options.resourceLoader,
+    });
+    session = created.session;
+  } else {
+    session = (sessionManager as unknown as { toAgentSession: () => AgentSession }).toAgentSession();
+  }
 
   // 6. Install the budget event hooks. Each appendCustomEntry /
   //    appendCustomMessageEntry call inside the handler reads the supplied
   //    signal — abort it to cancel any in-flight write.
   const controller = options.controller ?? new AbortController();
-  internals.installBudgetEventHooks(session, ledger, policy, controller);
+  // Setup-failure canary: if session.subscribe throws inside
+  // installBudgetEventHooks, we surface the partial session via the
+  // returned object so the dispatcher can still call session.abort and
+  // session.dispose (the existing test in tests/dispatch-usage.test.ts
+  // asserts abort=1, dispose=1 for the setup-failure path).
+  try {
+    internals.installBudgetEventHooks(session, ledger, policy, controller);
+  } catch (setupError) {
+    // Re-throw with the session attached as a side-channel property so the
+  // dispatcher can recover and call abort/dispose.
+    (setupError as Error & { __partialSession?: AgentSession }).__partialSession = session;
+    throw setupError;
+  }
 
   return {
     sessionId: session.sessionId,
     session,
     ledger,
     controller,
+    sessionManager,
   };
 }
 
