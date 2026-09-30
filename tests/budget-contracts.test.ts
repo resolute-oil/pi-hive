@@ -196,7 +196,7 @@ test("operator command signatures match the §2.8 contract", () => {
     tearDownAllWorkers: /_?reason/,
   };
   for (const [name, pattern] of Object.entries(signatures)) {
-    const fn = (workerTools as Record<string, (...args: unknown[]) => unknown>)[name];
+    const fn = (workerTools as unknown as Record<string, (...args: unknown[]) => unknown>)[name];
     const text = fn.toString();
     assert.ok(pattern.test(text), `${name} signature must contain ${pattern}; got: ${text}`);
   }
@@ -209,7 +209,7 @@ test("cooperative tool signatures match the §2.8 contract", () => {
     request_snapshot: /_?label.*_?signal/,
   };
   for (const [name, pattern] of Object.entries(signatures)) {
-    const fn = (workerTools as Record<string, (...args: unknown[]) => unknown>)[name];
+    const fn = (workerTools as unknown as Record<string, (...args: unknown[]) => unknown>)[name];
     const text = fn.toString();
     assert.ok(pattern.test(text), `${name} signature must contain ${pattern}; got: ${text}`);
   }
