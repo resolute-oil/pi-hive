@@ -87,12 +87,12 @@ function scriptedSession(opts: {
       // stats.reasoning: 0 to exercise the finite-0-must-not-wipe branch (R3-3.1).
       const tokens: any = { input: opts.stats.input, output: opts.stats.output, cacheRead: opts.stats.cacheRead, cacheWrite: opts.stats.cacheWrite };
       if (opts.stats.reasoning !== undefined) tokens.reasoning = opts.stats.reasoning;
-      return { tokens, cost: { total: opts.stats.cost } };
+      return { tokens, cost: opts.stats.cost };
     },
     state: { errorMessage: undefined as string | undefined },
     async prompt() {
       for (const t of opts.turns) {
-        handler?.({ type: "message_end", message: { role: "assistant", model: "test/model", stopReason: "endTurn", usage: { input: t.input, output: t.output, cacheRead: t.cacheRead || 0, cacheWrite: t.cacheWrite || 0, reasoning: t.reasoning || 0, cost: { total: t.cost } } } });
+        handler?.({ type: "message_end", message: { role: "assistant", model: "test/model", stopReason: "endTurn", usage: { input: t.input, output: t.output, cacheRead: t.cacheRead || 0, cacheWrite: t.cacheWrite || 0, reasoning: t.reasoning || 0, cost: t.cost } } });
       }
       // agent_end fires last. The FIXED dispatch only backfills output text here;
       // it must NOT re-add the final turn's usage.
@@ -124,13 +124,19 @@ test("dispatchAgent treats message_update.text as snapshot, not appended delta",
     subscribe(cb: (e: any) => void): () => void { handler = cb; return () => { handler = undefined; }; },
     getAvailableThinkingLevels(): string[] { return ["off"]; },
     getContextUsage(): { percent: number } { return { percent: 0 }; },
-    getSessionStats(): any { return { tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, cost: { total: 0 } }; },
+    getSessionStats(): any { return { tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, cost: 0 }; },
     state: { errorMessage: undefined },
     async prompt(): Promise<void> {
       for (const text of ["- P", "- Pl", "- Please approve"]) {
         handler?.({
           type: "message_update",
-          assistantMessageEvent: { type: "text_delta", text },
+          // The test verifies the snapshot semantic: each message_update
+          // carries the FULL accumulated text on `message`, not an incremental
+          // delta. We omit the `delta` field (SDK's incremental text) so
+          // chunks stay empty and the dispatch output falls back to
+          // streamedSnapshot = textFromMessage(event.message) = the last
+          // full snapshot.
+          assistantMessageEvent: { type: "text_delta", contentIndex: 0, partial: { role: "assistant", content: [{ type: "text", text }] } },
           message: { role: "assistant", content: [{ type: "text", text }] },
         });
       }
@@ -264,7 +270,7 @@ test("dispatchAgent propagates a parent/nested abort signal into the worker sess
     subscribe(): () => void { return () => undefined; },
     getAvailableThinkingLevels(): string[] { return ["off"]; },
     getContextUsage(): { percent: number } { return { percent: 0 }; },
-    getSessionStats(): any { return { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: { total: 0 } }; },
+    getSessionStats(): any { return { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0 }; },
     state: { errorMessage: undefined },
     async prompt(): Promise<void> { await new Promise<void>((resolve) => { releasePrompt = resolve; }); },
     async abort(): Promise<void> { abortCalled = true; releasePrompt?.(); },
@@ -703,7 +709,7 @@ function capturePromptSession(): { session: any; getPromptArg: () => string | un
     subscribe(_cb: (e: any) => void): () => void { return () => undefined; },
     getAvailableThinkingLevels(): string[] { return ["off"]; },
     getContextUsage(): { percent: number } { return { percent: 0 }; },
-    getSessionStats(): any { return { tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, cost: { total: 0 } }; },
+    getSessionStats(): any { return { tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, cost: 0 }; },
     state: { errorMessage: undefined as string | undefined },
     async prompt(arg: string): Promise<void> { captured = arg; },
     dispose(): void { /* noop */ },
