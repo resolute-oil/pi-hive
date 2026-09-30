@@ -438,3 +438,20 @@ export interface BudgetLedgerEntry {
     kind?: string;
   };
 }
+
+// Slice 4 — BudgetBlock. The discriminated union describing a budget refusal;
+// returned by checkBudgetPolicy() when a worker/team cap is exceeded. The full
+// shape is finalized here (slice 4) so policy.ts can import it directly.
+export interface BudgetBlock {
+  reason: string;
+  scope: "worker" | "team";
+  resource: "tokens" | "costUsd" | "runs" | "depth";
+  remaining: { tokens?: number; costUsd?: number; runs?: number };
+  limit: { tokens?: number; costUsd?: number; runs?: number; depth?: number };
+}
+
+// Slice 7 — IncludeKeys (the C2 typebox-projected shape from §2.13). The
+// WindowKind / Strategies shape lands in slice 7; the include list is needed
+// here for workerConsumedTokens.
+export type IncludeKey = "input" | "output" | "cacheRead" | "cacheWrite" | "reasoning";
+export type IncludeKeys = IncludeKey[];
