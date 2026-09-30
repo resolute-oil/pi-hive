@@ -122,11 +122,34 @@ function enrichFromFrontmatter(cwd: string, agent: AgentConfig | undefined): voi
       const parsedBudgets = parseAgentBudgetsFrontmatter(raw);
       if (parsedBudgets.budgets) {
         agent.governance = agent.governance ?? {};
-        if (parsedBudgets.budgets.tokens !== undefined && agent.governance.tokenBudget === undefined) {
-          agent.governance.tokenBudget = parsedBudgets.budgets.tokens;
+        // Block 2: the parser normalizes both flat-scalar (`tokens: 1000`)
+        // and nested (`tokens: { cap: 1000 }`) frontmatter shapes to the same
+        // internal `{ cap }` form. Populate BOTH the new nested fields and
+        // the legacy flat aliases on agent.governance so the resolver (which
+        // reads both) and existing callers that read the flat fields (e.g.
+        // engine/governance.ts) keep working without a synchronized change.
+        const pb = parsedBudgets.budgets;
+        if (pb.tokens !== undefined) {
+          if (agent.governance.tokens === undefined) {
+            agent.governance.tokens = pb.tokens;
+          }
+          if (agent.governance.tokenBudget === undefined) {
+            agent.governance.tokenBudget = pb.tokens.cap;
+          }
         }
-        if (parsedBudgets.budgets.costUsd !== undefined && agent.governance.costBudgetUsd === undefined) {
-          agent.governance.costBudgetUsd = parsedBudgets.budgets.costUsd;
+        if (pb.costUsd !== undefined) {
+          if (agent.governance.costUsd === undefined) {
+            agent.governance.costUsd = pb.costUsd;
+          }
+          if (agent.governance.costBudgetUsd === undefined) {
+            agent.governance.costBudgetUsd = pb.costUsd.cap;
+          }
+        }
+        if (pb.runs !== undefined && agent.governance.runs === undefined) {
+          agent.governance.runs = pb.runs;
+        }
+        if (pb.depth !== undefined && agent.governance.depth === undefined) {
+          agent.governance.depth = pb.depth;
         }
       }
     }
