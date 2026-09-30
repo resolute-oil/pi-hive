@@ -2,8 +2,11 @@
 //
 // Wires the AgentSession event subscription into the BudgetLedger so:
 //   - message_end → ledger.recordEvent (live cumulative) + maybeSnapshot (throttled)
-//                  + warning emit at 20% remaining + abort at 0% remaining
-//                  (unless strategies.onExhaustion.action === "compact" or "none")
+//                  + warning at the configured threshold (default 20% remaining
+//                  via resolveStrategies; configurable via
+//                  strategies.onApproachingLimit.threshold, 0..1 ratio) + abort
+//                  at 0% remaining (unless strategies.onExhaustion.action ===
+//                  "compact" or "none")
 //   - compaction_end → ledger.recordCompaction(savings) for completed compactions
 //                  (skipped on aborted/errored payloads per SDK ref §1.4)
 //   - agent_settled → ledger.snapshot(stats, policy, "checkpoint", signal)
@@ -13,7 +16,7 @@
 
 import type { AgentSession, SessionStats } from "@earendil-works/pi-coding-agent";
 import type { BudgetLedger } from "./ledger";
-import type { WorkerBudgetPolicy, BudgetBlock } from "../../core/types";
+import type { WorkerBudgetPolicy } from "../../core/types";
 
 // Read threshold + action from the policy's optional Strategies block (per
 // §2.13 C5 v2 wiring). Falls back to the legacy defaults (0.20 warning,
@@ -140,7 +143,3 @@ export function installBudgetEventHooks(
 
   return off;
 }
-
-// The synthetic BudgetBlock used by event hook callers (warning emit details
-// etc.). Re-exported here so consumers don't need a second import.
-export type { BudgetBlock };

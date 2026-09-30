@@ -177,7 +177,7 @@ export function resolveWorkerBudgetPolicy(
 
   // Team.tokens — global only; teams don't carry per-agent overrides.
   if (globalTeam.tokens?.cap !== undefined) {
-    team.tokens = { cap: globalTeam.tokens.cap, window: globalTeam.tokens.window ?? "per-team-lifetime", include: globalTeam.tokens.include ?? ["input", "output", "cacheRead", "cacheWrite"] };
+    team.tokens = { cap: globalTeam.tokens.cap, window: globalTeam.tokens.window ?? "per-team-lifetime", include: globalTeam.tokens.include ?? ["input", "output", "cacheRead", "cacheWrite", "reasoning"] };
   }
   // Team.costUsd
   if (globalTeam.costUsd?.cap !== undefined) {
@@ -219,8 +219,10 @@ function walk(node: AgentConfig, name: string): AgentConfig | undefined {
 
 // Project the legacy "input_output" | "all" scope into the new §2.13/C2
 // `include` list (the new key set from §2.13: input, output, cacheRead,
-// cacheWrite, reasoning). Default for workers is input + output.
+// cacheWrite, reasoning). Default for workers is input + output. TS I10
+// — adds "reasoning" to the "all" default (the resolver reads
+// session.runtime.reasoningTokens as a first-class dimension).
 function tokensFromScope(scope: "input_output" | "all" | undefined): IncludeKey[] {
-  if (scope === "all") return ["input", "output", "cacheRead", "cacheWrite"];
+  if (scope === "all") return ["input", "output", "cacheRead", "cacheWrite", "reasoning"];
   return ["input", "output"];
 }
