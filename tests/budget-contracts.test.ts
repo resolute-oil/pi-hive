@@ -102,6 +102,46 @@ test("strategy resolver stubs throw not implemented", () => {
   assert.throws(() => resolveWorkerBudgetPolicy(fakeConfig, "agent"), /not implemented/);
 });
 
+// ── Slice 4 — BudgetBlock discriminated union ───────────────────────────────
+
+import type { BudgetBlock } from "../src/core/types.ts";
+
+test("BudgetBlock requires scope and resource; carries reason/remaining/limit", () => {
+  const workerTokens: BudgetBlock = {
+    reason: "worker tokens exhausted",
+    scope: "worker",
+    resource: "tokens",
+    remaining: { tokens: 0 },
+    limit: { tokens: 1000 },
+  };
+  const teamCostUsd: BudgetBlock = {
+    reason: "team cost exhausted",
+    scope: "team",
+    resource: "costUsd",
+    remaining: { costUsd: 0 },
+    limit: { costUsd: 5 },
+  };
+  const workerDepth: BudgetBlock = {
+    reason: "depth exceeded",
+    scope: "worker",
+    resource: "depth",
+    remaining: {},
+    limit: { depth: 3 },
+  };
+  // scope and resource are the discriminators; downstream code (the
+  // dispatcher + dashboard) narrows on them. Build a smoke check that the
+  // exhaustive union compiles.
+  const blocks: BudgetBlock[] = [workerTokens, teamCostUsd, workerDepth];
+  for (const block of blocks) {
+    assert.ok(typeof block.reason === "string" && block.reason.length > 0, "reason must be a non-empty string");
+    assert.ok(block.scope === "worker" || block.scope === "team", "scope must be worker or team");
+    assert.ok(["tokens", "costUsd", "runs", "depth"].includes(block.resource), "resource must be one of the four documented kinds");
+  }
+  assert.equal(blocks[0].limit.tokens, 1000, "worker block must carry the violated cap");
+  assert.equal(blocks[1].limit.costUsd, 5, "team block must carry the violated cap");
+  assert.equal(blocks[2].limit.depth, 3, "depth block must carry the violated depth cap");
+});
+
 test("BudgetLedger.restore is a static factory returning a Promise<BudgetLedger>", () => {
   assert.equal(typeof BudgetLedger.restore, "function", "BudgetLedger.restore must be a static method");
   // The signature must accept (sessionManager, agentName, policy, signal). We
