@@ -250,7 +250,9 @@ test("message_end emits budget_warning when remaining ≤ 20% (default threshold
   assert.equal(details.scope, "worker");
   assert.equal(details.resource, "tokens");
   assert.equal(details.cap, 200);
-  assert.equal(details.remaining, 160);
+  // Block 3 fix: `remaining` is the amount LEFT in the cap, not the amount
+  // consumed. With cap=200 and cumulative=160, remaining is 40.
+  assert.equal(details.remaining, 200 - 160, "remaining is the gap between cap and cumulative, not the cumulative itself");
 });
 
 // ── Test 5: warning is idempotent (no second emit) ────────────────────────
