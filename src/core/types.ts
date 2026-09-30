@@ -176,6 +176,23 @@ export interface WorkerGovernance {
   tokenBudgetScope?: "input_output" | "all";
   costBudgetUsd?: number;
   distillerRuns?: number;
+  // Block 2 — optional nested §2.10 shape fields, populated when the
+  // frontmatter's `budgets:` block uses the nested form (e.g. `tokens:
+  // { cap: 1000 }`). These coexist with the legacy flat fields above so
+  // existing callers reading the legacy fields keep working; the resolver
+  // reads both shapes (`resolveWorkerBudgetPolicy` in
+  // src/engine/budget/strategy.ts).
+  tokens?: { cap: number; window?: WindowKind; include?: IncludeKeys };
+  costUsd?: { cap: number; window?: WindowKind };
+  runs?: { cap: number };
+  depth?: { cap: number };
+  // Agent-level override of the resolved budget strategy ("default" | "compact").
+  // Surfaced via the per-agent `governance` block in agent.md frontmatter (the
+  // kebab key `budget-strategy:` normalizes to this camelCase property name in
+  // the runtime `governance` object). Typed on `WorkerGovernance` directly so
+  // `resolveWorkerBudgetPolicy` and `resolveWorkerBudgetStrategy` both narrow
+  // the same shape without an interface duplication (TS I3 / N-I3 fixup).
+  ["budget-strategy"]?: WorkerBudgetStrategy;
 }
 
 export interface TeamBudgets {
@@ -195,6 +212,17 @@ export interface HiveSettings {
   // hidden default. queueSize only activates fair waiting when maxParallel is hit.
   maxParallel?: number;
   queueSize?: number;
+  // The canonical §2.10 nested shape. Typed in core/schema.ts via typebox
+  // (`BudgetsConfigSchema`) and resolved by `resolveBudgetsConfig` so the
+  // `resource:` discriminator is always set. `strategies` is the C5 conditional
+  // block (Wave 3); absent means fall back to the legacy default behavior.
+  budgets?: BudgetsConfig;
+  // Legacy flat keys. Kept as a fallback path for users who haven't migrated
+  // from the pre-v2 config (plan §2.10 / G-16 hard-cutover targets). The
+  // resolver prefers `budgets` when present and falls back to these only when
+  // `budgets` is undefined. Wave 5A's legacy cleanup will drop these fields
+  // entirely; for the blocker fix we add the new path without breaking
+  // existing configs.
   workerBudgets?: WorkerGovernance;
   teamBudgets?: TeamBudgets;
   telemetry?: TelemetrySettings;
@@ -437,6 +465,16 @@ export interface WorkerBudgetPolicy {
 // + cooperative writes (marker: "checkpoint", kind: <documented kind>).
 // G-08 fix: kind is typed (not `string`) so a typo in a Wave 3 call site
 // fails typecheck before runtime.
+//
+// Dual-customType design (C D3 / TS N6 / Completeness D3 + E1):
+// pi-hive-budget-ledger (this entry shape) carries the cumulative spend
+// snapshot — restore() reduces the latest one per agentSlug into the
+// authoritative ledger state. pi-hive-budget-compaction (a separate
+// SessionEntry below) carries ONLY the savings number from each completed
+// compaction; it does NOT pollute BudgetLedgerEntry.data (no field for
+// savings here on purpose) and the reduce path skips it. The two coexist
+// in the branch but filter cleanly in both restore() and the dashboard
+// (`WHERE customType IN (...)`).
 export type BudgetLedgerKind =
   | "end"
   | "compact"
@@ -471,6 +509,21 @@ export interface BudgetLedgerEntry {
     agentSlug: string;
     marker?: "warning" | "exhausted" | "checkpoint";
     kind?: BudgetLedgerKind;
+  };
+}
+
+// Companion entry for the dual-customType design (C D3, see BudgetLedgerEntry
+// block above). Carries the per-compaction savings number so the dashboard's
+// pre/post-compaction accounting survives across reloads without polluting
+// BudgetLedgerEntry.data (which has no `savings` field on purpose). Restore()
+// reads both customTypes but the cumulative reduction skips compaction entries.
+export interface BudgetCompactionEntry {
+  type: "custom";
+  customType: "pi-hive-budget-compaction";
+  data: {
+    agentSlug: string;
+    savings: number;
+    writtenAt: number;
   };
 }
 

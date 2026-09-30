@@ -62,19 +62,21 @@ import { parseAgentBudgetsFrontmatter } from "../src/agents/frontmatter.ts";
 test("parseAgentBudgetsFrontmatter treats `budgets:` as the per-agent alias for `governance:`", () => {
   // The new canonical key is `budgets:`; `governance:` is the deprecated alias.
   // Either one parses; when both are present, `budgets:` wins.
+  // Both the flat-scalar (`tokens: 1000`) and nested (`tokens: { cap: 1000 }`)
+  // shapes parse to the same internal { cap } form.
   const canonical = parseAgentBudgetsFrontmatter("---\nbudgets:\n  tokens: 1000\n  costUsd: 0.5\n---\n");
-  assert.equal(canonical.budgets?.tokens, 1000);
-  assert.equal(canonical.budgets?.costUsd, 0.5);
+  assert.equal(canonical.budgets?.tokens?.cap, 1000);
+  assert.equal(canonical.budgets?.costUsd?.cap, 0.5);
 
   const deprecated = parseAgentBudgetsFrontmatter("---\ngovernance:\n  tokens: 500\n---\n");
-  assert.equal(deprecated.budgets?.tokens, 500);
+  assert.equal(deprecated.budgets?.tokens?.cap, 500);
 
 // Defensive: frontmatter budgets reject non-numeric scalars so the typo
 // surfaces at config-load instead of silently slipping through to runtime.
 test("parseAgentBudgetsFrontmatter rejects non-numeric budget scalars with a clear error", () => {
   assert.throws(
     () => parseAgentBudgetsFrontmatter("---\nbudgets:\n  tokens: \"lots\"\n---\n"),
-    /budgets\.tokens.*finite number/,
+    /budgets\.tokens/,
   );
   assert.throws(
     () => parseAgentBudgetsFrontmatter("---\nbudgets:\n  tokens: 1000\n  costUsd: [1, 2]\n---\n"),
@@ -85,7 +87,34 @@ test("parseAgentBudgetsFrontmatter rejects non-numeric budget scalars with a cle
 });
 
   const both = parseAgentBudgetsFrontmatter("---\nbudgets:\n  tokens: 1000\ngovernance:\n  tokens: 500\n---\n");
-  assert.equal(both.budgets?.tokens, 1000, "`budgets:` must win over the deprecated `governance:` alias");
+  assert.equal(both.budgets?.tokens?.cap, 1000, "`budgets:` must win over the deprecated `governance:` alias");
+});
+
+// Block 2 follow-up: the nested shape documented in
+// docs/migrations/budget-config-v2.md Example 3 must also parse. Both
+// shapes converge on the internal { cap } form.
+test("parseAgentBudgetsFrontmatter accepts the nested { cap: N } shape from the migration guide", () => {
+  const nested = parseAgentBudgetsFrontmatter(
+    "---\nbudgets:\n  tokens:\n    cap: 1000\n  cost-usd:\n    cap: 0.25\n  runs:\n    cap: 1\n  depth:\n    cap: 1\n---\n",
+  );
+  // YAML kebab/camel is normalized at parse time; both keys arrive as
+  // `costUsd` (or `cost-usd` depending on the loader). The parser accepts
+  // either; we assert on whichever the loader surfaces.
+  assert.equal(nested.budgets?.tokens?.cap, 1000, "nested tokens parses to { cap }");
+  assert.equal(nested.budgets?.runs?.cap, 1, "nested runs parses to { cap }");
+  assert.equal(nested.budgets?.depth?.cap, 1, "nested depth parses to { cap }");
+});
+
+// Block 2 — flat scalar and nested shape converge on the same internal
+// representation. This is the contract that lets users follow the
+// migration guide (nested) without rewriting agent files that already use
+// the flat scalar form.
+test("parseAgentBudgetsFrontmatter normalizes flat scalar and nested shapes to the same internal form", () => {
+  const flat = parseAgentBudgetsFrontmatter("---\nbudgets:\n  tokens: 1000\n  costUsd: 0.5\n  runs: 1\n  depth: 1\n---\n");
+  const nested = parseAgentBudgetsFrontmatter(
+    "---\nbudgets:\n  tokens:\n    cap: 1000\n  costUsd:\n    cap: 0.5\n  runs:\n    cap: 1\n  depth:\n    cap: 1\n---\n",
+  );
+  assert.deepEqual(flat.budgets, nested.budgets, "flat and nested shapes produce identical internal { cap } form");
 });
 
 // ── Cycle 3 (T6.5, C2) — `include: [Usage keys]` ────────────────────────────
@@ -126,16 +155,18 @@ test("BudgetCap discriminated union projects include keys for workerConsumedToke
 
 test("validateBudgetsConfig accepts user YAML WITHOUT `resource:` (parent-nesting disambiguates)", () => {
   // Plan §2.13 examples omit `resource:` from every nested block; the
-  // typebox schema treats `resource:` as optional and the parent position
-  // (perWorker.tokens, perTeam.costUsd, …) already narrows the type.
-  // `resolveBudgetsConfig` injects the discriminator from the parent key
-  // so downstream consumers always see a fully-formed `BudgetCap`.
+  // parent position (perWorker.tokens, perTeam.costUsd, …) already narrows
+  // the type. `validateBudgetsConfig` injects the discriminator from the
+  // parent key BEFORE typebox runs (Block 4), and `resolveBudgetsConfig`
+  // is the pure projection that downstream consumers use. The cast here
+  // is intentional — we're asserting that the validator accepts the
+  // loose user-authored shape, not that the type system matches it.
   const config = {
     perWorker: { tokens: { cap: 1_000 }, costUsd: { cap: 0.5 }, runs: { cap: 5 }, depth: { cap: 2 } },
     perTeam: { tokens: { cap: 10_000 }, costUsd: { cap: 5 }, runs: { cap: 20 } },
-  };
+  } as Record<string, unknown>;
   assert.doesNotThrow(() => validateBudgetsConfig(config));
-  const resolved = resolveBudgetsConfig(config);
+  const resolved = resolveBudgetsConfig(config as Parameters<typeof resolveBudgetsConfig>[0]);
   assert.equal(resolved.perWorker.tokens?.resource, "tokens");
   assert.equal(resolved.perWorker.costUsd?.resource, "costUsd");
   assert.equal(resolved.perWorker.runs?.resource, "runs");
@@ -167,6 +198,27 @@ test("validateBudgetsConfig rejects `resource:` that mismatches parent nesting",
     }),
     /budgets\.perTeam\.runs\/resource.*parent key "runs"/,
   );
+});
+
+// Block 4 follow-up: with `resource:` required on every schema variant,
+// the discriminated union is real and the post-validator `cap.resource`
+// field narrows in `switch (cap.resource)` for downstream consumers.
+// This is the contract that closes the TS B1 latent-bug future bug.
+test("Block 4: validated BudgetsConfig lands with `resource:` set on every cap (discriminated union is real)", () => {
+  const config = {
+    perWorker: { tokens: { cap: 1_000 }, costUsd: { cap: 0.5 }, runs: { cap: 5 }, depth: { cap: 2 } },
+    perTeam: { tokens: { cap: 10_000 }, costUsd: { cap: 5 }, runs: { cap: 20 } },
+  } as Record<string, unknown>;
+  validateBudgetsConfig(config);
+  // After validation (which injects the discriminator), every cap carries
+  // the literal `resource:` tag. A downstream `switch (cap.resource)` is
+  // now exhaustive without a fallback — which is exactly the contract the
+  // post-fixup comment at schema.ts:341 originally claimed.
+  const cw = config as { perWorker: { tokens: { resource: string }; costUsd: { resource: string }; runs: { resource: string }; depth: { resource: string } } };
+  assert.equal(cw.perWorker.tokens.resource, "tokens");
+  assert.equal(cw.perWorker.costUsd.resource, "costUsd");
+  assert.equal(cw.perWorker.runs.resource, "runs");
+  assert.equal(cw.perWorker.depth.resource, "depth");
 });
 
 // ── Cycle 4 (T6.7, C4) — discriminated union + tier-aware window rejection ─

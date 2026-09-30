@@ -166,14 +166,18 @@ export function validateHiveConfigShape(config: HiveConfig): void {
 // with structured errors. The hand-written validators remain in place until
 // Wave 9's legacy cleanup removes them.
 
-// Per-cap schemas. `resource:` is OPTIONAL — the parent nesting position
-// (perWorker.tokens, perWorker.costUsd, …) already narrows the type, so a
-// user writing `tokens: { cap: 3500 }` is valid and the discriminator gets
-// injected by `resolveBudgetsConfig` from the parent key. If the user DOES
-// include `resource:`, a runtime check (enforceResourceDiscriminator) ensures
-// it matches the parent position; a mismatch is a config-load error.
+// Per-cap schemas. `resource:` is REQUIRED on every variant — the
+// discriminated union depends on each member carrying its own resource
+// tag so `switch (cap.resource)` is exhaustive and type-narrowing. Users
+// who omit `resource:` are handled by `enforceResourceDiscriminator`
+// (which runs BEFORE the typebox validator on a synthesized shape with
+// the discriminator filled in from the parent key) or by
+// `resolveBudgetsConfig` injecting the discriminator from the parent
+// nesting BEFORE typechecking. After injection the typed object lands
+// here with `resource:` always set, so this schema validates the post-
+// injection shape and the discriminated-union contract holds end-to-end.
 const TokensCap = Type.Object({
-  resource: Type.Optional(Type.Literal("tokens")),
+  resource: Type.Literal("tokens"),
   cap: Type.Number({ minimum: 0 }),
   window: Type.Optional(Type.Union([
     Type.Literal("per-session"),
@@ -190,7 +194,7 @@ const TokensCap = Type.Object({
   ]))),
 });
 const CostUsdCap = Type.Object({
-  resource: Type.Optional(Type.Literal("costUsd")),
+  resource: Type.Literal("costUsd"),
   cap: Type.Number({ minimum: 0 }),
   window: Type.Optional(Type.Union([
     Type.Literal("per-session"),
@@ -198,11 +202,11 @@ const CostUsdCap = Type.Object({
   ])),
 });
 const RunsCap = Type.Object({
-  resource: Type.Optional(Type.Literal("runs")),
+  resource: Type.Literal("runs"),
   cap: Type.Number({ minimum: 0 }),
 });
 const DepthCap = Type.Object({
-  resource: Type.Optional(Type.Literal("depth")),
+  resource: Type.Literal("depth"),
   cap: Type.Number({ minimum: 0 }),
 });
 
@@ -264,6 +268,20 @@ export function validateBudgetsConfig(value: unknown): asserts value is BudgetsC
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("budgets must be an object.");
   }
+  // Block 4: the schema now requires `resource:` on every cap variant (the
+  // discriminated union is real). User YAML commonly OMITS `resource:` per
+  // the plan §2.13 examples — inject the discriminator from the parent
+  // nesting position BEFORE typebox runs so the validator accepts both
+  // forms without losing the discriminated-union contract end-to-end.
+  // injectResourceDiscriminators returns a new (post-injection) object;
+  // we apply its per-tier branches back onto `value` so the assertion
+  // signature still narrows `value` to BudgetsConfig (Block 4 contract:
+  // downstream consumers — resolveBudgetsConfig, the resolver — read
+  // `resource:` on every cap). The mutation is explicit here at the
+  // validator boundary, not hidden inside the helper.
+  const injected = injectResourceDiscriminators(value as Record<string, unknown>);
+  (value as Record<string, unknown>).perWorker = injected.perWorker;
+  (value as Record<string, unknown>).perTeam = injected.perTeam;
   const errors = Value.Errors(BudgetsConfigSchema, value);
   if (errors.length > 0) {
     // Surface the most specific error (skip root-level "missing required
@@ -337,9 +355,13 @@ export function resolveBudgetsConfig(config: BudgetsConfig): BudgetsConfig {
   // Also injects the `resource:` discriminator from the parent nesting when
   // the user omitted it (most common case — plan §2.13 examples don't show
   // the discriminator). Downstream consumers (Wave 1 1A policy.ts, Wave 2
-  // dispatcher) receive `BudgetCap` instances with `resource:` always set so
-  // they can `switch (cap.resource)` without a fallback.
-  const resolveCap = <T extends { resource?: string; window?: WindowKind }>(cap: T | undefined, defaultWindow: WindowKind, expectedResource: string): T | undefined => {
+  // dispatcher) receive `BudgetCap` instances with `resource:` always set.
+  // Block 4: `resource:` is REQUIRED on each schema variant, so the
+  // discriminated union is restored and `switch (cap.resource)` is
+  // exhaustive end-to-end. This function is what bridges user-authored
+  // configs (which omit the discriminator) and the typed schema (which
+  // requires it).
+  const resolveCap = <T extends { resource?: "tokens" | "costUsd" | "runs" | "depth"; window?: WindowKind }>(cap: T | undefined, defaultWindow: WindowKind, expectedResource: "tokens" | "costUsd" | "runs" | "depth"): T | undefined => {
     if (!cap) return cap;
     return { ...cap, resource: cap.resource ?? expectedResource, window: cap.window ?? defaultWindow };
   };
@@ -366,6 +388,34 @@ export function resolveBudgetsConfig(config: BudgetsConfig): BudgetsConfig {
 // disambiguates and `resolveBudgetsConfig` injects the literal). A wrong
 // explicit value is almost always a copy-paste bug and should fail at config
 // load rather than silently mis-budget.
+function injectResourceDiscriminators(value: Record<string, unknown>): Record<string, unknown> {
+  // Walk perWorker.* and perTeam.* and inject `resource:` from the parent
+  // nesting key when the user omitted it. Returns a new object instead of
+  // mutating `value` in place — pure functional style matches
+  // resolveBudgetsConfig and avoids surprising callers that pass a
+  // deep-frozen or shared config (the prior in-place mutation was
+  // documented but invisible to the type system). Typebox needs the
+  // post-injection shape; callers MUST use the return value.
+  const walkTier = (tier: "perWorker" | "perTeam"): Record<string, unknown> | undefined => {
+    const block = value[tier] as Record<string, unknown> | undefined;
+    if (!block || typeof block !== "object") return block;
+    const next: Record<string, unknown> = { ...block };
+    for (const key of ["tokens", "costUsd", "runs", "depth"] as const) {
+      const cap = block[key] as Record<string, unknown> | undefined;
+      // perTeam has no `depth` field; skip silently.
+      if (key === "depth" && tier === "perTeam") continue;
+      if (!cap || typeof cap !== "object") continue;
+      next[key] = cap.resource === undefined ? { ...cap, resource: key } : cap;
+    }
+    return next;
+  };
+  return {
+    ...value,
+    perWorker: walkTier("perWorker"),
+    perTeam: walkTier("perTeam"),
+  };
+}
+
 function enforceResourceDiscriminator(config: BudgetsConfig): void {
   const check = (tier: "perWorker" | "perTeam", key: "tokens" | "costUsd" | "runs" | "depth", cap: { resource?: string } | undefined, expected: string): void => {
     if (!cap) return;

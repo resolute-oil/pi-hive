@@ -14,7 +14,7 @@ import { ensureDashboard, killOwnedDashboardOnQuit } from "../engine/dashboard";
 import { resolveRuntime } from "../engine/agent-lookup";
 import { emitHiveEvent, emitModelCatalog, writeHiveStateSnapshot } from "../engine/observability";
 import { resolveConfiguredPath } from "../core/safe-path";
-import { cancelWorkerQueue } from "../engine/governance";
+import { cancelWorkerQueue } from "../engine/worker-queue";
 import { clearCommandCtx, getCommandCtx } from "./commands";
 
 const EXTENSION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");

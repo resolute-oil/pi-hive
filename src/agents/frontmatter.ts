@@ -6,23 +6,25 @@
 // so existing agent files don't have to be rewritten alongside the schema
 // cutover. When both keys are present, `budgets:` wins.
 //
-// The shape returned here is the LEGACY flat per-agent budget (the same one
-// `WorkerGovernance` carries in src/core/types.ts). The hard cutover to the
-// nested shape (§2.10 / §2.13) lives in `settings.budgets` (validateBudgetsConfig
-// in src/core/schema.ts) — agent.md frontmatter keeps the simpler flat shape
-// because agents only override their own token/cost budget, never team-level
-// or strategies config.
+// The internal return shape is the §2.10 nested per-resource shape (each
+// resource is `{ cap }`, optionally with `window` / `include`). Both the
+// flat-scalar form (`budgets.tokens: 1000`) and the nested form
+// (`budgets.tokens: { cap: 1000 }`) parse to the same internal shape, so
+// the migration guide's Example 3 (nested) and existing flat-scalar
+// configs both work without a follow-up edit.
 
 import { parseFrontmatter } from "../core/yaml.ts";
 
 export interface AgentBudgetFrontmatter {
-  // Per-agent budget overrides in the legacy flat shape. Omitted when the
-  // frontmatter carries no `budgets:` or `governance:` block. Optional fields
-  // mirror WorkerGovernance's scalar fields; only `tokens` and `costUsd` are
-  // surfaced here because those are the ones the per-agent override carries.
+  // Per-agent budget overrides in the §2.10 nested shape (each resource is
+  // `{ cap }`). Omitted when the frontmatter carries no `budgets:` or
+  // `governance:` block. Both flat-scalar (`tokens: 1000`) and nested
+  // (`tokens: { cap: 1000 }`) frontmatter parse to this internal shape.
   budgets?: {
-    tokens?: number;
-    costUsd?: number;
+    tokens?: { cap: number };
+    costUsd?: { cap: number };
+    runs?: { cap: number };
+    depth?: { cap: number };
   };
 }
 
@@ -39,17 +41,31 @@ export function parseAgentBudgetsFrontmatter(raw: string): AgentBudgetFrontmatte
   }
   const budgets = rawBudgets as Record<string, unknown>;
   const result: AgentBudgetFrontmatter["budgets"] = {};
-  if (budgets.tokens !== undefined) {
-    if (typeof budgets.tokens !== "number" || !Number.isFinite(budgets.tokens)) {
-      throw new Error(`agent.md frontmatter: 'budgets.tokens' must be a finite number; got ${JSON.stringify(budgets.tokens)}.`);
+  // Per-resource coercion. Accept both shapes:
+  //   flat scalar: `tokens: 1000`           → { cap: 1000 }
+  //   nested:      `tokens: { cap: 1000 }`  → { cap: 1000 }
+  // A nested object with extra keys (window/include) is the planned §2.13
+  // shape; we surface only `cap` here because per-agent governance inherits
+  // window/include from the global `settings.budgets.per-worker.<resource>`
+  // (the resolver's readGlobalBudgets applies them at merge time).
+  const coerceCap = (rawValue: unknown, resource: "tokens" | "costUsd" | "runs" | "depth"): { cap: number } => {
+    if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+      return { cap: rawValue };
     }
-    result.tokens = budgets.tokens;
-  }
-  if (budgets.costUsd !== undefined) {
-    if (typeof budgets.costUsd !== "number" || !Number.isFinite(budgets.costUsd)) {
-      throw new Error(`agent.md frontmatter: 'budgets.costUsd' must be a finite number; got ${JSON.stringify(budgets.costUsd)}.`);
+    if (typeof rawValue === "object" && rawValue !== null && !Array.isArray(rawValue)) {
+      const obj = rawValue as Record<string, unknown>;
+      const cap = obj.cap;
+      if (typeof cap !== "number" || !Number.isFinite(cap)) {
+        throw new Error(`agent.md frontmatter: 'budgets.${resource}.cap' must be a finite number; got ${JSON.stringify(cap)}.`);
+      }
+      return { cap };
     }
-    result.costUsd = budgets.costUsd;
+    throw new Error(`agent.md frontmatter: 'budgets.${resource}' must be a finite number or an object with a numeric 'cap' field; got ${JSON.stringify(rawValue)}.`);
+  };
+  for (const key of ["tokens", "costUsd", "runs", "depth"] as const) {
+    if (budgets[key] !== undefined) {
+      result[key] = coerceCap(budgets[key], key);
+    }
   }
   return { budgets: result };
 }

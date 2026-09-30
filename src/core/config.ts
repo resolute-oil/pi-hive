@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { AgentConfig, HiveConfig, HiveMode, HiveTeam } from "./types";
 import { parseYamlLite, parseFrontmatter } from "./yaml";
 import { agentSlug, configuredChildAgents, flatAgentConfig, normalizeAgentType, normalizeCommit, normalizePlanStages, safeRead, slug } from "./utils";
-import { validateAgentTypes, validateHiveConfigShape } from "./schema";
+import { validateAgentTypes, validateBudgetsConfig, validateHiveConfigShape } from "./schema";
 import { CONFIG_LIMITS, validateConfigSize, validateRawConfig } from "./config-validation";
 import { resolveConfiguredPath, resolveProjectPath } from "./safe-path";
 import { parseAgentBudgetsFrontmatter } from "../agents/frontmatter";
@@ -112,21 +112,32 @@ function enrichFromFrontmatter(cwd: string, agent: AgentConfig | undefined): voi
       if (agent.commit === undefined) agent.commit = normalizeCommit(attrs.commit);
       // Wave 2 F2 C6 follow-up: per-agent `budgets:` block in agent.md
       // frontmatter is parsed by parseAgentBudgetsFrontmatter (Wave 1 1B,
-      // src/agents/frontmatter.ts) but never wired into the enrichment loop.
-      // Plug the gap here so the documented per-agent override reaches
-      // WorkerBudgetPolicy resolution. The legacy `governance:` alias is
-      // handled inside parseAgentBudgetsFrontmatter (canonical `budgets:`
-      // wins). Fields already set by hive-config.yaml governance: win
-      // (closest-to-source priority — per-agent frontmatter is the closest,
-      // but config-file governance is the user's explicit opt-in so leave it).
+      // src/agents/frontmatter.ts) and projected onto agent.governance here
+      // so the per-agent override reaches WorkerBudgetPolicy resolution.
+      // The legacy `governance:` alias is handled inside
+      // parseAgentBudgetsFrontmatter (canonical `budgets:` wins).
+      //
+      // N-I4 fixup: write ONLY the legacy flat aliases (tokenBudget,
+      // costBudgetUsd). The new nested fields (governance.tokens,
+      // governance.costUsd, governance.runs, governance.depth) are read by
+      // resolveWorkerBudgetPolicy but are NOT consumed by the legacy
+      // `effectiveWorkerGovernance` enforcement path (which read them
+      // from engine/governance.ts:18 — now removed in the Wave 5A
+      // cleanup). Writing both shapes here would leave a quiet seam that
+      // nothing reads at runtime until the enforcement migration lands.
+      // The resolver's per-agent path falls back to the flat fields when
+      // the nested shape is absent, so dropping the nested writes is a
+      // no-op behaviorally; we restore them when the enforcement path
+      // migrates to read them (tracked in the Wave 5A follow-up).
       const parsedBudgets = parseAgentBudgetsFrontmatter(raw);
       if (parsedBudgets.budgets) {
         agent.governance = agent.governance ?? {};
-        if (parsedBudgets.budgets.tokens !== undefined && agent.governance.tokenBudget === undefined) {
-          agent.governance.tokenBudget = parsedBudgets.budgets.tokens;
+        const pb = parsedBudgets.budgets;
+        if (pb.tokens !== undefined && agent.governance.tokenBudget === undefined) {
+          agent.governance.tokenBudget = pb.tokens.cap;
         }
-        if (parsedBudgets.budgets.costUsd !== undefined && agent.governance.costBudgetUsd === undefined) {
-          agent.governance.costBudgetUsd = parsedBudgets.budgets.costUsd;
+        if (pb.costUsd !== undefined && agent.governance.costBudgetUsd === undefined) {
+          agent.governance.costBudgetUsd = pb.costUsd.cap;
         }
       }
     }
@@ -176,6 +187,20 @@ export function loadConfig(cwd: string): HiveConfig {
   // Validate the complete user-authored shape before defaults or frontmatter
   // enrichment can erase invalid values or make malformed input look valid.
   validateRawConfig(cwd, raw, parsed);
+
+  // Block the budget-config → runtime disconnection at the loading seam.
+  // `validateBudgetsConfig` runs typebox (rejects negative caps, unknown
+  // resource discriminators, malformed windows) and tier-aware window checks
+  // BEFORE defaults or enrichment can erase invalid values. Without this
+  // call, a malformed `settings.budgets:` block silently slips through and
+  // only surfaces (as `undefined` caps) at the first resolver call —
+  // defeating the discriminated-union contract that the prior fixup
+  // restored (TS B1). User-authored YAML commonly omits the `resource:`
+  // discriminator; the validator injects it from the parent nesting before
+  // typebox runs (see schema.ts injectResourceDiscriminators).
+  if (parsed?.settings?.budgets !== undefined) {
+    validateBudgetsConfig(parsed.settings.budgets);
+  }
 
   // H1 (Decision 7): allowedAgents is no longer a user config field — the
   // delegation hierarchy is derived from members/children. A user-set value was
@@ -227,6 +252,15 @@ export function loadConfig(cwd: string): HiveConfig {
       defaultTools: settings.defaultTools ?? "read, grep, find, ls",
       maxParallel: settings.maxParallel,
       queueSize: settings.queueSize,
+      // Canonical §2.10 nested budgets. `parseYamlLite` returns this verbatim
+      // from YAML; resolveBudgetsConfig (slice 7) is the typebox validator
+      // that ensures `resource:` is present on every cap and window values
+      // match the tier allow-list. Validation is invoked lazily by
+      // resolveWorkerBudgetPolicy on first read — surfacing invalid configs
+      // at the runtime boundary instead of config-load keeps the strict
+      // error message co-located with the offending field.
+      budgets: settings.budgets,
+      // Legacy flat-shape fallback (Wave 5A cleanup drops these).
       workerBudgets: settings.workerBudgets,
       teamBudgets: settings.teamBudgets,
       secretPaths: Array.isArray(settings.secretPaths) ? settings.secretPaths.map((entry: unknown) => String(entry).trim()).filter(Boolean) : [],
