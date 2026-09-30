@@ -434,13 +434,10 @@ export async function dispatchAgent(
   // late one in the normal-flow block before session.prompt runs.
   let lifecycle = new WorkerRunLifecycle(state, runtime, new AbortController().signal);
 
-  // Setup-failure fast path. If delegateAgent caught a non-BudgetExhaustedError
-  // (e.g. session.subscribe threw during installBudgetEventHooks wiring), the
-  // session may be partial. Emit the terminal telemetry + reap the partial
-  // session, then return without touching runtime.status="running" (which
-  // would clobber the "error" status we set in the catch). The setup-failure
-  // test in tests/dispatch-usage.test.ts asserts exitCode=1, aborted=1,
-  // disposed=1, terminal telemetry emitted — all land on this path.
+  // First fast path: delegateAgent returned nothing (caught a non-BudgetExhaustedError
+  // and has no partial session to hand off). Emit terminal telemetry and
+  // return without touching runtime.status="running" — the catch above
+  // already set the "error" status.
   if (!delegateResult) {
     runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : 0;
     const exitCode = 1;
@@ -518,20 +515,6 @@ export async function dispatchAgent(
   runtime.runStartCostUsd = runtime.costUsd;
 
   const streamState = makeDispatchStreamState();
-  // Setup-failure fast path. If delegateResult is undefined (no partial
-  // session to reap), emit the terminal telemetry and return immediately.
-  if (!delegateResult) {
-    runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : 0;
-    const exitCode = 1;
-    const output = errorMessage || "[no output]";
-    runtime.lastWork = output.split("\n").filter((line) => line.trim()).pop() || runtime.status;
-    await emitDelegationEnd({
-      state, runtime, caller, task, ctx, output, errorMessage, exitCode,
-      streamState, sdkCounts: undefined,
-      tokenBudgetScope: effectiveWorkerGovernance(state, runtime).tokenBudgetScope ?? "all",
-    });
-    return { output, exitCode, elapsed: runtime.elapsedMs };
-  }
   // delegateAgent has already opened the session and installed the budget
   // event hooks; the dispatcher just threads it through the rest of the
   // run-lifecycle orchestration (abort wiring, telemetry subscribe, prompt,
