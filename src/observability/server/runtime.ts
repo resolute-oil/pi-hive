@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
-import type { BudgetLedgerEntry } from "../../core/types";
 import { agentRuns, parseAgentLog } from "../agent-log";
 import { projectName } from "../../shared/project";
 import { tryResolveProjectIdentity } from "../../shared/project-identity";
@@ -626,7 +625,7 @@ function materializeTypedEvent(event: HiveTelemetryEvent) {
     // Wave 0 contract stub — the budget_ledger event carries the full
     // BudgetLedgerEntry payload; materialization (per-worker timeline rows)
     // lands in Wave 3 when the dashboard hard-cuts over to the new shape.
-    case "budget_ledger":
+    case "budget_ledger": // eslint-disable-line no-fallthrough
     case "queue_update":
     case "review_verdict":
     case "plan_approval":
