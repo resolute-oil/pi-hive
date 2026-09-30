@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { AgentConfig, HiveConfig, HiveMode, HiveTeam } from "./types";
 import { parseYamlLite, parseFrontmatter } from "./yaml";
 import { agentSlug, configuredChildAgents, flatAgentConfig, normalizeAgentType, normalizeCommit, normalizePlanStages, safeRead, slug } from "./utils";
-import { validateAgentTypes, validateHiveConfigShape } from "./schema";
+import { validateAgentTypes, validateBudgetsConfig, validateHiveConfigShape } from "./schema";
 import { CONFIG_LIMITS, validateConfigSize, validateRawConfig } from "./config-validation";
 import { resolveConfiguredPath, resolveProjectPath } from "./safe-path";
 import { parseAgentBudgetsFrontmatter } from "../agents/frontmatter";
@@ -199,6 +199,20 @@ export function loadConfig(cwd: string): HiveConfig {
   // Validate the complete user-authored shape before defaults or frontmatter
   // enrichment can erase invalid values or make malformed input look valid.
   validateRawConfig(cwd, raw, parsed);
+
+  // Block the budget-config → runtime disconnection at the loading seam.
+  // `validateBudgetsConfig` runs typebox (rejects negative caps, unknown
+  // resource discriminators, malformed windows) and tier-aware window checks
+  // BEFORE defaults or enrichment can erase invalid values. Without this
+  // call, a malformed `settings.budgets:` block silently slips through and
+  // only surfaces (as `undefined` caps) at the first resolver call —
+  // defeating the discriminated-union contract that the prior fixup
+  // restored (TS B1). User-authored YAML commonly omits the `resource:`
+  // discriminator; the validator injects it from the parent nesting before
+  // typebox runs (see schema.ts injectResourceDiscriminators).
+  if (parsed?.settings?.budgets !== undefined) {
+    validateBudgetsConfig(parsed.settings.budgets);
+  }
 
   // H1 (Decision 7): allowedAgents is no longer a user config field — the
   // delegation hierarchy is derived from members/children. A user-set value was
