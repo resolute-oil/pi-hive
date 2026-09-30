@@ -60,7 +60,7 @@ export function installBudgetEventHooks(
       // Warning at warningThreshold remaining (default 0.20).
       const workerTokensCap = policy.worker.tokens?.cap;
       if (workerTokensCap !== undefined && workerTokensCap > 0) {
-        const remaining = workerTokensCap - cumulative.tokens;
+        const remaining = Math.max(0, workerTokensCap - cumulative.tokens);
         const ratio = remaining / workerTokensCap;
         if (ratio <= warningThreshold) {
           const warningKey = "worker:tokens";
@@ -71,7 +71,7 @@ export function installBudgetEventHooks(
               "budget_warning",
               `Worker tokens at ${pct}% of cap. Wrap up your work; call summarize_progress({ notes: "..." }) to record completion intent.`,
               true,
-              { scope: "worker", resource: "tokens", remaining: cumulative.tokens, cap: workerTokensCap },
+              { scope: "worker", resource: "tokens", remaining, cap: workerTokensCap },
             );
           }
         }
@@ -82,13 +82,13 @@ export function installBudgetEventHooks(
       //   "compact" → write budget_exhausted entry, do NOT abort
       //   "none"    → do nothing (no event, no abort)
       if (workerTokensCap !== undefined && workerTokensCap > 0) {
-        const remaining = workerTokensCap - cumulative.tokens;
+        const remaining = Math.max(0, workerTokensCap - cumulative.tokens);
         if (remaining <= 0 && onExhaustionAction !== "none") {
           if (onExhaustionAction !== "compact") {
             sessionManager.appendCustomEntry("budget_exhausted", {
               scope: "worker",
               resource: "tokens",
-              remaining: cumulative.tokens,
+              remaining,
               cap: workerTokensCap,
             });
             if (!controller.signal.aborted) controller.abort(new Error("Worker token budget exhausted"));
@@ -100,7 +100,7 @@ export function installBudgetEventHooks(
             sessionManager.appendCustomEntry("budget_exhausted", {
               scope: "worker",
               resource: "tokens",
-              remaining: cumulative.tokens,
+              remaining,
               cap: workerTokensCap,
               action: "compact",
             });
