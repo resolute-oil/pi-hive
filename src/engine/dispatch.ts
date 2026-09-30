@@ -419,15 +419,12 @@ export async function dispatchAgent(
     }
   }
 
-  // The lifecycle is constructed early so the setup-failure fast paths below
-  // can attach + close it for partial-session reaping (abort + dispose). It
-  // Lifecycle listens to runController.signal (NOT abortSignal directly):
-// Setup-failure fast path. If delegateAgent caught a non-BudgetExhaustedError
-// (e.g. session.subscribe threw during installBudgetEventHooks wiring), the
-// session may be partial. Emit the terminal telemetry + reap the partial
-// session, then return without touching runtime.status="running" (which
-// would clobber the "error" status we set in the catch). The setup-failure
-// test in tests/dispatch-usage.test.ts asserts exitCode=1, aborted=1,
+  // Setup-failure fast path. If delegateAgent caught a non-BudgetExhaustedError
+  // (e.g. session.subscribe threw during installBudgetEventHooks wiring), the
+  // session may be partial. Emit the terminal telemetry + reap the partial
+  // session, then return without touching runtime.status="running" (which
+  // would clobber the "error" status we set in the catch). The setup-failure
+  // test in tests/dispatch-usage.test.ts asserts exitCode=1, aborted=1,
   //
   // We need TWO lifecycles: an early one for the setup-failure path (created
   // before runController exists, with a placeholder signal — session.abort
