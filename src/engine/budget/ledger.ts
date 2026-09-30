@@ -206,29 +206,42 @@ export class BudgetLedger {
   }
 
   // Explicit checkpoint snapshot. Always persisted (no throttle). Marker is
-  // one of "warning" / "exhausted" / "checkpoint"; kind is optional (used by
-  // cooperative tools / operator commands — see worker-tools.ts).
+  // one of "warning" / "exhausted" / "checkpoint". The optional `kind`
+  // parameter writes a distinct `data.kind` value on the ledger entry — the
+  // F5 operator commands (end / compact / pause / resume / force-kill /
+  // force-end / tear-down-all) and the cooperative tools
+  // (request_compaction / request_end_session / request_snapshot) all pass
+  // a distinct kind here so the dashboard can distinguish operator- vs
+  // worker-initiated shutdowns. When `kind` is omitted, the entry is a
+  // generic "checkpoint" with no documented kind — this matches the
+  // pre-Wave-3 contract that the F5 layer is the only producer of the typed
+  // kind values. Returns the persisted BudgetLedgerEntry so callers
+  // (operator commands) can hand the snapshot back to the operator surface.
   snapshot(
     stats: SessionStats,
     _policy: WorkerBudgetPolicy,
     marker: "warning" | "exhausted" | "checkpoint",
     _signal: AbortSignal,
-  ): void {
+    kind: BudgetLedgerKind | undefined = undefined,
+  ): BudgetLedgerEntry {
     const cumulative = {
       tokens: stats.tokens.total,
       costUsd: stats.cost,
       runs: this.cumulative.runs,
     };
-    const written = this.appendLedgerEntry({
+    const data: BudgetLedgerEntry["data"] = {
       caps: this.snapshotCaps(),
       cumulative,
       writtenAt: Date.now(),
       agentSlug: this.agentName,
       marker,
-    });
+    };
+    if (kind !== undefined) data.kind = kind;
+    const written = this.appendLedgerEntry(data);
     this.entries.push(written);
     this.lastWrittenTokens = cumulative.tokens;
     this.messagesSinceLastSnapshot = 0;
+    return written;
   }
 
   // Append a CustomEntry via the SDK and return the typed projection. The
