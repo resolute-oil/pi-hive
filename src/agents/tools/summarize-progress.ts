@@ -12,19 +12,13 @@
 //   compact_failed  — `compact: true` was requested but the caller's resolved
 //                     strategy is not "compact".
 //
-// Two exports:
-//   1. `summarizeProgressTool` — kept as the Wave 0 contract stub (length 0,
-//      throws "not implemented"). Not used at runtime; the actual
-//      registration goes through `buildSummarizeProgressTool`.
-//   2. `buildSummarizeProgressTool(state, callerName, ledger)` — the real
-//      builder. Captures the worker's identity and BudgetLedger in a closure
-//      at registration time (matches the `buildHiveTools(state, callerName)`
-//      pattern in src/agents/tools.ts and the previous wave-1D reference).
-//
-// The Wave 0 contract test (tests/budget-contracts.test.ts slice 9) pins
-// `summarizeProgressTool.length === 0` and a "not implemented" throw; the
-// stub export preserves those pins so the cross-cutting Wave 1 typecheck
-// stays green without modifying tests outside this agent's file-set.
+// Single export — `buildSummarizeProgressTool(state, callerName, ledger)`.
+// Captures the worker's identity and BudgetLedger in a closure at registration
+// time (matches the `buildHiveTools(state, callerName)` pattern in
+// src/agents/tools.ts and the previous wave-1D reference). The Wave 0 contract
+// stub `summarizeProgressTool` (arity-0, throws "not implemented") was
+// removed in C D5 — its only consumer was `tests/budget-contracts.test.ts`
+// slice 9, which now asserts the real factory's signature instead.
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { BudgetLedger } from "../../engine/budget/ledger";
@@ -35,16 +29,6 @@ const CHARS_PER_TOKEN = 4;
 
 /** Default cap when `progressSummaryTokenLimit` is not configured. */
 const DEFAULT_PROGRESS_SUMMARY_TOKEN_LIMIT = 2000;
-
-/**
- * Wave 0 contract stub. Kept so `tests/budget-contracts.test.ts` slice 9 keeps
- * passing (it pins `summarizeProgressTool.length === 0` and a "not implemented"
- * throw). Not invoked at runtime — the actual factory is
- * `buildSummarizeProgressTool` below.
- */
-export function summarizeProgressTool(): ToolDefinition {
-  throw new Error("not implemented");
-}
 
 /**
  * Resolve the caller's effective budget strategy. The structured strategy
