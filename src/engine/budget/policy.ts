@@ -35,8 +35,12 @@ export function checkBudgetPolicy(
     );
   }
 
-  const workerCaps = policy.worker ?? {};
-  const teamCaps = policy.team ?? {};
+  const workerCaps = policy.worker;
+  // `team` is required by the WorkerBudgetPolicy type contract; if a
+  // structurally-malformed caller passes team as undefined, the
+  // team-tier checks below just skip (no caps to evaluate) and the
+  // documented "no caps configured → no block" outcome holds.
+  const teamCaps = policy.team;
 
   // Worker scope (in documented evaluation order: tokens → costUsd → runs).
   if (
