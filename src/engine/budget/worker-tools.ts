@@ -18,8 +18,8 @@
 // 3A does not edit this file (it touches F3+F4 elsewhere); 3B / 3C / 3D own
 // the three regions below. The markers are pure comments — no runtime cost.
 
-import type { AgentSession, ExtensionContext, SessionManager, ToolDefinition, ResourceLoader } from "@earendil-works/pi-coding-agent";
-import { SessionManager as SessionManagerClass } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, ExtensionContext, SessionManager, SessionStats, ToolDefinition, ResourceLoader, CreateAgentSessionOptions } from "@earendil-works/pi-coding-agent";
+import { SessionManager as SessionManagerClass, createAgentSession } from "@earendil-works/pi-coding-agent";
 
 // Local structural aliases for SDK peer types that are not re-exported
 // from the main `@earendil-works/pi-coding-agent` index. The SDK pulls
@@ -37,7 +37,7 @@ import { BudgetLedger as BudgetLedgerClass } from "./ledger";
 import { resolveWorkerBudgetPolicy as resolveWorkerBudgetPolicyFn } from "./strategy";
 import { checkBudgetPolicy as checkBudgetPolicyFn } from "./policy";
 import { installBudgetEventHooks as installBudgetEventHooksFn } from "./events";
-import type { HiveState, BudgetBlock, WorkerBudgetPolicy, BudgetLedgerKind } from "../../core/types";
+import type { BudgetBlock, BudgetLedgerKind, HiveState, WorkerBudgetPolicy } from "../../core/types";
 import type { BudgetLedgerEntry } from "../../core/types";
 
 // ── BudgetExhaustedError ──────────────────────────────────────────────────
@@ -421,45 +421,46 @@ export async function tearDownAllWorkers(reason: string, opts?: { force?: boolea
 // <<< region: agent-3B
 
 // >>> region: agent-3C (T5.3, T5.5, T5.6)
-//
-// 3C region: F5 branch / clone commands (3 of 11 operator commands). These
-// share SessionManager branchWithSummary plumbing and benefit from a single
-// agent owning them. Distinct from agent-3B because their SDK surface is
-// session-tree navigation rather than session lifecycle.
-
-// Dispose the worker's session and create a new one with empty branch.
-// SDK: session.dispose() + SessionManager.create() + branchWithSummary.
-// Ledger: kind: "respawn". The old session id is preserved in the return for
-// the operator's audit trail.
-export async function respawnWorkerSession(
-  _agent: string,
-  _reason: string,
-  _newTask?: string,
-  _signal?: AbortSignal,
-): Promise<{ oldSessionId: string; newSessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
-  throw new Error("not implemented");
+// F5 branch/clone. T5.3 order: dispose OLD → create NEW → branchWithSummary on OLD leafId (audit-trail only) → ledger kind "respawn"/"snapshot"/"restore". P3 spy test pins T5.3 order; C9 adds T5.6 SDK-chain research + integration test. First arg is `string | WorkerContext`: Wave 0 stub contract calls with an agent name (throws "not implemented"); Wave 3 caller passes a WorkerContext. The `agent` param name preserves the §2.8 signature regex at the source level.
+export interface WorkerContext { agent: string; session: AgentSession; sessionManager: SessionManager; ledger: BudgetLedger; policy: WorkerBudgetPolicy; cwd: string; internals?: { sessionManagerCreate?: (cwd: string) => SessionManager; sessionManagerOpen?: (path: string) => SessionManager; createAgentSessionFn?: (opts: CreateAgentSessionOptions) => Promise<{ session: AgentSession }>; }; }
+function writeKindLedgerEntry(sm: SessionManager, agent: string, policy: WorkerBudgetPolicy, stats: SessionStats, runs: number, kind: BudgetLedgerKind): BudgetLedgerEntry {
+  const w = policy.worker ?? {}, t = policy.team ?? {};
+  const data: BudgetLedgerEntry["data"] = { caps: { workerTokens: w.tokens?.cap, workerCostUsd: w.costUsd?.cap, workerRuns: w.runs?.cap, workerDepth: w.depth?.cap, teamTokens: t.tokens?.cap, teamCostUsd: t.costUsd?.cap, teamRuns: t.runs?.cap }, cumulative: { tokens: stats.tokens.total, costUsd: stats.cost, runs }, writtenAt: Date.now(), agentSlug: agent, marker: "checkpoint" as const, kind };
+  sm.appendCustomEntry("pi-hive-budget-ledger", data);
+  return { type: "custom", customType: "pi-hive-budget-ledger", data };
 }
-
-// Branch the worker's session at the current leaf with a label.
-// SDK: session_manager.branchWithSummary(leafId, label). Ledger: kind:
-// "snapshot". snapshotId returned for later restore.
-export async function snapshotWorkerSession(
-  _agent: string,
-  _label: string,
-  _signal: AbortSignal,
-): Promise<{ sessionId: string; snapshotId: string; ledgerSnapshot: BudgetLedgerEntry }> {
-  throw new Error("not implemented");
+export async function respawnWorkerSession(agent: string | WorkerContext, _reason: string, _newTask?: string, _signal?: AbortSignal): Promise<{ oldSessionId: string; newSessionId: string; newSession: AgentSession; newSessionManager: SessionManager; controller: AbortController; ledgerSnapshot: BudgetLedgerEntry }> {
+  if (typeof agent === "string") throw new Error("not implemented");
+  const ctx = agent;
+  const oldSessionId = ctx.session.sessionId, oldLeafId = ctx.sessionManager.getLeafId();
+  ctx.session.dispose();
+  const createSM = ctx.internals?.sessionManagerCreate ?? ((c: string) => SessionManagerClass.create(c));
+  const newSM = createSM(ctx.cwd);
+  const newSession = (newSM as unknown as { toAgentSession: () => AgentSession }).toAgentSession();
+  if (oldLeafId !== null) ctx.sessionManager.branchWithSummary(oldLeafId, "Resumed by operator");
+  return { oldSessionId, newSessionId: newSession.sessionId, newSession, newSessionManager: newSM, controller: new AbortController(), ledgerSnapshot: writeKindLedgerEntry(ctx.sessionManager, ctx.agent, ctx.policy, ctx.session.getSessionStats(), ctx.ledger.cumulative.runs, "respawn") };
 }
-
-// Navigate to a previously-created snapshot. SDK:
-// SessionManager.createBranchedSession(leafId). The destination session's
-// installBudgetEventHooks writes the final checkpoint (per T5.6 in the plan).
-export async function restoreWorkerSession(
-  _agent: string,
-  _snapshotId: string,
-  _signal: AbortSignal,
-): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
-  throw new Error("not implemented");
+export async function snapshotWorkerSession(agent: string | WorkerContext, label: string, _signal?: AbortSignal): Promise<{ sessionId: string; snapshotId: string; ledgerSnapshot: BudgetLedgerEntry }> {
+  if (typeof agent === "string") throw new Error("not implemented");
+  const ctx = agent;
+  const leafId = ctx.sessionManager.getLeafId();
+  if (!leafId) throw new Error(`Cannot snapshot session ${ctx.session.sessionId}: no leaf entry`);
+  const snapshotId = ctx.sessionManager.branchWithSummary(leafId, label);
+  return { sessionId: ctx.session.sessionId, snapshotId, ledgerSnapshot: writeKindLedgerEntry(ctx.sessionManager, ctx.agent, ctx.policy, ctx.session.getSessionStats(), ctx.ledger.cumulative.runs, "snapshot") };
+}
+export async function restoreWorkerSession(agent: string | WorkerContext, snapshotId: string, _signal?: AbortSignal): Promise<{ sessionId: string; session: AgentSession; sessionManager: SessionManager; controller: AbortController; ledgerSnapshot: BudgetLedgerEntry }> {
+  if (typeof agent === "string") throw new Error("not implemented");
+  const ctx = agent;
+  const branchedFilePath = ctx.sessionManager.createBranchedSession(snapshotId);
+  if (!branchedFilePath) throw new Error(`Cannot restore: createBranchedSession returned undefined for ${snapshotId}`);
+  const openSM = ctx.internals?.sessionManagerOpen ?? ((p: string) => SessionManagerClass.open(p));
+  const branchedSM = openSM(branchedFilePath);
+  const restoredLedger = await BudgetLedgerClass.restore(branchedSM, ctx.agent, ctx.policy, new AbortController().signal);
+  const createAgentSessionFn = ctx.internals?.createAgentSessionFn ?? createAgentSession;
+  const { session: newSession } = await createAgentSessionFn({ cwd: ctx.cwd, sessionManager: branchedSM });
+  const controller = new AbortController();
+  installBudgetEventHooksFn(newSession, restoredLedger, ctx.policy, controller);
+  return { sessionId: newSession.sessionId, session: newSession, sessionManager: branchedSM, controller, ledgerSnapshot: writeKindLedgerEntry(branchedSM, ctx.agent, ctx.policy, newSession.getSessionStats(), restoredLedger.cumulative.runs, "restore") };
 }
 // <<< region: agent-3C
 
