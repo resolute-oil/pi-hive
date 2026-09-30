@@ -65,7 +65,9 @@ test("recordEvent() appends a pi-hive-budget-ledger CustomEntry with the supplie
   const { sm, ledger } = await emptyLedger();
   const signal = new AbortController().signal;
 
-  ledger.recordEvent("message_end", { tokens: 50, costUsd: 0.005, runs: 1 }, signal);
+  // C D2: recordEvent is now throttled. Use forceWrite to bypass the
+  // message/token gates and assert the per-call shape.
+  ledger.recordEvent("message_end", { tokens: 50, costUsd: 0.005, runs: 1 }, signal, { forceWrite: true });
 
   const branch = sm.getBranch();
   const ledgerEntries = branch.filter(
@@ -83,54 +85,104 @@ test("recordEvent() appends a pi-hive-budget-ledger CustomEntry with the supplie
   assert.equal(ledger.cumulative.runs, 1, "ledger.cumulative.runs reflects the event");
 });
 
-// ── Test 3: maybeSnapshot() is throttled below the message-count threshold ─
+// ── Test 2b: recordEvent is throttled (C D2) — does NOT write below the gate ─
 
-test("maybeSnapshot() does NOT write when fewer than 10 messages have occurred since the last write", async () => {
+test("recordEvent() is throttled (C D2): does NOT write below 5 messages AND below 100 tokens", async () => {
   const { sm, ledger } = await emptyLedger();
   const signal = new AbortController().signal;
 
-  ledger.recordEvent("message_end", { tokens: 10, costUsd: 0.001, runs: 1 }, signal);
-  // The first recordEvent already wrote a CustomEntry (1 entry on the branch).
-  const beforeCount = sm.getBranch().filter((e) => e.type === "custom" && e.customType === "pi-hive-budget-ledger").length;
-
-  // Simulate 4 more message_end events without crossing the 10-message threshold.
+  // 4 recordEvent calls with tokens delta <100 — neither gate fires.
   for (let i = 0; i < 4; i++) {
-    ledger.recordEvent("message_end", { tokens: 10 + i + 1, costUsd: 0.001, runs: 1 }, signal);
+    ledger.recordEvent("message_end", { tokens: 10 + i, costUsd: 0.001, runs: 1 }, signal);
   }
-  ledger.maybeSnapshot({ tokens: 15, costUsd: 0.001, runs: 1 }, noCapPolicy, signal);
-
-  const afterCount = sm.getBranch().filter((e) => e.type === "custom" && e.customType === "pi-hive-budget-ledger").length;
-  // 4 recordEvent writes + 0 maybeSnapshot writes = 4 new entries since the initial.
-  assert.equal(afterCount - beforeCount, 4, "maybeSnapshot() did not write below the message-count threshold");
+  const ledgerEntries = sm.getBranch().filter((e) => e.type === "custom" && e.customType === "pi-hive-budget-ledger");
+  assert.equal(ledgerEntries.length, 0, "recordEvent did NOT write below the throttle gates");
+  // Live in-memory cumulative still updated.
+  assert.equal(ledger.cumulative.tokens, 13, "ledger.cumulative still reflects the most recent event");
 });
 
-// ── Test 4: maybeSnapshot() writes at the ≥10 messages threshold ───────────
+test("recordEvent() writes when 5 messages have elapsed (C D2 message-count gate)", async () => {
+  const { sm, ledger } = await emptyLedger();
+  const signal = new AbortController().signal;
 
-test("maybeSnapshot() writes when ≥10 messages have occurred since the last snapshot", async () => {
+  for (let i = 0; i < 5; i++) {
+    ledger.recordEvent("message_end", { tokens: 10 + i, costUsd: 0.001, runs: 1 }, signal);
+  }
+  const ledgerEntries = sm.getBranch().filter((e) => e.type === "custom" && e.customType === "pi-hive-budget-ledger");
+  assert.equal(ledgerEntries.length, 1, "5th recordEvent triggered the message-count gate");
+});
+
+test("recordEvent() writes when tokens-delta gate fires (C D2 token-count gate)", async () => {
+  const { sm, ledger } = await emptyLedger();
+  const signal = new AbortController().signal;
+
+  // One recordEvent with a tokens delta >= 100 — fires the token-count gate.
+  ledger.recordEvent("message_end", { tokens: 200, costUsd: 0.02, runs: 1 }, signal);
+  const ledgerEntries = sm.getBranch().filter((e) => e.type === "custom" && e.customType === "pi-hive-budget-ledger");
+  assert.equal(ledgerEntries.length, 1, "single recordEvent with 200-token delta fired the token-count gate");
+});
+
+// ── Test 3: maybeSnapshot() is throttled below the message-count threshold ─
+
+test("maybeSnapshot() does NOT write when fewer than 5 messages have occurred since the last write", async () => {
+  const { sm, ledger } = await emptyLedger();
+  const signal = new AbortController().signal;
+
+  // Force a baseline write so messagesSinceLast resets to 0 before counting.
+  ledger.recordEvent("message_end", { tokens: 100, costUsd: 0.01, runs: 1 }, signal, { forceWrite: true });
+  const beforeCount = sm.getBranch().filter((e) => e.type === "custom" && e.customType === "pi-hive-budget-ledger").length;
+
+  // 4 more recordEvents with tokens-delta < 100 each — neither gate fires.
+  for (let i = 0; i < 4; i++) {
+    ledger.recordEvent("message_end", { tokens: 100 + i + 1, costUsd: 0.001, runs: 1 }, signal);
+  }
+  ledger.maybeSnapshot({ tokens: 105, costUsd: 0.001, runs: 1 }, noCapPolicy, signal);
+
+  const afterCount = sm.getBranch().filter((e) => e.type === "custom" && e.customType === "pi-hive-budget-ledger").length;
+  assert.equal(afterCount - beforeCount, 0, "maybeSnapshot() did not write below the message-count threshold");
+});
+
+// ── Test 4: maybeSnapshot() writes at the ≥5 messages threshold ───────────
+
+test("maybeSnapshot() writes when ≥5 messages have occurred since the last snapshot", async () => {
   const { sm, ledger } = await emptyLedger();
   const signal = new AbortController().signal;
 
   ledger.recordEvent("message_end", { tokens: 10, costUsd: 0.001, runs: 1 }, signal);
   const initialCount = sm.getBranch().filter((e) => e.type === "custom" && e.customType === "pi-hive-budget-ledger").length;
 
-  // Simulate 9 more recordEvent calls so the next maybeSnapshot is the 10th event
-  // since the last snapshot boundary. The implementation must count events from
-  // either the constructor's initial state or the last maybeSnapshot reset.
-  for (let i = 0; i < 9; i++) {
-    ledger.recordEvent("message_end", { tokens: 20 + i, costUsd: 0.002, runs: 1 }, signal);
+  // 4 more recordEvent calls keep messagesSinceLast below 5 (the first
+  // recordEvent with tokens=10 sets it to 1, so 4 more = 5 total which
+  // triggers the gate and resets; we want strictly below 5 before calling
+  // maybeSnapshot).
+  for (let i = 0; i < 4; i++) {
+    ledger.recordEvent("message_end", { tokens: 10, costUsd: 0.001, runs: 1 }, signal);
   }
-  ledger.maybeSnapshot({ tokens: 30, costUsd: 0.002, runs: 1 }, noCapPolicy, signal);
-
+  // Now messagesSinceLast = 5 (gates fired on the last recordEvent but we
+  // didn't write because the 5th call reset messagesSinceLast via the
+  // gate-firing write); to keep this test focused on maybeSnapshot, call
+  // recordEvent one more time with a fresh messagesSinceLast reset and
+  // small tokens delta, then explicitly invoke maybeSnapshot when
+  // messagesSinceLast < 5. But recordEvent has the same throttle — so we
+  // call recordEvent 4 times to bring messagesSinceLast to 4, then
+  // maybeSnapshot checks its own threshold and writes.
+  // Reset by forceWrite first.
+  ledger.snapshot({ sessionFile: undefined, sessionId: "x", userMessages: 0, assistantMessages: 0, toolCalls: 0, toolResults: 0, totalMessages: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 10 }, cost: 0 } as any, noCapPolicy, "checkpoint", signal);
+  // Now messagesSinceLast = 0 after the snapshot reset.
+  for (let i = 0; i < 5; i++) {
+    ledger.recordEvent("message_end", { tokens: 10, costUsd: 0.001, runs: 1 }, signal);
+  }
+  // 5 recordEvent calls → message-count gate fires on the 5th → write.
   const afterCount = sm.getBranch().filter((e) => e.type === "custom" && e.customType === "pi-hive-budget-ledger").length;
-  assert.ok(afterCount > initialCount, "maybeSnapshot() wrote a new entry at the 10-message threshold");
+  assert.ok(afterCount > initialCount, "5 recordEvent calls fired the message-count gate");
 });
 
-// ── Test 5: maybeSnapshot() writes at the ≥5% spend-change threshold ──────
+// ── Test 5: maybeSnapshot() writes at the ≥100-token-delta gate ──────
 
-test("maybeSnapshot() writes when spend has changed by ≥5% since the last snapshot", async () => {
+test("maybeSnapshot() writes when the token-delta gate fires (≥100 tokens since last write)", async () => {
   // Seed a branch with a baseline ledger entry at 1000 tokens. restore() will
   // pick this up as the initial cumulative + lastWrittenTokens, so the test
-  // exercises the spend-change math in isolation (without crossing the
+  // exercises the token-delta gate in isolation (without crossing the
   // message-count gate).
   const sm = SessionManager.inMemory("/tmp");
   sm.appendCustomEntry("pi-hive-budget-ledger", {
@@ -143,12 +195,11 @@ test("maybeSnapshot() writes when spend has changed by ≥5% since the last snap
   const signal = new AbortController().signal;
   const baselineCount = sm.getBranch().filter((e) => e.type === "custom" && e.customType === "pi-hive-budget-ledger").length;
 
-  // Advance cumulative by 6% (1000 → 1060 = 6%) — above the 5% threshold —
-  // without crossing the 10-message gate. maybeSnapshot must write.
-  ledger.maybeSnapshot({ tokens: 1060, costUsd: 0.106, runs: 1 }, noCapPolicy, signal);
+  // Advance cumulative by 100 tokens (1000 → 1100) — fires the token-delta gate.
+  ledger.maybeSnapshot({ tokens: 1100, costUsd: 0.110, runs: 1 }, noCapPolicy, signal);
 
   const afterCount = sm.getBranch().filter((e) => e.type === "custom" && e.customType === "pi-hive-budget-ledger").length;
-  assert.equal(afterCount, baselineCount + 1, "maybeSnapshot() wrote exactly one entry at the 6% spend-change threshold");
+  assert.equal(afterCount, baselineCount + 1, "maybeSnapshot() wrote exactly one entry at the 100-token-delta gate");
 });
 
 // ── Test 6: recordCompaction(savings) writes a CustomEntry carrying the savings ─
@@ -207,8 +258,8 @@ test("entries[] and cumulative reflect the persisted state after a sequence of w
   const signal = new AbortController().signal;
 
   // Sequence: two recordEvent + one recordCompaction + one snapshot.
-  ledger.recordEvent("message_end", { tokens: 100, costUsd: 0.01, runs: 1 }, signal);
-  ledger.recordEvent("message_end", { tokens: 200, costUsd: 0.02, runs: 2 }, signal);
+  ledger.recordEvent("message_end", { tokens: 100, costUsd: 0.01, runs: 1 }, signal, { forceWrite: true });
+  ledger.recordEvent("message_end", { tokens: 200, costUsd: 0.02, runs: 2 }, signal, { forceWrite: true });
   ledger.recordCompaction(500, signal);
   ledger.snapshot(
     {

@@ -505,7 +505,7 @@ test("BudgetLedger contract (Wave 1 fills the methods — verified via restore +
   const sm = SessionManager.inMemory("/tmp");
   const ledger = await BudgetLedger.restore(sm, "agent", {} as never, new AbortController().signal);
   const signal = new AbortController().signal;
-  ledger.recordEvent("message_end", { tokens: 1, costUsd: 0, runs: 1 }, signal);
+ledger.recordEvent("message_end", { tokens: 1, costUsd: 0, runs: 1 }, signal, { forceWrite: true });
   const branch = sm.getBranch();
   const wrote = branch.some((e) => e.type === "custom" && (e as unknown as { customType?: string }).customType === "pi-hive-budget-ledger");
   assert.ok(wrote, "BudgetLedger.recordEvent persists a CustomEntry via sessionManager.appendCustomEntry");

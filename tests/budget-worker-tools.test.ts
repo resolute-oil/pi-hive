@@ -196,7 +196,7 @@ test("delegateAgent calls SessionManager.create() when opts.fresh === true", asy
 
   assert.equal(createCalled, true, "SessionManager.create() called");
   assert.equal(continueRecentCalled, false, "SessionManager.continueRecent() NOT called for fresh=true");
-  assert.equal(result.sessionId, "fake-session-id");
+  assert.equal(result.kind === "ready" ? result.sessionId : "", "fake-session-id");
 });
 
 // ── Test 3: fresh=false (default) calls SessionManager.continueRecent() ───
@@ -355,9 +355,9 @@ test("delegateAgent returns { sessionId, session, ledger, controller }", async (
     },
   );
 
-  assert.equal(result.sessionId, "fake-session-id", "sessionId returned from AgentSession.sessionId");
+  assert.equal(result.kind === "ready" ? result.sessionId : "", "fake-session-id", "sessionId returned from AgentSession.sessionId");
   assert.strictEqual(result.session, session, "session returned");
-  assert.strictEqual(result.ledger, ledger, "ledger returned");
+  assert.strictEqual(result.kind === "ready" ? result.ledger : undefined, ledger, "ledger returned");
   assert.ok(result.controller instanceof AbortController, "controller returned");
 });
 
@@ -502,7 +502,7 @@ test("T2.3: depth at policy.worker.depth.cap - 1 succeeds (no throw)", async () 
     { depthFn: () => 1 },
   );
 
-  assert.equal(result.sessionId, "fake-session-id");
+  assert.equal(result.kind === "ready" ? result.sessionId : "", "fake-session-id");
 });
 
 // ── Test 9 (T2.3): depth count is read on every call (stub seam; survives /reload) ─
@@ -544,7 +544,7 @@ test("T2.3: depth count is re-read via depthFn on every call (post-reload depth 
   // After /reload, depthNow resets to 0 — first post-reload delegation OK again.
   depthNow = 0;
   const postReload = await delegateAgentWithInternals(state, "coder", "task", { fresh: false }, ctx, noop, { depthFn });
-  assert.equal(postReload.sessionId, "fake-session-id", "post-reload delegation succeeds when depth resets");
+  assert.equal(postReload.kind === "ready" ? postReload.sessionId : "", "fake-session-id", "post-reload delegation succeeds when depth resets");
 });
 
 // ── Test 10 (T2.2): SessionManager.create vs continueRecent both yield a session ─
