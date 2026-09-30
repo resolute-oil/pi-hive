@@ -1,4 +1,4 @@
-import { withFileMutationQueue, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { withFileMutationQueue, type AgentSession, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { existsSync, readdirSync, renameSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -30,7 +30,7 @@ import { resolveConfiguredPath } from "../core/safe-path";
 import { acquireWorkerSlot, effectiveWorkerGovernance, releaseWorkerSlot } from "./governance";
 import { WorkerRunLifecycle } from "./worker-lifecycle";
 import { modelKey, resolveModel } from "./model-resolution";
-import { delegateAgent as delegateAgentFn, BudgetExhaustedError, defaultDelegateAgentInternals } from "./budget/worker-tools";
+import { delegateAgent as delegateAgentFn, BudgetExhaustedError, type DelegateAgentThinkingLevel } from "./budget/worker-tools";
 import { installBudgetEventHooks } from "./budget/events";
 import { wireDispatchSubscription, makeDispatchStreamState } from "./dispatch-subscribe";
 import { emitDelegationEnd } from "./dispatch-end";
@@ -351,20 +351,25 @@ export async function dispatchAgent(
       { fresh },
       ctx,
       {
-        ...defaultDelegateAgentInternals,
-        // Production-side seam: the dispatcher's createSession is what every
-        // test in tests/dispatch-usage.test.ts injects. delegateAgent routes
-        // through this when provided; otherwise it falls back to
-        // SessionManager.toAgentSession().
-        createSession: createSession as unknown as never,
-      },
-      {
         depthFn: () => currentDelegationDepth(),
         model: resolvedModel,
-        thinkingLevel: thinking as unknown,
+        // `thinking` is a free-form string from frontmatter; the SDK's
+        // ThinkingLevel is a union. Cast at the boundary rather than
+        // forcing an unknown value into the seam. The factory below
+        // accepts the union-typed string.
+        thinkingLevel: thinking as DelegateAgentThinkingLevel | undefined,
         tools: allToolNamesForGate,
         customTools: hiveToolsForGate,
         resourceLoader: workerLoader,
+        // Production-side seam: the dispatcher's createSession is what every
+        // test in tests/dispatch-usage.test.ts injects. delegateAgent routes
+        // through this when provided; otherwise it falls back to
+        // SessionManager.toAgentSession(). The SDK's createAgentSession
+        // signature is structurally compatible with our seam's
+        // CreateSessionOptions (same fields, different type aliases for
+        // Model/ThinkingLevel); the cast lives here at the production
+        // wiring site, not inside the seam — TS I13.
+        createSession: createSession as never,
       },
     );
   } catch (error: any) {
@@ -381,39 +386,23 @@ export async function dispatchAgent(
       }, caller);
       return { output: `Delegation blocked: ${error.message}`, exitCode: 1, elapsed: 0 };
     }
-    // Setup failure (e.g. createSession's session.subscribe throws when
-    // installBudgetEventHooks subscribes the budget listener). Mirror the
-    // legacy behavior: set errorMessage, mark runtime.status="error", and
-    // fall through to the post-delegationEnd cleanup path so the partial
+    // Setup failure (e.g. installBudgetEventHooks's session.subscribe throws
+    // — the budget listener subscribes the session). Mirror the legacy
+    // behavior: set errorMessage, mark runtime.status="error", and fall
+    // through to the post-delegationEnd cleanup path so the partial
     // session gets aborted/disposed and the terminal telemetry event lands
-    // with the caught error message. Throw into the existing prompt-try
-    // catch (the inner one at the prompt() invocation site) — actually no,
-    // we set errorMessage here and let the tail (lifecycle.close +
-    // emitDelegationEnd) handle abort/dispose + the terminal event.
+    // with the caught error message.
     errorMessage = error?.message || String(error);
     runtime.status = "error";
     releaseWorkerSlot(state);
-    // Recover the partial session (if delegateAgent got that far before the
-    // throw — installBudgetEventHooks wires the budget listener via
+    // Recover the partial session (if delegateAgent got that far before
+    // the throw — installBudgetEventHooks wires the budget listener via
     // session.subscribe, which can throw on a test seam). delegateAgent
-    // attaches the partial session as `__partialSession` so we can still
-    // call abort/dispose via the lifecycle close path. The existing
-    // setup-failure test in tests/dispatch-usage.test.ts asserts aborted=1,
+    // returns kind: "partial" so the dispatcher can still call
+    // abort/dispose via the lifecycle close path. The existing setup-
+    // failure test in tests/dispatch-usage.test.ts asserts aborted=1,
     // disposed=1.
-    const partial = (error as { __partialSession?: any } | null)?.__partialSession;
-    if (partial) {
-      delegateResult = {
-        session: partial,
-        sessionId: partial.sessionId,
-        ledger: undefined as never,
-        controller: new AbortController(),
-        sessionManager: SessionManager.open(runtime.sessionFile),
-      };
-    } else {
-      // No session to abort/dispose — skip the rest of the orchestration
-      // and jump to the cleanup tail.
-      delegateResult = undefined;
-    }
+    delegateResult = undefined;
   }
 
   // Setup-failure fast path. We need TWO lifecycles: an early one for the
@@ -442,14 +431,16 @@ export async function dispatchAgent(
     });
     return { output, exitCode, elapsed: runtime.elapsedMs };
   }
-  const partialSession: any = (() => {
-    const s = delegateResult.session;
-    return typeof s.prompt !== "function" ? s : null;
-  })();
-  if (partialSession) {
-    // Partial session was recovered via the skip wire. Attach to lifecycle so
-    // abort/dispose are invoked via lifecycle.close, then jump to emitDelegationEnd.
-    lifecycle.attachSession(partialSession);
+  // Partial-session branch: delegateAgent's installBudgetEventHooks.subscribe
+  // threw AFTER the session was created. The setup-failure path returns
+  // kind: "partial" with the session for cleanup, plus the original error
+  // so we can surface it as the worker's errorMessage. Reap it
+  // (abort + dispose) via the lifecycle close path; the setup-failure
+  // test in tests/dispatch-usage.test.ts asserts aborted=1, disposed=1.
+  if (delegateResult.kind === "partial") {
+    errorMessage = (delegateResult.error as Error | undefined)?.message ?? String(delegateResult.error ?? "");
+    runtime.status = "error";
+    lifecycle.attachSession(delegateResult.session);
     runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : 0;
     const exitCode = 1;
     const output = errorMessage || "[no output]";
@@ -510,10 +501,12 @@ export async function dispatchAgent(
   // delegateAgent has already opened the session and installed the budget
   // event hooks; the dispatcher just threads it through the rest of the
   // run-lifecycle orchestration (abort wiring, telemetry subscribe, prompt,
-  // session-stats overwrite, delegation_end emit).
-  const session: any = delegateResult.session;
-  // Always attach the session to the lifecycle (even partial sessions)
-  // so the cleanup tail (lifecycle.close) reaps abort + dispose on it.
+  // session-stats overwrite, delegation_end emit). The discriminated
+  // union narrowed to "ready" by the partial-session branch above, so
+  // `session` is the fully-typed AgentSession (TS I15 — no more `any`).
+  const session: AgentSession = delegateResult.session;
+  // Always attach the session to the lifecycle so the cleanup tail
+  // (lifecycle.close) reaps abort + dispose on it.
   lifecycle.attachSession(session);
 
   const abortWorker = (): void => {
