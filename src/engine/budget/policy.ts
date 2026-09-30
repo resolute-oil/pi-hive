@@ -174,6 +174,15 @@ export function ratioRemaining(used: number, cap: number): number {
 
 // Pure threshold check: did the remaining ratio cross below the threshold?
 // Used to dedup the warning emit per (scope, resource, agent) pair.
+//
+// Both arguments are interpreted as ratios in the [0, 1] range — NOT a
+// (used, cap) pair as the plan prose (§2.5) originally suggested. The
+// caller pre-computes the remaining ratio via `ratioRemaining(used, cap)`
+// (or `1 - ratioRemaining(used, cap)` for the "remaining ratio") before
+// passing it in. This two-arg signature was chosen over a three-arg
+// `(used, cap, threshold)` form to keep the pure function decoupled from
+// the cap arithmetic; the test at budget-policy.test.ts pins the
+// ratio-vs-ratio interpretation (`crossedThreshold(0.10, 0.20)` = true).
 export function crossedThreshold(remaining: number, threshold: number): boolean {
   return remaining <= threshold;
 }
