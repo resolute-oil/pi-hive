@@ -419,25 +419,20 @@ export async function dispatchAgent(
     }
   }
 
-  // Setup-failure fast path. If delegateAgent caught a non-BudgetExhaustedError
-  // (e.g. session.subscribe threw during installBudgetEventHooks wiring), the
-  // session may be partial. Emit the terminal telemetry + reap the partial
-  // session, then return without touching runtime.status="running" (which
-  // would clobber the "error" status we set in the catch). The setup-failure
-  // test in tests/dispatch-usage.test.ts asserts exitCode=1, aborted=1,
-  //
-  // We need TWO lifecycles: an early one for the setup-failure path (created
-  // before runController exists, with a placeholder signal — session.abort
-  // is only called via the explicit `partial.abort?.()` below, not via signal
-  // listening), and the runController-backed one for the normal run path
-  // (created after runController below). The early one is replaced by the
-  // late one in the normal-flow block before session.prompt runs.
+  // Setup-failure fast path. We need TWO lifecycles: an early one for the
+  // setup-failure path (created before runController exists, with a
+  // placeholder signal — session.abort is only called via the explicit
+  // `partial.abort?.()` below, not via signal listening), and the
+  // runController-backed one for the normal run path (created after
+  // runController below). The early one is replaced by the late one in the
+  // normal-flow block before session.prompt runs.
   let lifecycle = new WorkerRunLifecycle(state, runtime, new AbortController().signal);
 
-  // First fast path: delegateAgent returned nothing (caught a non-BudgetExhaustedError
-  // and has no partial session to hand off). Emit terminal telemetry and
-  // return without touching runtime.status="running" — the catch above
-  // already set the "error" status.
+  // First fast path: delegateAgent returned nothing (caught a
+  // non-BudgetExhaustedError and has no partial session to hand off). Emit
+  // terminal telemetry and return without touching runtime.status="running"
+  // — the catch above already set the "error" status. Partial-session
+  // reaping is handled in the next block.
   if (!delegateResult) {
     runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : 0;
     const exitCode = 1;
