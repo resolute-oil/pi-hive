@@ -18,7 +18,219 @@
 // 3A does not edit this file (it touches F3+F4 elsewhere); 3B / 3C / 3D own
 // the three regions below. The markers are pure comments — no runtime cost.
 
+import type { AgentSession, ExtensionContext, SessionManager, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { SessionManager as SessionManagerClass } from "@earendil-works/pi-coding-agent";
+import type { BudgetLedger } from "./ledger";
+import { BudgetLedger as BudgetLedgerClass } from "./ledger";
+import { resolveWorkerBudgetPolicy as resolveWorkerBudgetPolicyFn } from "./strategy";
+import { checkBudgetPolicy as checkBudgetPolicyFn } from "./policy";
+import { installBudgetEventHooks as installBudgetEventHooksFn } from "./events";
+import type { HiveState, WorkerBudgetPolicy, BudgetBlock } from "../../core/types";
 import type { BudgetLedgerEntry } from "../../core/types";
+
+// ── BudgetExhaustedError ──────────────────────────────────────────────────
+//
+// Per `04-refactor-plan.md` §2.4 + `pi-sdk-session-api.md`: throwing produces
+// a failed tool result; returning an object does not mark it as an error.
+// `delegateAgent` throws this when the pre-flight gate refuses, so the
+// dispatcher's caller sees the error through the standard tool-error path.
+
+export class BudgetExhaustedError extends Error {
+  readonly reason: string;
+  readonly scope: BudgetBlock["scope"];
+  readonly resource: BudgetBlock["resource"];
+  readonly remaining: BudgetBlock["remaining"];
+  readonly limit: BudgetBlock["limit"];
+
+  constructor(block: BudgetBlock) {
+    super(block.reason);
+    this.name = "BudgetExhaustedError";
+    this.reason = block.reason;
+    this.scope = block.scope;
+    this.resource = block.resource;
+    this.remaining = block.remaining;
+    this.limit = block.limit;
+  }
+}
+
+// ── DelegateAgent internals (test seam) ───────────────────────────────────
+//
+// The pre-flight gate (resolveWorkerBudgetPolicy → BudgetLedger.restore →
+// checkBudgetPolicy) is composed of pure functions plus one async restore.
+// In production `delegateAgent` uses the real implementations; tests inject
+// stubs through this seam so each path can be exercised in isolation without
+// a live session tree.
+
+export interface DelegateAgentInternals {
+  resolveWorkerBudgetPolicy: typeof resolveWorkerBudgetPolicyFn;
+  restoreLedger: typeof BudgetLedgerClass.restore;
+  checkBudgetPolicy: typeof checkBudgetPolicyFn;
+  installBudgetEventHooks: typeof installBudgetEventHooksFn;
+  sessionManagerCreate: (cwd: string) => SessionManager;
+  sessionManagerContinueRecent: (cwd: string) => SessionManager;
+  // Production-side seam: when supplied, delegateAgent uses it to create the
+  // AgentSession instead of going through SessionManager.create()/continueRecent()
+  // .toAgentSession(). The dispatcher passes the existing CreateAgentSession
+  // through so the test seam in dispatch.ts keeps working — tests stub this
+  // hook and the dispatcher does not need its own session-factory code.
+  // Signature matches createAgentSession (cwd, model, thinkingLevel, tools,
+  // customTools, sessionManager, resourceLoader) → { session }.
+  createSession?: (opts: {
+    cwd: string;
+    model: unknown;
+    thinkingLevel: unknown;
+    tools: unknown[];
+    customTools: unknown[];
+    sessionManager: SessionManager;
+    resourceLoader: unknown;
+  }) => Promise<{ session: AgentSession }>;
+}
+
+const defaultInternals: DelegateAgentInternals = {
+  resolveWorkerBudgetPolicy: resolveWorkerBudgetPolicyFn,
+  restoreLedger: BudgetLedgerClass.restore,
+  checkBudgetPolicy: checkBudgetPolicyFn,
+  installBudgetEventHooks: installBudgetEventHooksFn,
+  sessionManagerCreate: (cwd) => SessionManagerClass.create(cwd),
+  sessionManagerContinueRecent: (cwd) => SessionManagerClass.continueRecent(cwd),
+};
+
+// Re-export the default internals so the production dispatcher can spread them
+// and override only the createSession seam (preserving the 565-test session
+// factory). Tests that need full control still pass an entire internals
+// object as the 6th arg of delegateAgent.
+export const defaultDelegateAgentInternals: DelegateAgentInternals = defaultInternals;
+
+// ── delegateAgent ──────────────────────────────────────────────────────────
+//
+// Wave 2 F2 T2.2 — the budget-aware `delegate_agent` entry point. Throw-to-
+// refuse per Pi docs §2 (BudgetExhaustedError on budget block; success
+// returns the opened session + restored ledger). Two plumbing concerns
+// handled here, both via composition with the pre-existing pure helpers:
+//   1. Pre-flight gate: resolve policy → restore ledger → check policy.
+//   2. Session open: fresh=true → SessionManager.create(); default →
+//      SessionManager.continueRecent() (per `04-refactor-plan.md` §2.4 / §2.9).
+//   3. Hook install: budget event hooks subscribe to message_end /
+//      compaction_end / agent_settled for the new session's lifetime.
+
+export async function delegateAgent(
+  state: HiveState,
+  agentName: string,
+  task: string,
+  opts: { fresh?: boolean } | undefined,
+  ctx: ExtensionContext,
+  internals: DelegateAgentInternals = defaultInternals,
+  options: {
+    controller?: AbortController;
+    depthFn?: () => number;
+    // Production-side session-factory inputs (passed through to
+    // internals.createSession). The dispatcher collects these from its
+    // existing pre-prompt wiring (model, thinkingLevel, tools, customTools,
+    // resourceLoader) and forwards them. When absent, delegateAgent uses
+    // the SessionManager.toAgentSession() fallback.
+    model?: unknown;
+    thinkingLevel?: unknown;
+    tools?: unknown[];
+    customTools?: unknown[];
+    resourceLoader?: unknown;
+  } = {},
+): Promise<{ sessionId: string; session: AgentSession; ledger: BudgetLedger; controller: AbortController; sessionManager: SessionManager }> {
+  void task; // task is consumed by session.prompt() in the production wiring (Cycle 2 above the dispatch.ts refactor).
+
+  // 1. Resolve the worker's WorkerBudgetPolicy from the active config.
+  const policy = internals.resolveWorkerBudgetPolicy(state.config as never, agentName);
+
+  // 2. Restore the ledger from the active branch. The SessionManager comes
+  //    from the caller's session context; production wires it from
+  //    ctx.sessionManager (or opens one alongside the session for fresh).
+  //    For the pre-flight gate we open the manager now so restore() can walk
+  //    the branch before the session is created.
+  const sessionManager = opts?.fresh
+    ? internals.sessionManagerCreate(ctx.cwd)
+    : internals.sessionManagerContinueRecent(ctx.cwd);
+
+  // 2a. Depth-cap pre-flight (T2.3). Surfaced before BudgetLedger.restore so
+  //     a depth violation fails fast without an async ledger walk; matches
+  //     the documented checkBudgetPolicy order.
+  if (policy.worker.depth?.cap !== undefined) {
+    const depth = options.depthFn ? options.depthFn() + 1 : 0;
+    if (depth > policy.worker.depth.cap) {
+      throw new BudgetExhaustedError({
+        reason: `Worker maximum delegation depth exhausted (${policy.worker.depth.cap}).`,
+        scope: "worker",
+        resource: "depth",
+        remaining: {},
+        limit: { depth: policy.worker.depth.cap },
+      });
+    }
+  }
+
+  // 3. Restore the ledger. The SessionManager we just opened is empty for a
+  //    fresh session (branch walks zero entries), so the ledger's cumulative
+  //    starts at zero and the cap check below can only block if the cap is 0
+  //    (intentional refuse in that case).
+  const ledger = await internals.restoreLedger(
+    sessionManager,
+    agentName,
+    policy,
+    new AbortController().signal,
+  );
+
+  // 4. Pre-flight gate. checkBudgetPolicy returns a BudgetBlock when any
+  //    cap (worker or team; tokens / costUsd / runs) is exceeded. Throw to
+  //    refuse — Pi docs §2 requires throwing for a failed tool result.
+  const blocked = internals.checkBudgetPolicy(ledger, policy, sessionManager.getBranch());
+  if (blocked) {
+    throw new BudgetExhaustedError(blocked);
+  }
+
+  // 5. Open the session. Production wires a session-factory seam (createSession)
+  //    through the dispatcher so the 565 existing tests continue to drive
+  //    AgentSession creation from tests/*.test.ts. When no createSession is
+  //    supplied, fall back to SessionManager.toAgentSession() (the SDK's
+  //    documented factory).
+  let session: AgentSession;
+  if (internals.createSession) {
+    const created = await internals.createSession({
+      cwd: ctx.cwd,
+      model: options.model,
+      thinkingLevel: options.thinkingLevel,
+      tools: options.tools ?? [],
+      customTools: options.customTools ?? [],
+      sessionManager,
+      resourceLoader: options.resourceLoader,
+    });
+    session = created.session;
+  } else {
+    session = (sessionManager as unknown as { toAgentSession: () => AgentSession }).toAgentSession();
+  }
+
+  // 6. Install the budget event hooks. Each appendCustomEntry /
+  //    appendCustomMessageEntry call inside the handler reads the supplied
+  //    signal — abort it to cancel any in-flight write.
+  const controller = options.controller ?? new AbortController();
+  // Setup-failure canary: if session.subscribe throws inside
+  // installBudgetEventHooks, we surface the partial session via the
+  // returned object so the dispatcher can still call session.abort and
+  // session.dispose (the existing test in tests/dispatch-usage.test.ts
+  // asserts abort=1, dispose=1 for the setup-failure path).
+  try {
+    internals.installBudgetEventHooks(session, ledger, policy, controller);
+  } catch (setupError) {
+    // Re-throw with the session attached as a side-channel property so the
+  // dispatcher can recover and call abort/dispose.
+    (setupError as Error & { __partialSession?: AgentSession }).__partialSession = session;
+    throw setupError;
+  }
+
+  return {
+    sessionId: session.sessionId,
+    session,
+    ledger,
+    controller,
+    sessionManager,
+  };
+}
 
 // >>> region: agent-3B (T5.1, T5.2, T5.4, T5.8, T5.9, T5.13, T5.14, T5.15)
 //

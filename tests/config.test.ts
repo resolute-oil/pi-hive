@@ -675,3 +675,21 @@ test("auditAgentTypes reports offenders with suggestions without loading", () =>
   // The orchestrator is correctly typed and is not an offender.
   assert.equal(audit.rows.find((row) => row.name === "Orchestrator")?.valid, true);
 });
+
+// Wave 2 F2 C6 follow-up — frontmatter `budgets:` block wires into
+// agent.governance via parseAgentBudgetsFrontmatter (src/agents/frontmatter.ts).
+// This is the documented Wave 1 1B function that Wave 1 forgot to wire into
+// the enrichment loop; Wave 2 plugs the gap so per-agent budgets in agent.md
+// frontmatter actually reach WorkerBudgetPolicy resolution.
+test("loadConfig wires agent.md frontmatter `budgets:` into agent.governance (Wave 2 C6)", () => {
+  const cwd = fixtureProject();
+  // Add a `budgets:` block to the existing frontend.md fixture.
+  const prompt = join(cwd, ".pi", "hive", "agents", "frontend.md");
+  writeFileSync(prompt, "---\nmodel: anthropic/claude-sonnet\nagent-type: coder\nbudgets:\n  tokens: 1000\n  costUsd: 0.50\n---\nBuild UI.");
+  const config = loadConfig(cwd);
+  const frontend = config.agents.find((a) => a.name === "Frontend Dev");
+  assert.ok(frontend, "frontend agent present");
+  assert.ok(frontend.governance, "governance populated from frontmatter");
+  assert.equal(frontend.governance?.tokenBudget, 1000, "tokenBudget from frontmatter budgets.tokens");
+  assert.equal(frontend.governance?.costBudgetUsd, 0.50, "costBudgetUsd from frontmatter budgets.costUsd");
+});

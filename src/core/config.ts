@@ -6,6 +6,7 @@ import { agentSlug, configuredChildAgents, flatAgentConfig, normalizeAgentType, 
 import { validateAgentTypes, validateHiveConfigShape } from "./schema";
 import { CONFIG_LIMITS, validateConfigSize, validateRawConfig } from "./config-validation";
 import { resolveConfiguredPath, resolveProjectPath } from "./safe-path";
+import { parseAgentBudgetsFrontmatter } from "../agents/frontmatter";
 
 // Read an agent's .md frontmatter and copy model/thinking onto the config node
 // when the config itself does not set them. The config tree (from hive-config.
@@ -109,6 +110,25 @@ function enrichFromFrontmatter(cwd: string, agent: AgentConfig | undefined): voi
         agent.network = attrs.network as unknown as boolean;
       }
       if (agent.commit === undefined) agent.commit = normalizeCommit(attrs.commit);
+      // Wave 2 F2 C6 follow-up: per-agent `budgets:` block in agent.md
+      // frontmatter is parsed by parseAgentBudgetsFrontmatter (Wave 1 1B,
+      // src/agents/frontmatter.ts) but never wired into the enrichment loop.
+      // Plug the gap here so the documented per-agent override reaches
+      // WorkerBudgetPolicy resolution. The legacy `governance:` alias is
+      // handled inside parseAgentBudgetsFrontmatter (canonical `budgets:`
+      // wins). Fields already set by hive-config.yaml governance: win
+      // (closest-to-source priority — per-agent frontmatter is the closest,
+      // but config-file governance is the user's explicit opt-in so leave it).
+      const parsedBudgets = parseAgentBudgetsFrontmatter(raw);
+      if (parsedBudgets.budgets) {
+        agent.governance = agent.governance ?? {};
+        if (parsedBudgets.budgets.tokens !== undefined && agent.governance.tokenBudget === undefined) {
+          agent.governance.tokenBudget = parsedBudgets.budgets.tokens;
+        }
+        if (parsedBudgets.budgets.costUsd !== undefined && agent.governance.costBudgetUsd === undefined) {
+          agent.governance.costBudgetUsd = parsedBudgets.budgets.costUsd;
+        }
+      }
     }
   }
   if (agent.stages !== undefined) agent.stages = normalizePlanStages(agent.stages) as AgentConfig["stages"];
