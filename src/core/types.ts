@@ -186,6 +186,13 @@ export interface WorkerGovernance {
   costUsd?: { cap: number; window?: WindowKind };
   runs?: { cap: number };
   depth?: { cap: number };
+  // Agent-level override of the resolved budget strategy ("default" | "compact").
+  // Surfaced via the per-agent `governance` block in agent.md frontmatter (the
+  // kebab key `budget-strategy:` normalizes to this camelCase property name in
+  // the runtime `governance` object). Typed on `WorkerGovernance` directly so
+  // `resolveWorkerBudgetPolicy` and `resolveWorkerBudgetStrategy` both narrow
+  // the same shape without an interface duplication (TS I3 / N-I3 fixup).
+  ["budget-strategy"]?: WorkerBudgetStrategy;
 }
 
 export interface TeamBudgets {

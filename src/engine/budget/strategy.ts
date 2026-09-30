@@ -15,6 +15,7 @@ import type {
   HiveConfig,
   WorkerBudgetPolicy,
   WorkerBudgetStrategy,
+  WorkerGovernance,
   BudgetsConfig,
   Strategies,
   IncludeKey,
@@ -40,8 +41,8 @@ export function resolveWorkerBudgetStrategy(
   // user approves C5). For now, the strategy is the documented legacy
   // "default" | "compact" — derived from the resolved policy's optional
   // strategies block, defaulting to "default".
-  if (agent?.governance && (agent.governance as unknown as { "budget-strategy"?: WorkerBudgetStrategy })["budget-strategy"] !== undefined) {
-    return (agent.governance as unknown as { "budget-strategy": WorkerBudgetStrategy })["budget-strategy"];
+  if (agent?.governance && agent.governance["budget-strategy"] !== undefined) {
+    return agent.governance["budget-strategy"];
   }
   // Future: read from settings.budgets.strategies.strategy (C5).
   return "default";
@@ -128,7 +129,7 @@ export function resolveWorkerBudgetPolicy(
   const global = readGlobalBudgets(settings);
   const globalWorker = global.perWorker ?? {};
   const globalTeam = global.perTeam ?? {};
-  const perAgent = (agent?.governance as unknown as WorkerGovernanceLike | undefined) ?? {};
+  const perAgent: WorkerGovernance = agent?.governance ?? {};
 
   // Project the per-agent governance fields (canonical nested shape from
   // parseAgentBudgetsFrontmatter OR the legacy flat shape) into the §2.10
@@ -222,28 +223,4 @@ function walk(node: AgentConfig, name: string): AgentConfig | undefined {
 function tokensFromScope(scope: "input_output" | "all" | undefined): IncludeKey[] {
   if (scope === "all") return ["input", "output", "cacheRead", "cacheWrite"];
   return ["input", "output"];
-}
-
-// Local alias for the per-agent governance fields the resolver reads. Two
-// shapes are accepted:
-//   - New nested shape (from parseAgentBudgetsFrontmatter after Block 2): each
-//     resource is `{ cap, window?, include? }`.
-//   - Legacy flat shape (WorkerGovernance): scalar `tokenBudget`,
-//     `costBudgetUsd`, `maxRuns`, `maxDelegationDepth`, plus the
-//     `budget-strategy` extension point.
-// Both are supported so configs that haven't migrated to the frontmatter
-// nested shape keep working alongside configs that have.
-interface WorkerGovernanceLike {
-  // New nested shape (Block 2 / F6 T6.4 / C1).
-  tokens?: { cap: number; window?: "per-session" | "per-run" | "per-day" | "per-team-lifetime"; include?: IncludeKey[] };
-  costUsd?: { cap: number; window?: "per-session" | "per-team-lifetime" };
-  runs?: { cap: number };
-  depth?: { cap: number };
-  // Legacy flat shape (WorkerGovernance).
-  tokenBudget?: number;
-  tokenBudgetScope?: "input_output" | "all";
-  costBudgetUsd?: number;
-  maxRuns?: number;
-  maxDelegationDepth?: number;
-  ["budget-strategy"]?: WorkerBudgetStrategy;
 }
