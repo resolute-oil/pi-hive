@@ -122,6 +122,53 @@ test("BudgetCap discriminated union projects include keys for workerConsumedToke
   assert.ok(_disc);
 });
 
+// ── Discriminator omission + mismatch (post-fixup) ─────────────────────────
+
+test("validateBudgetsConfig accepts user YAML WITHOUT `resource:` (parent-nesting disambiguates)", () => {
+  // Plan §2.13 examples omit `resource:` from every nested block; the
+  // typebox schema treats `resource:` as optional and the parent position
+  // (perWorker.tokens, perTeam.costUsd, …) already narrows the type.
+  // `resolveBudgetsConfig` injects the discriminator from the parent key
+  // so downstream consumers always see a fully-formed `BudgetCap`.
+  const config = {
+    perWorker: { tokens: { cap: 1_000 }, costUsd: { cap: 0.5 }, runs: { cap: 5 }, depth: { cap: 2 } },
+    perTeam: { tokens: { cap: 10_000 }, costUsd: { cap: 5 }, runs: { cap: 20 } },
+  };
+  assert.doesNotThrow(() => validateBudgetsConfig(config));
+  const resolved = resolveBudgetsConfig(config);
+  assert.equal(resolved.perWorker.tokens?.resource, "tokens");
+  assert.equal(resolved.perWorker.costUsd?.resource, "costUsd");
+  assert.equal(resolved.perWorker.runs?.resource, "runs");
+  assert.equal(resolved.perWorker.depth?.resource, "depth");
+  assert.equal(resolved.perTeam.tokens?.resource, "tokens");
+  assert.equal(resolved.perTeam.costUsd?.resource, "costUsd");
+  assert.equal(resolved.perTeam.runs?.resource, "runs");
+});
+
+test("validateBudgetsConfig rejects `resource:` that mismatches parent nesting", () => {
+  // The discriminator, when present, must match the parent key. This pins
+  // the contract against copy-paste bugs (e.g., typing `resource: costUsd`
+  // inside `perWorker.tokens` because the user copied from another block).
+  // The error path uses the JSON-pointer form (`.../tokens/resource`) and
+  // the detail message names the expected parent key so the user can fix
+  // the YAML without reading the source.
+  assert.throws(
+    () => validateBudgetsConfig({
+      perWorker: { tokens: { resource: "costUsd", cap: 1_000 } },
+      perTeam: {},
+    }),
+    /budgets\.perWorker\.tokens\/resource.*parent key "tokens"/,
+  );
+  // depth only lives under perWorker; placing it under perTeam is a mismatch.
+  assert.throws(
+    () => validateBudgetsConfig({
+      perWorker: {},
+      perTeam: { runs: { resource: "depth", cap: 5 } },
+    }),
+    /budgets\.perTeam\.runs\/resource.*parent key "runs"/,
+  );
+});
+
 // ── Cycle 4 (T6.7, C4) — discriminated union + tier-aware window rejection ─
 
 test("validateBudgetsConfig rejects perWorker.tokens.window: 'per-day' (worker-only context forbids per-day)", () => {
