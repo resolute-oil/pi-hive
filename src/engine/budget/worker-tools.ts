@@ -12,10 +12,20 @@
 // suggest end-of-life actions. They are routed through the same ledger write
 // path with a `cooperative-*` kind prefix so the dashboard can distinguish
 // agent-initiated vs operator-initiated shutdowns.
+//
+// Region markers (per `04-refactor-plan.md` §11.5): Wave 3's four parallel
+// agents (3A, 3B, 3C, 3D) each fill in the functions inside their region.
+// 3A does not edit this file (it touches F3+F4 elsewhere); 3B / 3C / 3D own
+// the three regions below. The markers are pure comments — no runtime cost.
 
 import type { BudgetLedgerEntry } from "../../core/types";
 
-// ── 11 operator commands ────────────────────────────────────────────────────
+// >>> region: agent-3B (T5.1, T5.2, T5.4, T5.8, T5.9, T5.13, T5.14, T5.15)
+//
+// 3B region: F5 stop / pause / resume / escape commands (8 of 11 operator
+// commands). The branch/clone subset (respawn / snapshot / restore) lives in
+// agent-3C below because they share SessionManager branch-with-summary code
+// paths and benefit from being colocated in one diff.
 
 // Graceful stop. SDK: session.abort(). Ledger: kind: "end".
 export async function endWorkerSession(
@@ -37,46 +47,11 @@ export async function compactWorkerSession(
   throw new Error("not implemented");
 }
 
-// Dispose the worker's session and create a new one with empty branch.
-// SDK: session.dispose() + SessionManager.create() + branchWithSummary.
-// Ledger: kind: "respawn". The old session id is preserved in the return for
-// the operator's audit trail.
-export async function respawnWorkerSession(
-  _agent: string,
-  _reason: string,
-  _newTask?: string,
-  _signal?: AbortSignal,
-): Promise<{ oldSessionId: string; newSessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
-  throw new Error("not implemented");
-}
-
 // Save the worker's state without aborting. SDK: session.waitForIdle() +
 // ledger entry. Ledger: kind: "pause". Resumable via resumeWorkerSession.
 export async function pauseWorkerSession(
   _agent: string,
   _reason: string,
-  _signal: AbortSignal,
-): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
-  throw new Error("not implemented");
-}
-
-// Branch the worker's session at the current leaf with a label.
-// SDK: session_manager.branchWithSummary(leafId, label). Ledger: kind:
-// "snapshot". snapshotId returned for later restore.
-export async function snapshotWorkerSession(
-  _agent: string,
-  _label: string,
-  _signal: AbortSignal,
-): Promise<{ sessionId: string; snapshotId: string; ledgerSnapshot: BudgetLedgerEntry }> {
-  throw new Error("not implemented");
-}
-
-// Navigate to a previously-created snapshot. SDK:
-// SessionManager.createBranchedSession(leafId). The destination session's
-// installBudgetEventHooks writes the final checkpoint (per T5.6 in the plan).
-export async function restoreWorkerSession(
-  _agent: string,
-  _snapshotId: string,
   _signal: AbortSignal,
 ): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
   throw new Error("not implemented");
@@ -131,8 +106,58 @@ export async function tearDownAllWorkers(
 ): Promise<{ stopped: string[]; skipped: Array<{ agent: string; reason: string }>; ledgerSnapshot: BudgetLedgerEntry }> {
   throw new Error("not implemented");
 }
+// <<< region: agent-3B
 
-// ── 3 cooperative tools (agent-callable) ────────────────────────────────────
+// >>> region: agent-3C (T5.3, T5.5, T5.6)
+//
+// 3C region: F5 branch / clone commands (3 of 11 operator commands). These
+// share SessionManager branchWithSummary plumbing and benefit from a single
+// agent owning them. Distinct from agent-3B because their SDK surface is
+// session-tree navigation rather than session lifecycle.
+
+// Dispose the worker's session and create a new one with empty branch.
+// SDK: session.dispose() + SessionManager.create() + branchWithSummary.
+// Ledger: kind: "respawn". The old session id is preserved in the return for
+// the operator's audit trail.
+export async function respawnWorkerSession(
+  _agent: string,
+  _reason: string,
+  _newTask?: string,
+  _signal?: AbortSignal,
+): Promise<{ oldSessionId: string; newSessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
+  throw new Error("not implemented");
+}
+
+// Branch the worker's session at the current leaf with a label.
+// SDK: session_manager.branchWithSummary(leafId, label). Ledger: kind:
+// "snapshot". snapshotId returned for later restore.
+export async function snapshotWorkerSession(
+  _agent: string,
+  _label: string,
+  _signal: AbortSignal,
+): Promise<{ sessionId: string; snapshotId: string; ledgerSnapshot: BudgetLedgerEntry }> {
+  throw new Error("not implemented");
+}
+
+// Navigate to a previously-created snapshot. SDK:
+// SessionManager.createBranchedSession(leafId). The destination session's
+// installBudgetEventHooks writes the final checkpoint (per T5.6 in the plan).
+export async function restoreWorkerSession(
+  _agent: string,
+  _snapshotId: string,
+  _signal: AbortSignal,
+): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
+  throw new Error("not implemented");
+}
+// <<< region: agent-3C
+
+// >>> region: agent-3D (T5.10, T5.11, T5.12)
+//
+// 3D region: F5 cooperative tools (3 agent-callable tools). Worker agents
+// invoke these to suggest their own end-of-life; the operator surface sees
+// the resulting `cooperative-*` kind entries and can confirm or override.
+// Distinct from agent-3B / agent-3C because these are agent-callable rather
+// than operator-only.
 
 // Agent-callable: "I want to compact my own session". SDK: session.compact().
 // Ledger: kind: "cooperative-compact".
@@ -161,3 +186,4 @@ export async function request_snapshot(
 ): Promise<{ ledgerSnapshot: BudgetLedgerEntry }> {
   throw new Error("not implemented");
 }
+// <<< region: agent-3D
