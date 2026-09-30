@@ -414,6 +414,42 @@ test("summarizeProgressTool stub throws not implemented when called", () => {
   assert.throws(() => summarizeProgressTool(), /not implemented/);
 });
 
+// ── Slice 10 — Telemetry event shape for BudgetLedgerEntry ──────────────────
+
+import type { BudgetLedgerTelemetryEvent } from "../src/shared/telemetry.ts";
+
+test("BudgetLedgerTelemetryEvent is a HiveTelemetryEvent variant carrying the ledger entry", () => {
+  // Compile-time shape check: the event type narrows to { type: "budget_ledger"; payload: { agentSlug, entry } }
+  // without changing the HiveTelemetryEvent discriminator contract.
+  const event: BudgetLedgerTelemetryEvent = {
+    event_id: "evt-1",
+    ts: new Date().toISOString(),
+    type: "budget_ledger",
+    session_id: "session-1",
+    actor: "coder",
+    pid: 1,
+    seq: 1,
+    payload: {
+      agentSlug: "coder",
+      entry: {
+        type: "custom",
+        customType: "pi-hive-budget-ledger",
+        data: {
+          caps: { workerTokens: 1000 },
+          cumulative: { tokens: 500, costUsd: 0.1, runs: 1 },
+          writtenAt: Date.now(),
+          agentSlug: "coder",
+          marker: "checkpoint",
+          kind: "end",
+        },
+      },
+    },
+  };
+  assert.equal(event.type, "budget_ledger", "event type must be the documented 'budget_ledger' discriminator");
+  assert.equal(event.payload.agentSlug, "coder", "payload must carry the agent slug for the dashboard's per-worker timeline");
+  assert.equal(event.payload.entry.data.kind, "end", "payload.entry must be a full BudgetLedgerEntry");
+});
+
 test("BudgetLedger.restore is a static factory returning a Promise<BudgetLedger>", () => {
   assert.equal(typeof BudgetLedger.restore, "function", "BudgetLedger.restore must be a static method");
   // The signature must accept (sessionManager, agentName, policy, signal). We
