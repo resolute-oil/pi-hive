@@ -465,6 +465,16 @@ export interface WorkerBudgetPolicy {
 // + cooperative writes (marker: "checkpoint", kind: <documented kind>).
 // G-08 fix: kind is typed (not `string`) so a typo in a Wave 3 call site
 // fails typecheck before runtime.
+//
+// Dual-customType design (C D3 / TS N6 / Completeness D3 + E1):
+// pi-hive-budget-ledger (this entry shape) carries the cumulative spend
+// snapshot — restore() reduces the latest one per agentSlug into the
+// authoritative ledger state. pi-hive-budget-compaction (a separate
+// SessionEntry below) carries ONLY the savings number from each completed
+// compaction; it does NOT pollute BudgetLedgerEntry.data (no field for
+// savings here on purpose) and the reduce path skips it. The two coexist
+// in the branch but filter cleanly in both restore() and the dashboard
+// (`WHERE customType IN (...)`).
 export type BudgetLedgerKind =
   | "end"
   | "compact"
@@ -499,6 +509,21 @@ export interface BudgetLedgerEntry {
     agentSlug: string;
     marker?: "warning" | "exhausted" | "checkpoint";
     kind?: BudgetLedgerKind;
+  };
+}
+
+// Companion entry for the dual-customType design (C D3, see BudgetLedgerEntry
+// block above). Carries the per-compaction savings number so the dashboard's
+// pre/post-compaction accounting survives across reloads without polluting
+// BudgetLedgerEntry.data (which has no `savings` field on purpose). Restore()
+// reads both customTypes but the cumulative reduction skips compaction entries.
+export interface BudgetCompactionEntry {
+  type: "custom";
+  customType: "pi-hive-budget-compaction";
+  data: {
+    agentSlug: string;
+    savings: number;
+    writtenAt: number;
   };
 }
 
