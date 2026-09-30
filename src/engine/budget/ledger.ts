@@ -43,12 +43,15 @@ export class BudgetLedger {
 
   // The authoritative cumulative spend. Updated on every recordEvent and used
   // by maybeSnapshot to compute the spend-change percentage.
-  readonly cumulative: { tokens: number; costUsd: number; runs: number } = { tokens: 0, costUsd: 0, runs: 0 };
+  cumulative: { tokens: number; costUsd: number; runs: number } = { tokens: 0, costUsd: 0, runs: 0 };
 
   // The persisted ledger history (newest-last). Includes every pi-hive-budget-ledger
-  // CustomEntry from the active branch. Read-only; writers go through the
-  // methods below so the throttle/dedupe invariants are not bypassed.
-  readonly entries: BudgetLedgerEntry[] = [];
+  // CustomEntry from the active branch. Writers go through the methods below
+  // so the throttle/dedupe invariants are not bypassed. (TS I1 — the previous
+  // `readonly` modifier only prevented FIELD reassignment, not the array
+  // contents — `entries.push(...)` and `cumulative.tokens = ...` both
+  // worked through the modifier; it was misleading.)
+  entries: BudgetLedgerEntry[] = [];
 
   // Throttle bookkeeping. messagesSinceLastSnapshot counts every recordEvent
   // call; it resets on every successful maybeSnapshot write. lastWrittenTokens
