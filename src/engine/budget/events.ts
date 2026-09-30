@@ -2,8 +2,14 @@
 //
 // Wires the AgentSession event subscription into the BudgetLedger so:
 //   - message_end → ledger.recordEvent (live cumulative) + maybeSnapshot (throttled)
-//                  + warning emit at 20% remaining + abort at 0% remaining
-//                  (unless strategies.onExhaustion.action === "compact" or "none")
+//                  + warning at the configured threshold (default 20% remaining
+//                  via resolveStrategies; configurable via
+//                  strategies.onApproachingLimit.threshold, 0..1 ratio) + abort
+//                  at 0% remaining (unless strategies.onExhaustion.action ===
+//                  "compact" or "none")
+//
+// Warning threshold defaults to 20% of cap; configurable via
+// strategies.onApproachingLimit.threshold (ratio in [0, 1]).
 //   - compaction_end → ledger.recordCompaction(savings) for completed compactions
 //                  (skipped on aborted/errored payloads per SDK ref §1.4)
 //   - agent_settled → ledger.snapshot(stats, policy, "checkpoint", signal)
@@ -13,7 +19,7 @@
 
 import type { AgentSession, SessionStats } from "@earendil-works/pi-coding-agent";
 import type { BudgetLedger } from "./ledger";
-import type { WorkerBudgetPolicy, BudgetBlock } from "../../core/types";
+import type { WorkerBudgetPolicy } from "../../core/types";
 
 // Read threshold + action from the policy's optional Strategies block (per
 // §2.13 C5 v2 wiring). Falls back to the legacy defaults (0.20 warning,
@@ -60,7 +66,7 @@ export function installBudgetEventHooks(
       // Warning at warningThreshold remaining (default 0.20).
       const workerTokensCap = policy.worker.tokens?.cap;
       if (workerTokensCap !== undefined && workerTokensCap > 0) {
-        const remaining = workerTokensCap - cumulative.tokens;
+        const remaining = Math.max(0, workerTokensCap - cumulative.tokens);
         const ratio = remaining / workerTokensCap;
         if (ratio <= warningThreshold) {
           const warningKey = "worker:tokens";
@@ -71,7 +77,7 @@ export function installBudgetEventHooks(
               "budget_warning",
               `Worker tokens at ${pct}% of cap. Wrap up your work; call summarize_progress({ notes: "..." }) to record completion intent.`,
               true,
-              { scope: "worker", resource: "tokens", remaining: cumulative.tokens, cap: workerTokensCap },
+              { scope: "worker", resource: "tokens", remaining, cap: workerTokensCap },
             );
           }
         }
@@ -82,13 +88,13 @@ export function installBudgetEventHooks(
       //   "compact" → write budget_exhausted entry, do NOT abort
       //   "none"    → do nothing (no event, no abort)
       if (workerTokensCap !== undefined && workerTokensCap > 0) {
-        const remaining = workerTokensCap - cumulative.tokens;
+        const remaining = Math.max(0, workerTokensCap - cumulative.tokens);
         if (remaining <= 0 && onExhaustionAction !== "none") {
           if (onExhaustionAction !== "compact") {
             sessionManager.appendCustomEntry("budget_exhausted", {
               scope: "worker",
               resource: "tokens",
-              remaining: cumulative.tokens,
+              remaining,
               cap: workerTokensCap,
             });
             if (!controller.signal.aborted) controller.abort(new Error("Worker token budget exhausted"));
@@ -100,7 +106,7 @@ export function installBudgetEventHooks(
             sessionManager.appendCustomEntry("budget_exhausted", {
               scope: "worker",
               resource: "tokens",
-              remaining: cumulative.tokens,
+              remaining,
               cap: workerTokensCap,
               action: "compact",
             });
@@ -140,7 +146,3 @@ export function installBudgetEventHooks(
 
   return off;
 }
-
-// The synthetic BudgetBlock used by event hook callers (warning emit details
-// etc.). Re-exported here so consumers don't need a second import.
-export type { BudgetBlock };

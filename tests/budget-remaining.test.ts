@@ -1,13 +1,20 @@
+// Wave 5A F9 T9.1 — Budget-remaining enforcement tests.
+//
+// Moved from tests/governance.test.ts (which exercised the same
+// effectiveWorkerGovernance / budgetRemaining / checkDispatchBudgets
+// surface) when src/engine/governance.ts was deleted. The queue-only tests
+// (acquireWorkerSlot / releaseWorkerSlot) split off into
+// tests/worker-queue.test.ts; this file covers the legacy budget
+// enforcement surface that lived under budget/remaining.ts.
+
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentRuntime, HiveState } from "../src/core/types.ts";
 import {
-  acquireWorkerSlot,
   budgetRemaining,
   checkDispatchBudgets,
   effectiveWorkerGovernance,
-  releaseWorkerSlot,
-} from "../src/engine/governance.ts";
+} from "../src/engine/budget/remaining.ts";
 
 function runtime(name: string, overrides: Partial<AgentRuntime> = {}): AgentRuntime {
   return {
@@ -68,44 +75,6 @@ test("monotonic governance usage prevents fresh transcript resets from bypassing
   assert.equal(budgetRemaining(hive, worker).worker.costUsd, 6);
 });
 
-test("worker slot queue is FIFO and reserves released slots without races", async () => {
-  const hive = state([], { maxParallel: 1, queueSize: 2 });
-  assert.equal(await acquireWorkerSlot(hive), "acquired");
-  assert.equal(hive.activeRuns, 1);
-
-  const order: number[] = [];
-  const first = acquireWorkerSlot(hive).then((result) => { order.push(1); return result; });
-  const second = acquireWorkerSlot(hive).then((result) => { order.push(2); return result; });
-  assert.equal(hive.workerQueue?.length, 2);
-
-  releaseWorkerSlot(hive);
-  assert.equal(await first, "acquired");
-  assert.deepEqual(order, [1]);
-  assert.equal(hive.activeRuns, 1);
-
-  releaseWorkerSlot(hive);
-  assert.equal(await second, "acquired");
-  assert.deepEqual(order, [1, 2]);
-  releaseWorkerSlot(hive);
-  assert.equal(hive.activeRuns, 0);
-});
-
-test("parallel cap without queue fails immediately and queued cancellation frees capacity", async () => {
-  const noQueue = state([], { maxParallel: 1 });
-  assert.equal(await acquireWorkerSlot(noQueue), "acquired");
-  assert.equal(await acquireWorkerSlot(noQueue), "parallel");
-  releaseWorkerSlot(noQueue);
-
-  const hive = state([], { maxParallel: 1, queueSize: 1 });
-  assert.equal(await acquireWorkerSlot(hive), "acquired");
-  const controller = new AbortController();
-  const waiting = acquireWorkerSlot(hive, controller.signal);
-  controller.abort();
-  assert.equal(await waiting, "cancelled");
-  assert.equal(hive.workerQueue?.length, 0);
-  releaseWorkerSlot(hive);
-});
-
 // tokenBudgetScope lets a project's hive-config.yaml restrict the budget to
 // just input + output tokens (what fills the model's context window on each
 // call). Default "all" preserves the legacy cumulative-of-everything
@@ -164,4 +133,26 @@ test("tokenBudgetScope defaults to 'all' when omitted (backward compatibility)",
   // No scope set → defaults to "all". Cache reads count toward the cap.
   const hive = state([worker], { workerBudgets: { tokenBudget: 1_000_000 } });
   assert.equal(checkDispatchBudgets(hive, worker, 1)?.resource, "tokens");
+});
+
+// C I3 — effectiveWorkerGovernance shim lives under budget/remaining after
+// governance.ts deletion; verify the merge shim still produces the documented
+// shape when only one tier is configured. The legacy dispatch.ts callers
+// (timeoutMs, tokenBudgetScope) keep reading from it — the new
+// resolveWorkerBudgetPolicy resolver does not model those non-budget fields
+// (timeoutMs is a per-agent concurrency setting; the resolver exposes
+// `include` lists, which is a different semantic), so the migration is
+// scoped to where the resolver adds value (the budget-cap checks in
+// policy.ts, exercised by tests/budget-policy.test.ts).
+test("effectiveWorkerGovernance shim survives the governance.ts deletion and still merges per-agent + settings tier", () => {
+  const worker = runtime("worker");
+  const hive = state([worker], {
+    workerBudgets: { tokenBudget: 1000, tokenBudgetScope: "input_output" },
+  });
+  worker.config.governance = { tokenBudget: 500 };
+  // Per-agent override always wins (legacy semantics).
+  assert.equal(effectiveWorkerGovernance(hive, worker).tokenBudget, 500);
+  // tokenBudgetScope is inherited from the settings tier when the per-agent
+  // tier doesn't override it.
+  assert.equal(effectiveWorkerGovernance(hive, worker).tokenBudgetScope, "input_output");
 });

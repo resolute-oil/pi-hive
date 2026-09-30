@@ -10,13 +10,14 @@ import {
   resolveWorkerBudgetStrategy,
   resolveWorkerBudgetPolicy,
 } from "../src/engine/budget/strategy.ts";
-import type { HiveConfig, AgentConfig, WorkerGovernance } from "../src/core/types.ts";
+import type { HiveConfig, AgentConfig, WorkerGovernance, BudgetsConfig } from "../src/core/types.ts";
 
 // Minimal builder for a HiveConfig. Real configs go through config-validation
 // (slice 7); for the resolver seam a structurally-valid shape is enough.
 function buildConfig(opts: {
   globalStrategy?: "default" | "compact";
   agentGovernance?: WorkerGovernance;
+  budgets?: BudgetsConfig;
 }): HiveConfig {
   const coderAgent: AgentConfig = {
     name: "coder",
@@ -38,6 +39,11 @@ function buildConfig(opts: {
     settings: {
       subagentOutputLimit: 100_000,
       defaultTools: "read,write,edit",
+      budgets: opts.budgets,
+      // Legacy flat-shape fields retained as a fallback path. Block 1 adds
+      // the canonical nested `budgets:` shape and keeps these as a
+      // backward-compatible fallback for users who haven't migrated. Wave 5A
+      // drops the fallback entirely.
       workerBudgets: opts.globalStrategy
         ? { /* legacy flat shape — out of scope; the resolver ignores it */ }
         : undefined,
@@ -101,4 +107,92 @@ test("resolveWorkerBudgetPolicy returns an unlimited policy (empty worker / team
   // return undefined for any cumulative (verified in tests/budget-policy.test.ts).
   assert.deepEqual(policy.worker, {}, "worker block is empty when no caps are configured");
   assert.deepEqual(policy.team, {}, "team block is empty when no caps are configured");
+});
+
+// ── Block 1 regression tests: settings.budgets nested shape is consumed ───────
+
+// The plan's G-16 hard-cutover makes `settings.budgets:` the canonical
+// config surface. The resolver MUST read this nested shape (not the legacy
+// `settings.workerBudgets` / `settings.teamBudgets` keys). Without this, a
+// user following docs/migrations/budget-config-v2.md Example 1 gets a
+// config that parses cleanly but has zero runtime effect.
+
+test("resolveWorkerBudgetPolicy reads settings.budgets.per-worker.tokens.cap (nested shape)", () => {
+  const config = buildConfig({
+    budgets: {
+      perWorker: { tokens: { cap: 3500 } },
+      perTeam: {},
+    },
+  });
+  const policy = resolveWorkerBudgetPolicy(config, "coder");
+  assert.equal(policy.worker.tokens?.cap, 3500, "worker.tokens.cap from settings.budgets.per-worker.tokens.cap");
+});
+
+test("resolveWorkerBudgetPolicy reads settings.budgets.per-team.tokens.cap (nested shape)", () => {
+  const config = buildConfig({
+    budgets: {
+      perWorker: {},
+      perTeam: { tokens: { cap: 50_000 } },
+    },
+  });
+  const policy = resolveWorkerBudgetPolicy(config, "coder");
+  assert.equal(policy.team.tokens?.cap, 50_000, "team.tokens.cap from settings.budgets.per-team.tokens.cap");
+});
+
+test("resolveWorkerBudgetPolicy propagates settings.budgets.strategies (C5 / §2.13)", () => {
+  const config = buildConfig({
+    budgets: {
+      perWorker: {},
+      perTeam: {},
+      strategies: {
+        onApproachingLimit: { action: "wrap-up", threshold: 0.30, hint: "wrap up" },
+        onExhaustion: { action: "abort" },
+        summary: { maxTokens: 256 },
+      },
+    },
+  });
+  const policy = resolveWorkerBudgetPolicy(config, "coder");
+  assert.ok(policy.strategies !== undefined, "strategies block is propagated when present");
+  assert.equal(policy.strategies?.onApproachingLimit.threshold, 0.30, "strategies.onApproachingLimit.threshold propagates");
+  assert.equal(policy.strategies?.onApproachingLimit.action, "wrap-up", "strategies.onApproachingLimit.action propagates");
+  assert.equal(policy.strategies?.onExhaustion.action, "abort", "strategies.onExhaustion.action propagates");
+  assert.equal(policy.strategies?.summary.maxTokens, 256, "strategies.summary.maxTokens propagates");
+});
+
+test("resolveWorkerBudgetPolicy omits strategies when settings.budgets.strategies is absent", () => {
+  const config = buildConfig({
+    budgets: { perWorker: { tokens: { cap: 1000 } }, perTeam: {} },
+  });
+  const policy = resolveWorkerBudgetPolicy(config, "coder");
+  assert.equal(policy.strategies, undefined, "strategies block is absent when user didn't opt in");
+});
+
+test("resolveWorkerBudgetPolicy prefers settings.budgets over legacy settings.workerBudgets when both are present", () => {
+  // When both shapes are present, the canonical nested wins. This is the
+  // hard-cutover test that the resolver doesn't silently use the legacy
+  // path when the new path is present.
+  const config = buildConfig({
+    budgets: {
+      perWorker: { tokens: { cap: 3500 } },
+      perTeam: {},
+    },
+    globalStrategy: "default",
+  });
+  // The buildConfig helper doesn't actually fill legacy keys when
+  // globalStrategy is set (the comment in buildConfig calls this out). So
+  // for this test we mutate the legacy field directly to confirm priority.
+  config.settings.workerBudgets = { tokenBudget: 9999 };
+  const policy = resolveWorkerBudgetPolicy(config, "coder");
+  assert.equal(policy.worker.tokens?.cap, 3500, "nested `budgets:` wins over legacy `workerBudgets`");
+});
+
+test("resolveWorkerBudgetPolicy falls back to legacy settings.workerBudgets when settings.budgets is absent", () => {
+  // Wave 5A's cleanup drops this fallback. Until then, configs that haven't
+  // migrated to the nested shape still work — the resolver's
+  // readGlobalBudgets projects the legacy flat fields into the nested
+  // shape for the downstream cap checks.
+  const config = buildConfig({});
+  config.settings.workerBudgets = { tokenBudget: 1234 };
+  const policy = resolveWorkerBudgetPolicy(config, "coder");
+  assert.equal(policy.worker.tokens?.cap, 1234, "legacy settings.workerBudgets.tokenBudget is still honored as a fallback");
 });

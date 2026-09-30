@@ -12,7 +12,7 @@
 
 import type { AgentSession, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetLedger } from "./ledger";
-import type { BudgetBlock, IncludeKeys, WorkerBudgetPolicy } from "../../core/types";
+import type { BudgetBlock, BudgetLedgerEntry, IncludeKeys, WorkerBudgetPolicy } from "../../core/types";
 
 const LEDGER_CUSTOM_TYPE = "pi-hive-budget-ledger";
 
@@ -35,8 +35,12 @@ export function checkBudgetPolicy(
     );
   }
 
-  const workerCaps = policy.worker ?? {};
-  const teamCaps = policy.team ?? {};
+  const workerCaps = policy.worker;
+  // `team` is required by the WorkerBudgetPolicy type contract; if a
+  // structurally-malformed caller passes team as undefined, the
+  // team-tier checks below just skip (no caps to evaluate) and the
+  // documented "no caps configured → no block" outcome holds.
+  const teamCaps = policy.team;
 
   // Worker scope (in documented evaluation order: tokens → costUsd → runs).
   if (
@@ -136,11 +140,9 @@ export function teamUsage(branch: SessionEntry[]): { tokens: number; costUsd: nu
   // distinct slugs.
   const latestBySlug = new Map<string, { tokens: number; costUsd: number; runs: number }>();
   for (const entry of branch) {
-    if (entry.type !== "custom") continue;
-    const customEntry = entry as unknown as { customType?: string; data?: BudgetLedgerEntryLike };
-    if (customEntry.customType !== LEDGER_CUSTOM_TYPE) continue;
-    const data = customEntry.data;
-    if (!data || !data.agentSlug || !data.cumulative) continue;
+    if (!isLedgerEntry(entry)) continue;
+    const data = entry.data;
+    if (!data.agentSlug || !data.cumulative) continue;
     latestBySlug.set(data.agentSlug, { ...data.cumulative });
   }
   let tokens = 0;
@@ -154,12 +156,12 @@ export function teamUsage(branch: SessionEntry[]): { tokens: number; costUsd: nu
   return { tokens, costUsd, runs };
 }
 
-// Local alias used by teamUsage. Matches the BudgetLedgerEntry.data shape but
-// avoids a hard import from core/types in this pure module (the data shape
-// is exercised through the branch, not through Wave 0's typed alias).
-interface BudgetLedgerEntryLike {
-  agentSlug?: string;
-  cumulative?: { tokens: number; costUsd: number; runs: number };
+// Type guard for ledger CustomEntries. Same predicate as in ledger.ts (kept
+// here so policy.ts doesn't import from the ledger class — it only consumes
+// the branch shape). TS I2 — replaces the BudgetLedgerEntryLike structural
+// alias that lost its type guarantee.
+function isLedgerEntry(entry: SessionEntry): entry is SessionEntry & { data: BudgetLedgerEntry["data"] } {
+  return entry.type === "custom" && (entry as unknown as { customType?: string }).customType === LEDGER_CUSTOM_TYPE;
 }
 
 // Pure ratio: how much of a cap remains. Used for the warning/exhausted
@@ -172,6 +174,15 @@ export function ratioRemaining(used: number, cap: number): number {
 
 // Pure threshold check: did the remaining ratio cross below the threshold?
 // Used to dedup the warning emit per (scope, resource, agent) pair.
+//
+// Both arguments are interpreted as ratios in the [0, 1] range — NOT a
+// (used, cap) pair as the plan prose (§2.5) originally suggested. The
+// caller pre-computes the remaining ratio via `ratioRemaining(used, cap)`
+// (or `1 - ratioRemaining(used, cap)` for the "remaining ratio") before
+// passing it in. This two-arg signature was chosen over a three-arg
+// `(used, cap, threshold)` form to keep the pure function decoupled from
+// the cap arithmetic; the test at budget-policy.test.ts pins the
+// ratio-vs-ratio interpretation (`crossedThreshold(0.10, 0.20)` = true).
 export function crossedThreshold(remaining: number, threshold: number): boolean {
   return remaining <= threshold;
 }

@@ -25,6 +25,7 @@ import {
   textOfResult,
   truncateMiddle,
 } from "../core/utils";
+import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import type { AgentRuntime, HiveState } from "../core/types";
 
 const MAX_DIAGNOSTICS = 20;
@@ -63,16 +64,20 @@ export function makeDispatchStreamState(): DispatchStreamState {
 // signature for downstream event-handling parity (the budget warning / abort
 // code path is installed separately via installBudgetEventHooks; this handler
 // only tracks runtime telemetry + streaming output).
+//
+// TS I12: the event handler is a `switch (event.type)` over the
+// AgentSessionEvent union so adding a new SDK event type surfaces as a
+// non-exhaustive-case compile error instead of being silently dropped.
 export function wireDispatchSubscription(
   state: HiveState,
   runtime: AgentRuntime,
-  session: { subscribe(listener: (event: any) => void): () => void },
+  session: { subscribe(listener: (event: AgentSessionEvent) => void): () => void },
   streamState: DispatchStreamState,
   governance: { tokenBudget?: number; costBudgetUsd?: number; timeoutMs?: number },
   runController: AbortController,
 ): () => void {
   const {
-    chunks,
+    chunks: _chunks,
     modelsSeen,
     providersSeen,
     apisSeen,
@@ -80,142 +85,194 @@ export function wireDispatchSubscription(
     toolStartedAt,
   } = streamState;
 
-  const unsubscribe = session.subscribe((event: any) => {
-    if (event.type === "message_update") {
-      const delta = event.assistantMessageEvent;
-      if (delta?.type === "text_delta") {
-        // The documented SDK contract exposes incremental text on `delta`. Some
-        // event shapes also carry `text`/`message` as the full accumulated
-        // snapshot; appending that snapshot duplicates every prefix in the final
-        // worker result (e.g. "P", "Pl", "Ple" as separate lines in the TUI).
-        // Keep snapshots only for live status/fallback output, never as chunks.
-        const deltaText = typeof delta.delta === "string" ? delta.delta : "";
-        if (deltaText) streamState.chunks.push(deltaText);
-        const snapshot = textFromMessage(event.message) || (typeof delta.text === "string" ? delta.text : "");
-        if (snapshot) streamState.streamedSnapshot = snapshot;
-        const live = streamState.chunks.length ? streamState.chunks.join("") : streamState.streamedSnapshot;
-        const last = live.split("\n").filter((line: string) => line.trim()).pop();
-        if (last) runtime.lastWork = last;
+  const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+    switch (event.type) {
+      case "message_update": {
+        const delta = event.assistantMessageEvent;
+        if (delta?.type === "text_delta") {
+          // The documented SDK contract exposes incremental text on `delta`. Some
+          // event shapes also carry the full accumulated snapshot; appending that
+          // snapshot duplicates every prefix in the final worker result
+          // (e.g. "P", "Pl", "Ple" as separate lines in the TUI). Keep snapshots
+          // only for live status/fallback output, never as chunks.
+          const deltaText = typeof delta.delta === "string" ? delta.delta : "";
+          if (deltaText) streamState.chunks.push(deltaText);
+          const snapshot = textFromMessage(event.message);
+          if (snapshot) streamState.streamedSnapshot = snapshot;
+          const live = streamState.chunks.length ? streamState.chunks.join("") : streamState.streamedSnapshot;
+          const last = live.split("\n").filter((line: string) => line.trim()).pop();
+          if (last) runtime.lastWork = last;
+        }
+        break;
       }
-    } else if (event.type === "tool_execution_start") {
-      runtime.toolCount++;
-      const toolName = event.toolName || event.name || "unknown";
-      runtime.lastWork = `tool: ${toolName}`;
-      if (event.toolCallId) toolStartedAt.set(event.toolCallId, Date.now());
-      const argsJson = JSON.stringify(event.args ?? {});
-      addHiveActivity(state, { kind: "tool_start", agent: runtime.config.name, toolName, status: "running" });
-      emitHiveEvent(state, "worker_tool_start", {
-        agent: runtime.config.name,
-        toolName,
-        toolCallId: event.toolCallId,
-        args: truncateMiddle(argsJson, 500),
-        truncated: argsJson.length > 500,
-      }, runtime.config.name);
-    } else if (event.type === "tool_execution_end") {
-      const startedAt = event.toolCallId ? toolStartedAt.get(event.toolCallId) : undefined;
-      if (event.toolCallId) toolStartedAt.delete(event.toolCallId);
-      const resultText = textOfResult(event.result);
-      addHiveActivity(state, { kind: "tool_end", agent: runtime.config.name, toolName: event.toolName || event.name || "unknown", status: event.isError === true ? "error" : "done", text: event.isError === true ? truncateMiddle(resultText, 160) : undefined });
-      emitHiveEvent(state, "worker_tool_end", {
-        agent: runtime.config.name,
-        toolName: event.toolName || event.name || "unknown",
-        toolCallId: event.toolCallId,
-        isError: event.isError === true,
-        resultPreview: truncateMiddle(resultText, 500),
-        truncated: resultText.length > 500,
-        durationMs: startedAt != null ? Date.now() - startedAt : undefined,
-      }, runtime.config.name);
-    } else if (event.type === "auto_retry_start") {
-      if (event.maxAttempts != null) streamState.lastRetryMaxAttempts = event.maxAttempts;
-      addHiveActivity(state, { kind: "retry", agent: runtime.config.name, status: "running", text: `retry ${event.attempt}${event.maxAttempts ? `/${event.maxAttempts}` : ""}${event.errorMessage ? `: ${truncateMiddle(String(event.errorMessage), 120)}` : ""}` });
-      emitHiveEvent(state, "worker_retry", {
-        agent: runtime.config.name,
-        attempt: event.attempt,
-        maxAttempts: event.maxAttempts,
-        errorMessage: event.errorMessage ? truncateMiddle(String(event.errorMessage), 500) : undefined,
-        // Phase 4.6: the backoff delay before this retry (W1.7: 0 is a valid delay).
-        delayMs: finiteOrUndef(event.delayMs),
-        phase: "start",
-      }, runtime.config.name);
-    } else if (event.type === "auto_retry_end") {
-      // The SDK does not carry maxAttempts on retry-end; fall back to the value
-      // captured at the matching retry-start.
-      emitHiveEvent(state, "worker_retry", {
-        agent: runtime.config.name,
-        attempt: event.attempt,
-        maxAttempts: event.maxAttempts ?? streamState.lastRetryMaxAttempts,
-        phase: "end",
-        success: event.success,
-        // Phase 4.6: the terminal error when retries are exhausted.
-        finalError: event.finalError ? truncateMiddle(String(event.finalError), 500) : undefined,
-      }, runtime.config.name);
-    } else if (event.type === "compaction_start") {
-      addHiveActivity(state, { kind: "compaction", agent: runtime.config.name, status: "running", text: `compacting${event.reason ? `: ${event.reason}` : ""}` });
-      emitHiveEvent(state, "worker_compaction", { agent: runtime.config.name, reason: event.reason, phase: "start" }, runtime.config.name);
-    } else if (event.type === "compaction_end") {
-      // Phase 4.5: keep the compaction RESULT fields, not just {reason, phase}.
-      // Budget accounting (recordCompaction) is wired via installBudgetEventHooks
-      // (T2.1) — this handler only emits telemetry.
-      const result = event.result || {};
-      emitHiveEvent(state, "worker_compaction", {
-        agent: runtime.config.name, reason: event.reason, phase: "end",
-        tokensBefore: finiteOrUndef(result.tokensBefore ?? event.tokensBefore),
-        estimatedTokensAfter: finiteOrUndef(result.estimatedTokensAfter ?? event.estimatedTokensAfter),
-        aborted: (result.aborted ?? event.aborted) === true ? true : undefined,
-        willRetry: (result.willRetry ?? event.willRetry) === true ? true : undefined,
-        errorMessage: (result.errorMessage ?? event.errorMessage) ? truncateMiddle(String(result.errorMessage ?? event.errorMessage), 500) : undefined,
-      }, runtime.config.name);
-    } else if (event.type === "queue_update") {
-      // Worker steering/follow-up queue depth (Phase 4). Bounded to counts — the
-      // queued message bodies are not carried into telemetry.
-      emitHiveEvent(state, "queue_update", {
-        agent: runtime.config.name,
-        steering: Array.isArray(event.steering) ? event.steering.length : 0,
-        followUp: Array.isArray(event.followUp) ? event.followUp.length : 0,
-      }, runtime.config.name);
-    } else if (event.type === "session_info_changed") {
-      emitHiveEvent(state, "session_info_changed", {
-        agent: runtime.config.name,
-        name: event.name ? truncateMiddle(String(event.name), 200) : undefined,
-      }, runtime.config.name);
-    } else if (event.type === "message_end") {
-      const message = event.message;
-      const actualModel = message?.model || message?.responseModel;
-      if (actualModel) modelsSeen.add(String(actualModel));
-      if (message?.provider) providersSeen.add(String(message.provider));
-      if (message?.api) apisSeen.add(String(message.api));
-      if (message?.responseId) {
-        const rid = String(message.responseId);
-        if (!streamState.firstResponseId) streamState.firstResponseId = rid;
-        streamState.lastResponseId = rid;
+      case "tool_execution_start": {
+        runtime.toolCount++;
+        const toolName = event.toolName;
+        runtime.lastWork = `tool: ${toolName}`;
+        if (event.toolCallId) toolStartedAt.set(event.toolCallId, Date.now());
+        const argsJson = JSON.stringify(event.args ?? {});
+        addHiveActivity(state, { kind: "tool_start", agent: runtime.config.name, toolName, status: "running" });
+        emitHiveEvent(state, "worker_tool_start", {
+          agent: runtime.config.name,
+          toolName,
+          toolCallId: event.toolCallId,
+          args: truncateMiddle(argsJson, 500),
+          truncated: argsJson.length > 500,
+        }, runtime.config.name);
+        break;
       }
-      if (diagnostics.length < MAX_DIAGNOSTICS) {
-        // R4.3: shared bounded/undefined-omitting normalizer, capped across the run.
-        const norm = boundedDiagnostics(message?.diagnostics, MAX_DIAGNOSTICS - diagnostics.length);
-        if (norm) diagnostics.push(...norm);
+      case "tool_execution_end": {
+        const startedAt = event.toolCallId ? toolStartedAt.get(event.toolCallId) : undefined;
+        if (event.toolCallId) toolStartedAt.delete(event.toolCallId);
+        const resultText = textOfResult(event.result);
+        const toolName = event.toolName;
+        addHiveActivity(state, { kind: "tool_end", agent: runtime.config.name, toolName, status: event.isError === true ? "error" : "done", text: event.isError === true ? truncateMiddle(resultText, 160) : undefined });
+        emitHiveEvent(state, "worker_tool_end", {
+          agent: runtime.config.name,
+          toolName,
+          toolCallId: event.toolCallId,
+          isError: event.isError === true,
+          resultPreview: truncateMiddle(resultText, 500),
+          truncated: resultText.length > 500,
+          durationMs: startedAt != null ? Date.now() - startedAt : undefined,
+        }, runtime.config.name);
+        break;
       }
-      if (message?.stopReason) streamState.lastStopReason = String(message.stopReason);
-      const usage = message?.usage;
-      if (usage) {
-        // Incremental accumulation for live display only. Authoritative totals
-        // are overwritten from getSessionStats() at run end (A1) — this avoids
-        // the historical double-count where agent_end re-added the final
-        // message's usage.
-        // Budget warning / abort is handled in installBudgetEventHooks (T2.1).
-        const u = extractUsage(usage);
-        runtime.inputTokens += u.input;
-        runtime.outputTokens += u.output;
-        runtime.cacheReadTokens += u.cacheRead;
-        runtime.cacheWriteTokens += u.cacheWrite;
-        runtime.reasoningTokens += u.reasoning;
-        runtime.costUsd += u.cost;
+      case "auto_retry_start": {
+        if (event.maxAttempts != null) streamState.lastRetryMaxAttempts = event.maxAttempts;
+        addHiveActivity(state, { kind: "retry", agent: runtime.config.name, status: "running", text: `retry ${event.attempt}${event.maxAttempts ? `/${event.maxAttempts}` : ""}${event.errorMessage ? `: ${truncateMiddle(String(event.errorMessage), 120)}` : ""}` });
+        emitHiveEvent(state, "worker_retry", {
+          agent: runtime.config.name,
+          attempt: event.attempt,
+          maxAttempts: event.maxAttempts,
+          errorMessage: event.errorMessage ? truncateMiddle(String(event.errorMessage), 500) : undefined,
+          // Phase 4.6: the backoff delay before this retry (W1.7: 0 is a valid delay).
+          delayMs: finiteOrUndef(event.delayMs),
+          phase: "start",
+        }, runtime.config.name);
+        break;
       }
-    } else if (event.type === "agent_end") {
-      const messages = event.messages || [];
-      const last = [...messages].reverse().find((message: any) => message.role === "assistant");
-      // Keep the chunks fallback for output text; the usage-add block that used
-      // to live here is deleted (double-count fix, Decision 1).
-      if (last && !streamState.chunks.length && !streamState.streamedSnapshot) streamState.chunks.push(textFromMessage(last));
+      case "auto_retry_end": {
+        // The SDK does not carry maxAttempts on retry-end; fall back to the value
+        // captured at the matching retry-start.
+        emitHiveEvent(state, "worker_retry", {
+          agent: runtime.config.name,
+          attempt: event.attempt,
+          maxAttempts: streamState.lastRetryMaxAttempts,
+          phase: "end",
+          success: event.success,
+          // Phase 4.6: the terminal error when retries are exhausted.
+          finalError: event.finalError ? truncateMiddle(event.finalError, 500) : undefined,
+        }, runtime.config.name);
+        break;
+      }
+      case "compaction_start": {
+        addHiveActivity(state, { kind: "compaction", agent: runtime.config.name, status: "running", text: `compacting${event.reason ? `: ${event.reason}` : ""}` });
+        emitHiveEvent(state, "worker_compaction", { agent: runtime.config.name, reason: event.reason, phase: "start" }, runtime.config.name);
+        break;
+      }
+      case "compaction_end": {
+        // Phase 4.5: keep the compaction RESULT fields, not just {reason, phase}.
+        // Budget accounting (recordCompaction) is wired via installBudgetEventHooks
+        // (T2.1) — this handler only emits telemetry.
+        // The SDK types result as CompactionResult<unknown>; tokensBefore /
+        // estimatedTokensAfter are T-conditional, so we widen via a
+        // structural cast to read them.
+        const result = (event.result ?? {}) as { tokensBefore?: unknown; estimatedTokensAfter?: unknown; aborted?: unknown; willRetry?: unknown; errorMessage?: unknown };
+        emitHiveEvent(state, "worker_compaction", {
+          agent: runtime.config.name, reason: event.reason, phase: "end",
+          tokensBefore: finiteOrUndef(result.tokensBefore),
+          estimatedTokensAfter: finiteOrUndef(result.estimatedTokensAfter),
+          aborted: result.aborted === true ? true : undefined,
+          willRetry: result.willRetry === true ? true : undefined,
+          errorMessage: result.errorMessage ? truncateMiddle(String(result.errorMessage), 500) : (event.errorMessage ? truncateMiddle(event.errorMessage, 500) : undefined),
+        }, runtime.config.name);
+        break;
+      }
+      case "queue_update": {
+        // Worker steering/follow-up queue depth (Phase 4). Bounded to counts — the
+        // queued message bodies are not carried into telemetry.
+        emitHiveEvent(state, "queue_update", {
+          agent: runtime.config.name,
+          steering: Array.isArray(event.steering) ? event.steering.length : 0,
+          followUp: Array.isArray(event.followUp) ? event.followUp.length : 0,
+        }, runtime.config.name);
+        break;
+      }
+      case "session_info_changed": {
+        emitHiveEvent(state, "session_info_changed", {
+          agent: runtime.config.name,
+          name: event.name ? truncateMiddle(String(event.name), 200) : undefined,
+        }, runtime.config.name);
+        break;
+      }
+      case "message_end": {
+        const message = event.message as { model?: unknown; responseModel?: unknown; provider?: unknown; api?: unknown; responseId?: unknown; diagnostics?: unknown; stopReason?: unknown; usage?: unknown; role?: string } | undefined;
+        const actualModel = message?.model || message?.responseModel;
+        if (actualModel) modelsSeen.add(String(actualModel));
+        if (message?.provider) providersSeen.add(String(message.provider));
+        if (message?.api) apisSeen.add(String(message.api));
+        if (message?.responseId) {
+          const rid = String(message.responseId);
+          if (!streamState.firstResponseId) streamState.firstResponseId = rid;
+          streamState.lastResponseId = rid;
+        }
+        if (diagnostics.length < MAX_DIAGNOSTICS) {
+          // R4.3: shared bounded/undefined-omitting normalizer, capped across the run.
+          const norm = boundedDiagnostics(message?.diagnostics, MAX_DIAGNOSTICS - diagnostics.length);
+          if (norm) diagnostics.push(...norm);
+        }
+        if (message?.stopReason) streamState.lastStopReason = String(message.stopReason);
+        const usage = message?.usage;
+        if (usage) {
+          // Incremental accumulation for live display only. Authoritative totals
+          // are overwritten from getSessionStats() at run end (A1) — this avoids
+          // the historical double-count where agent_end re-added the final
+          // message's usage.
+          // Budget warning / abort is handled in installBudgetEventHooks (T2.1).
+          const u = extractUsage(usage);
+          runtime.inputTokens += u.input;
+          runtime.outputTokens += u.output;
+          runtime.cacheReadTokens += u.cacheRead;
+          runtime.cacheWriteTokens += u.cacheWrite;
+          runtime.reasoningTokens += u.reasoning;
+          runtime.costUsd += u.cost;
+        }
+        break;
+      }
+      case "agent_end": {
+        const messages = event.messages || [];
+        const last = [...messages].reverse().find((message: { role?: string }) => message.role === "assistant");
+        // Keep the chunks fallback for output text; the usage-add block that used
+        // to live here is deleted (double-count fix, Decision 1).
+        if (last && !streamState.chunks.length && !streamState.streamedSnapshot) streamState.chunks.push(textFromMessage(last));
+        break;
+      }
+      // No-op cases: budget events (warning / exhausted) are handled by
+      // installBudgetEventHooks (T2.1) and reach the dashboard via their own
+      // session manager appends. lifecycle / model / agent_settled are
+      // handled in dispatch.ts and dispatch-end.ts respectively.
+      case "agent_start":
+      case "turn_start":
+      case "turn_end":
+      case "message_start":
+      case "tool_execution_update":
+      case "agent_settled":
+      case "thinking_level_changed":
+      case "bash_execution_update":
+      case "summarization_retry_scheduled":
+      case "summarization_retry_attempt_start":
+      case "summarization_retry_finished":
+      case "entry_appended":
+        break;
+      default: {
+        // Exhaustiveness check — TS narrows event to `never` here if every
+        // AgentSessionEvent variant is handled above. Adding a new SDK event
+        // type that we don't recognize will surface as a compile error
+        // pointing at this line.
+        const _exhaustive: never = event;
+        void _exhaustive;
+      }
     }
     publishRuntimeUpdate(state);
     writeHiveStateSnapshot(state);

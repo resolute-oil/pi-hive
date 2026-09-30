@@ -6,11 +6,13 @@
 // reduces to the latest cumulative state.
 //
 // Write cadence (per the refactor plan §2.3 / §2.6):
-//   - recordEvent(): high-cadence "I observed an event" write. Always writes.
-//   - maybeSnapshot(): throttled checkpoint write. Writes only when 10 messages
-//     have elapsed since the last write OR the cumulative tokens changed by
-//     >= 5% since the last write. The throttle and the spend-change check are
-//     independent — satisfying either triggers a write.
+//   - recordEvent(): live-spend observation per message_end. Throttled: writes
+//     a CustomEntry only when one of the gates fires (C D2). Always updates
+//     the in-memory cumulative regardless of whether a write fires.
+//   - maybeSnapshot(): throttled checkpoint write. Writes only when the
+//     message-count OR token-delta gates fire — same semantics as
+//     recordEvent but invoked separately when the dispatcher wants a
+//     explicit checkpoint (e.g., right after a budget-warning emit).
 //   - recordCompaction(): always writes a separate pi-hive-budget-compaction
 //     CustomEntry so the savings number survives across reloads without
 //     polluting the ledger-entry shape.
@@ -28,9 +30,21 @@ import type { BudgetLedgerEntry, BudgetLedgerKind, WorkerBudgetPolicy } from "..
 const LEDGER_CUSTOM_TYPE = "pi-hive-budget-ledger";
 const COMPACTION_CUSTOM_TYPE = "pi-hive-budget-compaction";
 
-// Throttle constants (per the refactor plan §2.6 / T3.1 defaults).
-const MESSAGE_COUNT_THRESHOLD = 10;
-const SPEND_CHANGE_THRESHOLD = 0.05; // 5%
+// Throttle constants (per the refactor plan §2.6 / T3.1 defaults, refined
+// per C D2 fixup). The previous Wave 2 implementation had recordEvent write
+// on EVERY message_end (~10× the planned cadence). These constants land the
+// write cadence at "every 5 messages OR every 100 cumulative tokens" — the
+// "or" is exclusive: satisfying either gate triggers a write.
+export const MESSAGE_COUNT_THRESHOLD = 5;
+export const TOKEN_COUNT_THRESHOLD = 100;
+
+// Public knob so callers (and tests) can opt out of throttling per-call.
+// `forceWrite: true` skips the gates and always writes a CustomEntry. The
+// dispatcher uses this on threshold crossings so warning / exhausted markers
+// land even if neither throttle gate has fired.
+export interface RecordEventOptions {
+  forceWrite?: boolean;
+}
 
 function isLedgerEntry(entry: SessionEntry): entry is SessionEntry & { data: BudgetLedgerEntry["data"] } {
   return entry.type === "custom" && (entry as unknown as { customType?: string }).customType === LEDGER_CUSTOM_TYPE;
@@ -43,16 +57,20 @@ export class BudgetLedger {
 
   // The authoritative cumulative spend. Updated on every recordEvent and used
   // by maybeSnapshot to compute the spend-change percentage.
-  readonly cumulative: { tokens: number; costUsd: number; runs: number } = { tokens: 0, costUsd: 0, runs: 0 };
+  cumulative: { tokens: number; costUsd: number; runs: number } = { tokens: 0, costUsd: 0, runs: 0 };
 
   // The persisted ledger history (newest-last). Includes every pi-hive-budget-ledger
-  // CustomEntry from the active branch. Read-only; writers go through the
-  // methods below so the throttle/dedupe invariants are not bypassed.
-  readonly entries: BudgetLedgerEntry[] = [];
+  // CustomEntry from the active branch. Writers go through the methods below
+  // so the throttle/dedupe invariants are not bypassed. (TS I1 — the previous
+  // `readonly` modifier only prevented FIELD reassignment, not the array
+  // contents — `entries.push(...)` and `cumulative.tokens = ...` both
+  // worked through the modifier; it was misleading.)
+  entries: BudgetLedgerEntry[] = [];
 
   // Throttle bookkeeping. messagesSinceLastSnapshot counts every recordEvent
-  // call; it resets on every successful maybeSnapshot write. lastWrittenTokens
-  // is the cumulative.tokens value at the last successful maybeSnapshot write.
+  // call; it resets on every successful write. lastWrittenTokens is the
+  // cumulative.tokens value at the last successful write. Used to gate the
+  // next write on either the message-count OR the absolute token-delta gate.
   private messagesSinceLastSnapshot = 0;
   private lastWrittenTokens = 0;
 
@@ -104,44 +122,55 @@ export class BudgetLedger {
     return new BudgetLedger(sessionManager, agentName, policy, ledgerEntries, latest);
   }
 
-  // Live spend recorded on every event observation (the dispatcher calls this
-  // per message_end per the §2.6 event hook). Always writes — the throttled
-  // checkpoint path is maybeSnapshot().
+  // Live spend recorded on every event observation (the dispatcher calls
+  // this per message_end per the §2.6 event hook). Always updates the
+  // in-memory cumulative, but only writes a CustomEntry when the throttle
+  // gates fire OR the caller passes forceWrite (C D2).
+  //
+  // Throttle gates (exclusive OR):
+  //   messageGate: messagesSinceLastSnapshot >= MESSAGE_COUNT_THRESHOLD
+  //   tokenGate:   |cumulative.tokens - lastWrittenTokens| >= TOKEN_COUNT_THRESHOLD
   recordEvent(
     _type: string,
     cumulative: { tokens: number; costUsd: number; runs: number },
     _signal: AbortSignal,
+    options: RecordEventOptions = {},
   ): void {
     this.cumulative.tokens = cumulative.tokens;
     this.cumulative.costUsd = cumulative.costUsd;
     this.cumulative.runs = cumulative.runs;
     this.messagesSinceLastSnapshot += 1;
 
+    if (!options.forceWrite && !this.shouldWriteCheckpoint()) return;
+
     const written = this.appendLedgerEntry({
       caps: this.snapshotCaps(),
       cumulative: { ...cumulative },
       writtenAt: Date.now(),
       agentSlug: this.agentName,
-      // No marker / no kind — this is a high-cadence event write (§2.3 table).
+      // No marker / no kind — this is a throttled event write (§2.3 table).
     });
     this.entries.push(written);
+    this.lastWrittenTokens = cumulative.tokens;
+    this.messagesSinceLastSnapshot = 0;
   }
 
-  // Throttled checkpoint snapshot. Writes only when the cadence (10 messages
-  // since the last write) OR the spend-change threshold (≥5% tokens change
-  // since the last write) is exceeded. The dispatcher also calls this with
-  // always-on semantics at threshold crossings (handled by snapshot() below).
+  // Throttled checkpoint snapshot. Writes only when the message-count OR
+  // token-delta gates fire. The dispatcher also calls this with always-on
+  // semantics at threshold crossings (handled by snapshot() below).
   maybeSnapshot(
     cumulative: { tokens: number; costUsd: number; runs: number },
     _policy: WorkerBudgetPolicy,
     _signal: AbortSignal,
   ): void {
-    const spendDelta = this.lastWrittenTokens > 0
-      ? Math.abs(cumulative.tokens - this.lastWrittenTokens) / this.lastWrittenTokens
-      : 0;
-    const messageGate = this.messagesSinceLastSnapshot >= MESSAGE_COUNT_THRESHOLD;
-    const spendGate = spendDelta >= SPEND_CHANGE_THRESHOLD;
-    if (!messageGate && !spendGate) return;
+    // Update the in-memory cumulative first so shouldWriteCheckpoint can
+    // compute the delta against the latest observed tokens (otherwise
+    // lastWrittenTokens == cumulative.tokens and the token-delta gate
+    // never fires after restore()).
+    this.cumulative.tokens = cumulative.tokens;
+    this.cumulative.costUsd = cumulative.costUsd;
+    this.cumulative.runs = cumulative.runs;
+    if (!this.shouldWriteCheckpoint()) return;
 
     const written = this.appendLedgerEntry({
       caps: this.snapshotCaps(),
@@ -152,6 +181,16 @@ export class BudgetLedger {
     this.entries.push(written);
     this.lastWrittenTokens = cumulative.tokens;
     this.messagesSinceLastSnapshot = 0;
+  }
+
+  // Pure helper: returns true if either throttle gate is satisfied.
+  // Extracted so recordEvent and maybeSnapshot share the gate evaluation
+  // (C D2: one definition of the cadence rule).
+  private shouldWriteCheckpoint(): boolean {
+    const tokenDelta = Math.abs(this.cumulative.tokens - this.lastWrittenTokens);
+    const messageGate = this.messagesSinceLastSnapshot >= MESSAGE_COUNT_THRESHOLD;
+    const tokenGate = tokenDelta >= TOKEN_COUNT_THRESHOLD;
+    return messageGate || tokenGate;
   }
 
   // Records a compaction's savings (tokens freed) for the dashboard's
