@@ -253,13 +253,18 @@ import type {
 test("typebox BudgetCap is the discriminated union with four resource kinds", () => {
   // The schema is the discriminated union (C4). We assert at the type level
   // that all four resource variants are constructible and the static type
-  // carries the discriminator.
+  // carries the discriminator (when present; user YAML may omit `resource:`
+  // and rely on parent-nesting, per the plan §2.13 examples).
   const tokens: Static<typeof BudgetCap> = { resource: "tokens", cap: 1000, window: "per-session", include: ["input", "output"] };
   const cost: Static<typeof BudgetCap> = { resource: "costUsd", cap: 0.5, window: "per-team-lifetime" };
   const runs: Static<typeof BudgetCap> = { resource: "runs", cap: 5 };
   const depth: Static<typeof BudgetCap> = { resource: "depth", cap: 2 };
   for (const cap of [tokens, cost, runs, depth]) {
-    assert.ok(["tokens", "costUsd", "runs", "depth"].includes(cap.resource), "resource discriminator must be one of the four documented kinds");
+    // cap.resource is `string | undefined` in the typebox Static (now that
+    // the schema makes it optional). When the user DOES include it, it must
+    // be one of the four documented kinds — which is the case here because
+    // each test value explicitly sets it.
+    assert.ok(typeof cap.resource === "string" && ["tokens", "costUsd", "runs", "depth"].includes(cap.resource), "resource discriminator must be one of the four documented kinds when set");
     assert.ok(typeof cap.cap === "number" && cap.cap >= 0, "cap must be a non-negative number");
   }
   // Pin the §2.13/C4 narrowing: tokens.window accepts the WindowKind union,
