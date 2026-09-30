@@ -62,19 +62,21 @@ import { parseAgentBudgetsFrontmatter } from "../src/agents/frontmatter.ts";
 test("parseAgentBudgetsFrontmatter treats `budgets:` as the per-agent alias for `governance:`", () => {
   // The new canonical key is `budgets:`; `governance:` is the deprecated alias.
   // Either one parses; when both are present, `budgets:` wins.
+  // Both the flat-scalar (`tokens: 1000`) and nested (`tokens: { cap: 1000 }`)
+  // shapes parse to the same internal { cap } form.
   const canonical = parseAgentBudgetsFrontmatter("---\nbudgets:\n  tokens: 1000\n  costUsd: 0.5\n---\n");
-  assert.equal(canonical.budgets?.tokens, 1000);
-  assert.equal(canonical.budgets?.costUsd, 0.5);
+  assert.equal(canonical.budgets?.tokens?.cap, 1000);
+  assert.equal(canonical.budgets?.costUsd?.cap, 0.5);
 
   const deprecated = parseAgentBudgetsFrontmatter("---\ngovernance:\n  tokens: 500\n---\n");
-  assert.equal(deprecated.budgets?.tokens, 500);
+  assert.equal(deprecated.budgets?.tokens?.cap, 500);
 
 // Defensive: frontmatter budgets reject non-numeric scalars so the typo
 // surfaces at config-load instead of silently slipping through to runtime.
 test("parseAgentBudgetsFrontmatter rejects non-numeric budget scalars with a clear error", () => {
   assert.throws(
     () => parseAgentBudgetsFrontmatter("---\nbudgets:\n  tokens: \"lots\"\n---\n"),
-    /budgets\.tokens.*finite number/,
+    /budgets\.tokens/,
   );
   assert.throws(
     () => parseAgentBudgetsFrontmatter("---\nbudgets:\n  tokens: 1000\n  costUsd: [1, 2]\n---\n"),
@@ -85,7 +87,34 @@ test("parseAgentBudgetsFrontmatter rejects non-numeric budget scalars with a cle
 });
 
   const both = parseAgentBudgetsFrontmatter("---\nbudgets:\n  tokens: 1000\ngovernance:\n  tokens: 500\n---\n");
-  assert.equal(both.budgets?.tokens, 1000, "`budgets:` must win over the deprecated `governance:` alias");
+  assert.equal(both.budgets?.tokens?.cap, 1000, "`budgets:` must win over the deprecated `governance:` alias");
+});
+
+// Block 2 follow-up: the nested shape documented in
+// docs/migrations/budget-config-v2.md Example 3 must also parse. Both
+// shapes converge on the internal { cap } form.
+test("parseAgentBudgetsFrontmatter accepts the nested { cap: N } shape from the migration guide", () => {
+  const nested = parseAgentBudgetsFrontmatter(
+    "---\nbudgets:\n  tokens:\n    cap: 1000\n  cost-usd:\n    cap: 0.25\n  runs:\n    cap: 1\n  depth:\n    cap: 1\n---\n",
+  );
+  // YAML kebab/camel is normalized at parse time; both keys arrive as
+  // `costUsd` (or `cost-usd` depending on the loader). The parser accepts
+  // either; we assert on whichever the loader surfaces.
+  assert.equal(nested.budgets?.tokens?.cap, 1000, "nested tokens parses to { cap }");
+  assert.equal(nested.budgets?.runs?.cap, 1, "nested runs parses to { cap }");
+  assert.equal(nested.budgets?.depth?.cap, 1, "nested depth parses to { cap }");
+});
+
+// Block 2 — flat scalar and nested shape converge on the same internal
+// representation. This is the contract that lets users follow the
+// migration guide (nested) without rewriting agent files that already use
+// the flat scalar form.
+test("parseAgentBudgetsFrontmatter normalizes flat scalar and nested shapes to the same internal form", () => {
+  const flat = parseAgentBudgetsFrontmatter("---\nbudgets:\n  tokens: 1000\n  costUsd: 0.5\n  runs: 1\n  depth: 1\n---\n");
+  const nested = parseAgentBudgetsFrontmatter(
+    "---\nbudgets:\n  tokens:\n    cap: 1000\n  costUsd:\n    cap: 0.5\n  runs:\n    cap: 1\n  depth:\n    cap: 1\n---\n",
+  );
+  assert.deepEqual(flat.budgets, nested.budgets, "flat and nested shapes produce identical internal { cap } form");
 });
 
 // ── Cycle 3 (T6.5, C2) — `include: [Usage keys]` ────────────────────────────

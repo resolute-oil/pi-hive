@@ -176,6 +176,16 @@ export interface WorkerGovernance {
   tokenBudgetScope?: "input_output" | "all";
   costBudgetUsd?: number;
   distillerRuns?: number;
+  // Block 2 — optional nested §2.10 shape fields, populated when the
+  // frontmatter's `budgets:` block uses the nested form (e.g. `tokens:
+  // { cap: 1000 }`). These coexist with the legacy flat fields above so
+  // existing callers reading the legacy fields keep working; the resolver
+  // reads both shapes (`resolveWorkerBudgetPolicy` in
+  // src/engine/budget/strategy.ts).
+  tokens?: { cap: number; window?: WindowKind; include?: IncludeKeys };
+  costUsd?: { cap: number; window?: WindowKind };
+  runs?: { cap: number };
+  depth?: { cap: number };
 }
 
 export interface TeamBudgets {
