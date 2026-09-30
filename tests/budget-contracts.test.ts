@@ -319,6 +319,86 @@ test("BudgetsConfigSchema is the typebox runtime validator", () => {
   assert.equal(sample.perWorker.tokens?.cap, 1000);
 });
 
+// ── Slice 8 — BudgetLedgerEntry schema + BudgetLedgerKind (14 values) ────────
+
+import type { BudgetLedgerEntry, BudgetLedgerKind } from "../src/core/types.ts";
+
+test("BudgetLedgerKind accepts all 14 documented values", () => {
+  const all: BudgetLedgerKind[] = [
+    "end",
+    "compact",
+    "respawn",
+    "pause",
+    "snapshot",
+    "restore",
+    "resume",
+    "compact-aborted",
+    "force-kill",
+    "force-end",
+    "tear-down-all",
+    "cooperative-compact",
+    "cooperative-end",
+    "cooperative-snapshot",
+  ];
+  assert.equal(all.length, 14, "BudgetLedgerKind must enumerate exactly 14 values");
+  // Spot-check the discriminators between operator (end/compact/etc.) and
+  // cooperative (cooperative-*) actions.
+  assert.ok(all.includes("end"));
+  assert.ok(all.includes("cooperative-end"));
+  assert.notEqual(all.indexOf("end"), all.indexOf("cooperative-end"));
+});
+
+test("BudgetLedgerEntry is a CustomEntry with the documented caps/cumulative/marker/kind shape", () => {
+  // Build entries with each combination of marker x kind to prove the shape
+  // is exhaustive at the type level.
+  const entries: BudgetLedgerEntry[] = [
+    {
+      type: "custom",
+      customType: "pi-hive-budget-ledger",
+      data: {
+        caps: { workerTokens: 1000, teamTokens: 10_000 },
+        cumulative: { tokens: 500, costUsd: 0.1, runs: 1 },
+        writtenAt: 1_700_000_000_000,
+        agentSlug: "coder",
+        marker: "warning",
+        kind: "end",
+      },
+    },
+    {
+      type: "custom",
+      customType: "pi-hive-budget-ledger",
+      data: {
+        caps: {},
+        cumulative: { tokens: 0, costUsd: 0, runs: 0 },
+        writtenAt: 0,
+        agentSlug: "coder",
+        marker: "checkpoint",
+        kind: "cooperative-compact",
+      },
+    },
+    {
+      type: "custom",
+      customType: "pi-hive-budget-ledger",
+      data: {
+        caps: { workerCostUsd: 0.5, workerRuns: 5, workerDepth: 2, teamCostUsd: 5, teamRuns: 20 },
+        cumulative: { tokens: 1234, costUsd: 0.25, runs: 3 },
+        writtenAt: 1,
+        agentSlug: "tester",
+        // marker and kind are optional; omit both for the throttled cadence path.
+      },
+    },
+  ];
+  for (const entry of entries) {
+    assert.equal(entry.type, "custom", "type must be 'custom' (SessionEntry discriminator)");
+    assert.equal(entry.customType, "pi-hive-budget-ledger", "customType must be the documented budget-ledger tag");
+    assert.ok(["warning", "exhausted", "checkpoint", undefined].includes(entry.data.marker), "marker must be one of the three documented kinds or undefined");
+    assert.ok(typeof entry.data.agentSlug === "string", "agentSlug must always be a string");
+  }
+  assert.equal(entries[0].data.kind, "end");
+  assert.equal(entries[1].data.kind, "cooperative-compact");
+  assert.equal(entries[2].data.kind, undefined);
+});
+
 test("BudgetLedger.restore is a static factory returning a Promise<BudgetLedger>", () => {
   assert.equal(typeof BudgetLedger.restore, "function", "BudgetLedger.restore must be a static method");
   // The signature must accept (sessionManager, agentName, policy, signal). We

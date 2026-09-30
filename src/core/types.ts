@@ -429,18 +429,48 @@ export interface WorkerBudgetPolicy {
   strategies?: Strategies;
 }
 
-// Slice 8 placeholder — the full BudgetLedgerKind union and data schema lands
-// in slice 8. The shape is minimal here; the slice 8 stub expands `data`.
+// Slice 8 — BudgetLedgerEntry. The persisted CustomEntry shape that
+// BudgetLedger writes via appendCustomEntry. Caps are keyed by the §2.3
+// documented names (workerTokens, workerCostUsd, workerRuns, workerDepth,
+// teamTokens, teamCostUsd, teamRuns); marker and kind are optional so the
+// throttled-cadence writes (no marker / no kind) compose with the operator
+// + cooperative writes (marker: "checkpoint", kind: <documented kind>).
+// G-08 fix: kind is typed (not `string`) so a typo in a Wave 3 call site
+// fails typecheck before runtime.
+export type BudgetLedgerKind =
+  | "end"
+  | "compact"
+  | "respawn"
+  | "pause"
+  | "snapshot"
+  | "restore"
+  | "resume"
+  | "compact-aborted"
+  | "force-kill"
+  | "force-end"
+  | "tear-down-all"
+  | "cooperative-compact"
+  | "cooperative-end"
+  | "cooperative-snapshot";
+
 export interface BudgetLedgerEntry {
   type: "custom";
   customType: "pi-hive-budget-ledger";
   data: {
-    caps: Record<string, number | undefined>;
+    caps: {
+      workerTokens?: number;
+      workerCostUsd?: number;
+      workerRuns?: number;
+      workerDepth?: number;
+      teamTokens?: number;
+      teamCostUsd?: number;
+      teamRuns?: number;
+    };
     cumulative: { tokens: number; costUsd: number; runs: number };
     writtenAt: number;
     agentSlug: string;
     marker?: "warning" | "exhausted" | "checkpoint";
-    kind?: string;
+    kind?: BudgetLedgerKind;
   };
 }
 
