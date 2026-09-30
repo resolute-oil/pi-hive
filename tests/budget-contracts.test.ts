@@ -142,6 +142,97 @@ test("BudgetBlock requires scope and resource; carries reason/remaining/limit", 
   assert.equal(blocks[2].limit.depth, 3, "depth block must carry the violated depth cap");
 });
 
+// ── Slice 5+6 — 11 operator commands + 3 cooperative tools ──────────────────
+
+import * as workerTools from "../src/engine/budget/worker-tools.ts";
+
+test("worker-tools exports all 11 operator commands", () => {
+  const operatorCommands = [
+    "endWorkerSession",
+    "compactWorkerSession",
+    "respawnWorkerSession",
+    "pauseWorkerSession",
+    "snapshotWorkerSession",
+    "restoreWorkerSession",
+    "resumeWorkerSession",
+    "abortWorkerCompaction",
+    "forceKillWorkerSession",
+    "forceEndWorkerSession",
+    "tearDownAllWorkers",
+  ];
+  for (const name of operatorCommands) {
+    assert.equal(typeof (workerTools as Record<string, unknown>)[name], "function", `${name} must be exported as a function`);
+  }
+});
+
+test("worker-tools exports all 3 cooperative tools", () => {
+  const cooperativeTools = ["request_compaction", "request_end_session", "request_snapshot"];
+  for (const name of cooperativeTools) {
+    assert.equal(typeof (workerTools as Record<string, unknown>)[name], "function", `${name} must be exported as a function`);
+  }
+});
+
+test("operator command signatures match the §2.8 contract", () => {
+  // We check the parameter NAMES (not .length, which counts up to the first
+  // defaulted parameter and so doesn't pin the documented signature for
+  // functions with optional args). The compiled async function body keeps
+  // the param names in order; matching them pins the contract. The stub uses
+  // `_` prefixes (no body) so the names are still present in the source text.
+  const signatures: Record<string, RegExp> = {
+    endWorkerSession: /_?agent.*_?reason.*_?signal/,
+    compactWorkerSession: /_?agent.*_?reason/,
+    respawnWorkerSession: /_?agent.*_?reason/,
+    pauseWorkerSession: /_?agent.*_?reason.*_?signal/,
+    snapshotWorkerSession: /_?agent.*_?label.*_?signal/,
+    restoreWorkerSession: /_?agent.*_?snapshotId.*_?signal/,
+    resumeWorkerSession: /_?agent.*_?signal/,
+    abortWorkerCompaction: /_?agent.*_?signal/,
+    forceKillWorkerSession: /_?agent.*_?reason.*_?signal/,
+    forceEndWorkerSession: /_?agent.*_?reason.*_?signal/,
+    tearDownAllWorkers: /_?reason/,
+  };
+  for (const [name, pattern] of Object.entries(signatures)) {
+    const fn = (workerTools as Record<string, Function>)[name];
+    const text = fn.toString();
+    assert.ok(pattern.test(text), `${name} signature must contain ${pattern}; got: ${text}`);
+  }
+});
+
+test("cooperative tool signatures match the §2.8 contract", () => {
+  const signatures: Record<string, RegExp> = {
+    request_compaction: /_?customInstructions|_?signal/,
+    request_end_session: /_?reason.*_?signal/,
+    request_snapshot: /_?label.*_?signal/,
+  };
+  for (const [name, pattern] of Object.entries(signatures)) {
+    const fn = (workerTools as Record<string, Function>)[name];
+    const text = fn.toString();
+    assert.ok(pattern.test(text), `${name} signature must contain ${pattern}; got: ${text}`);
+  }
+});
+
+test("operator command stubs throw not implemented when called", async () => {
+  const fakeSignal = new AbortController().signal;
+  await assert.rejects(workerTools.endWorkerSession("agent", "reason", fakeSignal), /not implemented/);
+  await assert.rejects(workerTools.compactWorkerSession("agent", "reason"), /not implemented/);
+  await assert.rejects(workerTools.respawnWorkerSession("agent", "reason"), /not implemented/);
+  await assert.rejects(workerTools.pauseWorkerSession("agent", "reason", fakeSignal), /not implemented/);
+  await assert.rejects(workerTools.snapshotWorkerSession("agent", "label", fakeSignal), /not implemented/);
+  await assert.rejects(workerTools.restoreWorkerSession("agent", "snapshot-id", fakeSignal), /not implemented/);
+  await assert.rejects(workerTools.resumeWorkerSession("agent", fakeSignal), /not implemented/);
+  await assert.rejects(workerTools.abortWorkerCompaction("agent", fakeSignal), /not implemented/);
+  await assert.rejects(workerTools.forceKillWorkerSession("agent", "reason", fakeSignal), /not implemented/);
+  await assert.rejects(workerTools.forceEndWorkerSession("agent", "reason", fakeSignal), /not implemented/);
+  await assert.rejects(workerTools.tearDownAllWorkers("reason"), /not implemented/);
+});
+
+test("cooperative tool stubs throw not implemented when called", async () => {
+  const fakeSignal = new AbortController().signal;
+  await assert.rejects(workerTools.request_compaction(), /not implemented/);
+  await assert.rejects(workerTools.request_end_session("reason", fakeSignal), /not implemented/);
+  await assert.rejects(workerTools.request_snapshot("label", fakeSignal), /not implemented/);
+});
+
 test("BudgetLedger.restore is a static factory returning a Promise<BudgetLedger>", () => {
   assert.equal(typeof BudgetLedger.restore, "function", "BudgetLedger.restore must be a static method");
   // The signature must accept (sessionManager, agentName, policy, signal). We
