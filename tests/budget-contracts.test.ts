@@ -410,17 +410,17 @@ test("BudgetLedgerEntry is a CustomEntry with the documented caps/cumulative/mar
 
 // ── Slice 9 — summarize_progress tool signature ──────────────────────────────
 
-import { summarizeProgressTool } from "../src/agents/tools/summarize-progress.ts";
+import { buildSummarizeProgressTool } from "../src/agents/tools/summarize-progress.ts";
 
-test("summarizeProgressTool is exported as a function returning a ToolDefinition", () => {
-  assert.equal(typeof summarizeProgressTool, "function", "summarizeProgressTool must be exported as a function");
-  // Wave 1 fills the body; for now the stub throws. The arity pins the contract
-  // so a future refactor that adds a required parameter breaks the test first.
-  assert.equal(summarizeProgressTool.length, 0, "summarizeProgressTool takes no required arguments (state is captured at registration time)");
-});
-
-test("summarizeProgressTool stub throws not implemented when called", () => {
-  assert.throws(() => summarizeProgressTool(), /not implemented/);
+// C D5: the arity-0 `summarizeProgressTool` stub was removed (its only
+// consumer was this contract test). The real factory takes
+// `(state, callerName, ledger)` and is exercised end-to-end by
+// `tests/summarize-progress.test.ts`. This contract test pins the factory's
+// arity so a future refactor that adds a required parameter breaks here
+// before reaching runtime.
+test("buildSummarizeProgressTool is exported as a 3-arg factory (state, callerName, ledger)", () => {
+  assert.equal(typeof buildSummarizeProgressTool, "function", "buildSummarizeProgressTool must be exported as a function");
+  assert.equal(buildSummarizeProgressTool.length, 3, "buildSummarizeProgressTool takes (state, callerName, ledger)");
 });
 
 // ── Slice 10 — Telemetry event shape for BudgetLedgerEntry ──────────────────
