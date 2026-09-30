@@ -112,44 +112,32 @@ function enrichFromFrontmatter(cwd: string, agent: AgentConfig | undefined): voi
       if (agent.commit === undefined) agent.commit = normalizeCommit(attrs.commit);
       // Wave 2 F2 C6 follow-up: per-agent `budgets:` block in agent.md
       // frontmatter is parsed by parseAgentBudgetsFrontmatter (Wave 1 1B,
-      // src/agents/frontmatter.ts) but never wired into the enrichment loop.
-      // Plug the gap here so the documented per-agent override reaches
-      // WorkerBudgetPolicy resolution. The legacy `governance:` alias is
-      // handled inside parseAgentBudgetsFrontmatter (canonical `budgets:`
-      // wins). Fields already set by hive-config.yaml governance: win
-      // (closest-to-source priority — per-agent frontmatter is the closest,
-      // but config-file governance is the user's explicit opt-in so leave it).
+      // src/agents/frontmatter.ts) and projected onto agent.governance here
+      // so the per-agent override reaches WorkerBudgetPolicy resolution.
+      // The legacy `governance:` alias is handled inside
+      // parseAgentBudgetsFrontmatter (canonical `budgets:` wins).
+      //
+      // N-I4 fixup: write ONLY the legacy flat aliases (tokenBudget,
+      // costBudgetUsd). The new nested fields (governance.tokens,
+      // governance.costUsd, governance.runs, governance.depth) are read by
+      // resolveWorkerBudgetPolicy but are NOT consumed by the legacy
+      // `effectiveWorkerGovernance` enforcement path (which read them
+      // from engine/governance.ts:18 — now removed in the Wave 5A
+      // cleanup). Writing both shapes here would leave a quiet seam that
+      // nothing reads at runtime until the enforcement migration lands.
+      // The resolver's per-agent path falls back to the flat fields when
+      // the nested shape is absent, so dropping the nested writes is a
+      // no-op behaviorally; we restore them when the enforcement path
+      // migrates to read them (tracked in the Wave 5A follow-up).
       const parsedBudgets = parseAgentBudgetsFrontmatter(raw);
       if (parsedBudgets.budgets) {
         agent.governance = agent.governance ?? {};
-        // Block 2: the parser normalizes both flat-scalar (`tokens: 1000`)
-        // and nested (`tokens: { cap: 1000 }`) frontmatter shapes to the same
-        // internal `{ cap }` form. Populate BOTH the new nested fields and
-        // the legacy flat aliases on agent.governance so the resolver (which
-        // reads both) and existing callers that read the flat fields (e.g.
-        // engine/governance.ts) keep working without a synchronized change.
         const pb = parsedBudgets.budgets;
-        if (pb.tokens !== undefined) {
-          if (agent.governance.tokens === undefined) {
-            agent.governance.tokens = pb.tokens;
-          }
-          if (agent.governance.tokenBudget === undefined) {
-            agent.governance.tokenBudget = pb.tokens.cap;
-          }
+        if (pb.tokens !== undefined && agent.governance.tokenBudget === undefined) {
+          agent.governance.tokenBudget = pb.tokens.cap;
         }
-        if (pb.costUsd !== undefined) {
-          if (agent.governance.costUsd === undefined) {
-            agent.governance.costUsd = pb.costUsd;
-          }
-          if (agent.governance.costBudgetUsd === undefined) {
-            agent.governance.costBudgetUsd = pb.costUsd.cap;
-          }
-        }
-        if (pb.runs !== undefined && agent.governance.runs === undefined) {
-          agent.governance.runs = pb.runs;
-        }
-        if (pb.depth !== undefined && agent.governance.depth === undefined) {
-          agent.governance.depth = pb.depth;
+        if (pb.costUsd !== undefined && agent.governance.costBudgetUsd === undefined) {
+          agent.governance.costBudgetUsd = pb.costUsd.cap;
         }
       }
     }
