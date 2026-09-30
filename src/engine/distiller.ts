@@ -27,12 +27,17 @@ import { resolveModel } from "./model-resolution";
 export async function runDistillerProcess(state: HiveState, ctx: ExtensionContext, prompt: string, model: string): Promise<string> {
   const resolvedModel = resolveModel(ctx, model);
   if (!resolvedModel) return "";
-  // resolveModel returns the structural ResolvedModel (provider/id/...).
-  // The SDK's createAgentSession wants the full Model<TApi> interface.
-  // The shape returned by modelRegistry.find is structurally compatible
-  // with Model<TApi> (provider + id are the discriminator fields the SDK
-  // also reads), so the cast is a one-time structural widening rather
-  // than an escape hatch.
+  // Asymmetry with the dispatcher: this distiller deliberately bypasses
+  // `delegateAgent`'s typed `DelegateAgentOrchestrator.model:
+  // DelegateAgentModel<unknown>` seam because the distiller has none of the
+  // things that seam exists to enforce. It is a one-shot scratch session
+  // (no persistent session file, `SessionManager.inMemory(ctx.cwd)` below),
+  // with no budget pre-flight, no `BudgetLedger.restore`, no depth cap, and
+  // no `installBudgetEventHooks`. Routing it through `delegateAgent` would
+  // require threading scratch-only state through a budget ledger for no
+  // observable benefit. The SDK still wants `Model<TApi>` here, so the
+  // `ResolvedModel` shape is widened to it once at this call site — the
+  // discriminator fields (`provider`, `id`) are the only ones the SDK reads.
 
   // In-process now: no separate session to inherit. The distiller's transcript
   // is a scratch prompt/response pair, not durably meaningful on its own, so it
