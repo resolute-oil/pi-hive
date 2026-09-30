@@ -155,16 +155,18 @@ test("BudgetCap discriminated union projects include keys for workerConsumedToke
 
 test("validateBudgetsConfig accepts user YAML WITHOUT `resource:` (parent-nesting disambiguates)", () => {
   // Plan §2.13 examples omit `resource:` from every nested block; the
-  // typebox schema treats `resource:` as optional and the parent position
-  // (perWorker.tokens, perTeam.costUsd, …) already narrows the type.
-  // `resolveBudgetsConfig` injects the discriminator from the parent key
-  // so downstream consumers always see a fully-formed `BudgetCap`.
+  // parent position (perWorker.tokens, perTeam.costUsd, …) already narrows
+  // the type. `validateBudgetsConfig` injects the discriminator from the
+  // parent key BEFORE typebox runs (Block 4), and `resolveBudgetsConfig`
+  // is the pure projection that downstream consumers use. The cast here
+  // is intentional — we're asserting that the validator accepts the
+  // loose user-authored shape, not that the type system matches it.
   const config = {
     perWorker: { tokens: { cap: 1_000 }, costUsd: { cap: 0.5 }, runs: { cap: 5 }, depth: { cap: 2 } },
     perTeam: { tokens: { cap: 10_000 }, costUsd: { cap: 5 }, runs: { cap: 20 } },
-  };
+  } as Record<string, unknown>;
   assert.doesNotThrow(() => validateBudgetsConfig(config));
-  const resolved = resolveBudgetsConfig(config);
+  const resolved = resolveBudgetsConfig(config as Parameters<typeof resolveBudgetsConfig>[0]);
   assert.equal(resolved.perWorker.tokens?.resource, "tokens");
   assert.equal(resolved.perWorker.costUsd?.resource, "costUsd");
   assert.equal(resolved.perWorker.runs?.resource, "runs");
@@ -196,6 +198,27 @@ test("validateBudgetsConfig rejects `resource:` that mismatches parent nesting",
     }),
     /budgets\.perTeam\.runs\/resource.*parent key "runs"/,
   );
+});
+
+// Block 4 follow-up: with `resource:` required on every schema variant,
+// the discriminated union is real and the post-validator `cap.resource`
+// field narrows in `switch (cap.resource)` for downstream consumers.
+// This is the contract that closes the TS B1 latent-bug future bug.
+test("Block 4: validated BudgetsConfig lands with `resource:` set on every cap (discriminated union is real)", () => {
+  const config = {
+    perWorker: { tokens: { cap: 1_000 }, costUsd: { cap: 0.5 }, runs: { cap: 5 }, depth: { cap: 2 } },
+    perTeam: { tokens: { cap: 10_000 }, costUsd: { cap: 5 }, runs: { cap: 20 } },
+  } as Record<string, unknown>;
+  validateBudgetsConfig(config);
+  // After validation (which injects the discriminator), every cap carries
+  // the literal `resource:` tag. A downstream `switch (cap.resource)` is
+  // now exhaustive without a fallback — which is exactly the contract the
+  // post-fixup comment at schema.ts:341 originally claimed.
+  const cw = config as { perWorker: { tokens: { resource: string }; costUsd: { resource: string }; runs: { resource: string }; depth: { resource: string } } };
+  assert.equal(cw.perWorker.tokens.resource, "tokens");
+  assert.equal(cw.perWorker.costUsd.resource, "costUsd");
+  assert.equal(cw.perWorker.runs.resource, "runs");
+  assert.equal(cw.perWorker.depth.resource, "depth");
 });
 
 // ── Cycle 4 (T6.7, C4) — discriminated union + tier-aware window rejection ─
