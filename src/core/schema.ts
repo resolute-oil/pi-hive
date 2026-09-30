@@ -255,7 +255,9 @@ function formatPath(path: string): string {
 }
 
 export function validateBudgetsConfig(value: unknown): asserts value is BudgetsConfig {
-  assertObject(value, "budgets");
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("budgets must be an object.");
+  }
   const errors = Value.Errors(BudgetsConfigSchema, value);
   if (errors.length > 0) {
     // Surface the most specific error (skip root-level "missing required
@@ -267,4 +269,83 @@ export function validateBudgetsConfig(value: unknown): asserts value is BudgetsC
     const detail = leaf.message ?? "value does not match BudgetsConfigSchema";
     throw new Error(`budgets.${path}: ${detail}`);
   }
+  // C4 tier-aware window restriction: perWorker forbids per-day and
+  // per-team-lifetime; perWorker.costUsd forbids per-team-lifetime. typebox
+  // doesn't enforce context-sensitive constraints, so we layer a structural
+  // walk over the schema-validated value.
+  enforceWindowByTier(value as BudgetsConfig);
+}
+
+// Window values allowed per (tier, resource). Per C6 the documented matrix
+// is: tokens windows = per-session | per-run | per-day | per-team-lifetime,
+// costUsd windows = per-session | per-team-lifetime. Per C4 the tier narrows
+// that further: perWorker cannot use per-day or per-team-lifetime for either
+// resource (those are team-lifetime semantics), and perWorker.costUsd cannot
+// use per-team-lifetime for the same reason. perTeam accepts the full set.
+const WORKER_TOKENS_WINDOWS = ["per-session", "per-run"] as const;
+const WORKER_COST_USD_WINDOWS = ["per-session"] as const;
+
+// C6 defaults: perWorker windows default to per-session, perTeam windows
+// default to per-team-lifetime (matching the previous implicit behavior
+// where worker scope = per-session and team scope = per-team-lifetime).
+const WORKER_DEFAULT_WINDOW: WindowKind = "per-session";
+const TEAM_DEFAULT_WINDOW: WindowKind = "per-team-lifetime";
+
+import type { WindowKind } from "./types";
+
+// G-10 per-day roll-over helpers. `currentUtcDayStart` returns the UTC
+// midnight (ms) that begins the day containing `nowMs`. `isWithinDayWindow`
+// answers the per-day cap question — is `entryMs` inside the current UTC
+// day? — using `Date.now()` for the reference, which lets tests stub it to
+// simulate midnight. The runtime consumer (Wave 1 1A policy.ts) feeds each
+// ledger entry's timestamp through isWithinDayWindow when window === "per-day".
+export function currentUtcDayStart(nowMs: number): number {
+  const date = new Date(nowMs);
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 0, 0, 0, 0);
+}
+
+export function isWithinDayWindow(entryMs: number, nowMs: number = Date.now()): boolean {
+  return entryMs >= currentUtcDayStart(nowMs);
+}
+
+export function resolveBudgetsConfig(config: BudgetsConfig): BudgetsConfig {
+  // Walk each tier and apply the default window when omitted. Pure (no I/O).
+  // The shape mirrors BudgetsConfigSchema's projection; call sites consume
+  // the resolved value instead of the raw config so downstream consumers
+  // (Wave 1 1A policy.ts, Wave 2 dispatcher) never see `undefined` windows.
+  const resolveCap = <T extends { resource: string; window?: WindowKind }>(cap: T | undefined, defaultWindow: WindowKind): T | undefined => {
+    if (!cap) return cap;
+    return { ...cap, window: cap.window ?? defaultWindow };
+  };
+  return {
+    ...config,
+    perWorker: {
+      ...config.perWorker,
+      tokens: resolveCap(config.perWorker.tokens, WORKER_DEFAULT_WINDOW),
+      costUsd: resolveCap(config.perWorker.costUsd, WORKER_DEFAULT_WINDOW),
+    },
+    perTeam: {
+      ...config.perTeam,
+      tokens: resolveCap(config.perTeam.tokens, TEAM_DEFAULT_WINDOW),
+      costUsd: resolveCap(config.perTeam.costUsd, TEAM_DEFAULT_WINDOW),
+    },
+  };
+}
+function enforceWindowByTier(config: BudgetsConfig): void {
+  const check = (tier: "perWorker" | "perTeam", block: { tokens?: BudgetCap; costUsd?: BudgetCap } | undefined, allowed: ReadonlySet<string>): void => {
+    if (!block) return;
+    if (block.tokens && "window" in block.tokens && block.tokens.window !== undefined && !allowed.has(block.tokens.window)) {
+      throw new Error(`budgets.${tier}.tokens.window: ${JSON.stringify(block.tokens.window)} is not allowed on ${tier}; permitted values are ${[...allowed].join(", ")}.`);
+    }
+    if (block.costUsd && "window" in block.costUsd && block.costUsd.window !== undefined) {
+      // costUsd has its own narrower allow-list regardless of tier.
+      const costAllowed = tier === "perWorker" ? new Set(WORKER_COST_USD_WINDOWS) : new Set(["per-session", "per-team-lifetime"]);
+      if (!costAllowed.has(block.costUsd.window)) {
+        throw new Error(`budgets.${tier}.costUsd.window: ${JSON.stringify(block.costUsd.window)} is not allowed on ${tier}; permitted values are ${[...costAllowed].join(", ")}.`);
+      }
+    }
+  };
+  const workerAllowed = new Set<string>(WORKER_TOKENS_WINDOWS);
+  check("perWorker", config.perWorker as { tokens?: BudgetCap; costUsd?: BudgetCap } | undefined, workerAllowed);
+  check("perTeam", config.perTeam as { tokens?: BudgetCap; costUsd?: BudgetCap } | undefined, new Set(["per-session", "per-run", "per-day", "per-team-lifetime"]));
 }
