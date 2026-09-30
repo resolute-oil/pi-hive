@@ -158,3 +158,35 @@ test("dispatchAgent installs budget event hooks on the session (delegated, not i
   // the count would be 1 (only the dispatch-subscribe handler).
   assert.ok(subscribeCalls >= 2, `expected ≥2 subscribe() calls (budget + telemetry); got ${subscribeCalls}`);
 });
+
+// ── Test 4: dispatchAgent assigns runtime.timer (regression: dispatch slim) ─
+
+test("dispatchAgent assigns runtime.timer before session.prompt() runs (regression: dispatch slim dropped the call site)", async () => {
+  // The Wave 2 dispatch slim (commit 90a308f) extracted startElapsedTimer()
+  // but left an orphan truncated comment where the call site used to live,
+  // so runtime.timer stayed undefined for the entire worker run and the 1s
+  // ticker that updates runtime.elapsedMs / contextPct / contextTokens never
+  // fired — caught by the post-slim verification agent and fixed in 9a71425.
+  // This test guards against a re-slim losing the call site again.
+  //
+  // WorkerRunLifecycle.close() clears the timer during the post-prompt
+  // cleanup tail, so by the time dispatchAgent returns runtime.timer is
+  // already undefined again. Capture the reference from inside prompt()
+  // instead, which is the one moment it's reliably observable.
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-runtime-timer-"));
+  const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
+  const state = hiveState({ dir, worker });
+  const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", modelId: "model" }) } } as any;
+
+  let timerDuringRun: NodeJS.Timeout | undefined;
+  const create: CreateAgentSession = (async () => ({ session: {
+    ...scriptedSession(),
+    async prompt(): Promise<void> {
+      timerDuringRun = worker.timer;
+    },
+  } as any })) as any;
+
+  await dispatchAgent(state, "Builder", "do work", ctx, false, create);
+  assert.ok(timerDuringRun, "runtime.timer must be assigned before session.prompt() runs (slim lost the call site at dispatch.ts:650)");
+  assert.equal(timerDuringRun!.constructor.name, "Timeout", "setInterval returns a Node Timeout object");
+});
