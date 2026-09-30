@@ -30,13 +30,19 @@ import { resolveConfiguredPath } from "../core/safe-path";
 import { acquireWorkerSlot, budgetRemaining, checkDispatchBudgets, effectiveWorkerGovernance, releaseWorkerSlot } from "./governance";
 import { WorkerRunLifecycle } from "./worker-lifecycle";
 import { modelKey, resolveModel } from "./model-resolution";
+import { delegateAgent as delegateAgentFn, BudgetExhaustedError } from "./budget/worker-tools";
+import { installBudgetEventHooks } from "./budget/events";
+import { BudgetLedger } from "./budget/ledger";
+import { resolveWorkerBudgetPolicy } from "./budget/strategy";
+import { wireDispatchSubscription, makeDispatchStreamState } from "./dispatch-subscribe";
+import { emitDelegationEnd } from "./dispatch-end";
 
 // Dashboard activity should show reviewer/worker conclusions without confusing
 // middle elision in normal cases. Keep a high hard cap to avoid unbounded shared
 // telemetry rows if an agent accidentally returns a huge dump.
 const DELEGATION_EVENT_MESSAGE_LIMIT = 64_000;
 
-function publishRuntimeUpdate(state: HiveState) {
+export function publishRuntimeUpdate(state: HiveState) {
   state.onRuntimeUpdate?.(state);
 }
 
@@ -141,7 +147,7 @@ export function inferArtifactFromReviewTask(task: string): ArtifactId | null {
   return best?.id ?? null;
 }
 
-function inferReviewVerdict(output: string): Exclude<AgentReviewVerdict, null> | null {
+export function inferReviewVerdict(output: string): Exclude<AgentReviewVerdict, null> | null {
   const text = output.trim();
   const match = text.match(/^\s*(?:#{1,6}\s*)?(?:verdict\s*[:—-]\s*)?(PASS|GREEN|YELLOW|FAIL|RED)\b/i);
   const verdict = match?.[1]?.toLowerCase();
@@ -341,21 +347,10 @@ export async function dispatchAgent(
   runtime.runStartReasoningTokens = runtime.reasoningTokens;
   runtime.runStartCostUsd = runtime.costUsd;
 
-  const chunks: string[] = [];
-  let streamedSnapshot = "";
+  const streamState = makeDispatchStreamState();
   let session: any;
   let abortedByParent = false;
   let errorMessage: string | undefined;
-  const modelsSeen = new Set<string>();
-  const providersSeen = new Set<string>();
-  const apisSeen = new Set<string>();
-  let firstResponseId: string | undefined;
-  let lastResponseId: string | undefined;
-  const diagnostics: Array<{ type?: string; message?: string }> = [];
-  const MAX_DIAGNOSTICS = 20;
-  let lastStopReason: string | undefined;
-  const toolStartedAt = new Map<string, number>();
-  let lastRetryMaxAttempts: number | undefined;
   let sdkCounts: { toolCalls?: number; toolResults?: number; userMessages?: number; assistantMessages?: number } | undefined;
 
   try {
@@ -458,176 +453,15 @@ export async function dispatchAgent(
   }, 1000);
   runtime.timer.unref?.();
 
-  // Distinct actual models seen across this run's assistant messages (A3).
-  // Per-message identity the SDK exposes on AssistantMessage (Item 9 / R3-1.4):
-  // `.provider`, `.api`, `.responseId?`, `.diagnostics?` all ride the same
-  // message_end object. Capture the distinct providers/apis, the first+last
-  // responseId (bookends of the run), and a bounded set of diagnostics.
-  // toolCallId → startedAt, for per-call durationMs (A4). Bounded by in-flight
-  // calls: deleted on tool_execution_end. Retry metadata is retained only for
-  // this reserved run and cleared by the outer lifecycle cleanup.
-  const unsubscribe = session.subscribe((event: any) => {
-    if (event.type === "message_update") {
-      const delta = event.assistantMessageEvent;
-      if (delta?.type === "text_delta") {
-        // The documented SDK contract exposes incremental text on `delta`. Some
-        // event shapes also carry `text`/`message` as the full accumulated
-        // snapshot; appending that snapshot duplicates every prefix in the final
-        // worker result (e.g. "P", "Pl", "Ple" as separate lines in the TUI).
-        // Keep snapshots only for live status/fallback output, never as chunks.
-        const deltaText = typeof delta.delta === "string" ? delta.delta : "";
-        if (deltaText) chunks.push(deltaText);
-        const snapshot = textFromMessage(event.message) || (typeof delta.text === "string" ? delta.text : "");
-        if (snapshot) streamedSnapshot = snapshot;
-        const live = chunks.length ? chunks.join("") : streamedSnapshot;
-        const last = live.split("\n").filter((line: string) => line.trim()).pop();
-        if (last) runtime.lastWork = last;
-      }
-    } else if (event.type === "tool_execution_start") {
-      runtime.toolCount++;
-      const toolName = event.toolName || event.name || "unknown";
-      runtime.lastWork = `tool: ${toolName}`;
-      if (event.toolCallId) toolStartedAt.set(event.toolCallId, Date.now());
-      const argsJson = safeJson(event.args ?? {});
-      addHiveActivity(state, { kind: "tool_start", agent: runtime.config.name, toolName, status: "running" });
-      emitHiveEvent(state, "worker_tool_start", {
-        agent: runtime.config.name,
-        toolName,
-        toolCallId: event.toolCallId,
-        args: truncateMiddle(argsJson, 500),
-        truncated: argsJson.length > 500,
-      }, runtime.config.name);
-    } else if (event.type === "tool_execution_end") {
-      const startedAt = event.toolCallId ? toolStartedAt.get(event.toolCallId) : undefined;
-      if (event.toolCallId) toolStartedAt.delete(event.toolCallId);
-      const resultText = textOfResult(event.result);
-      addHiveActivity(state, { kind: "tool_end", agent: runtime.config.name, toolName: event.toolName || event.name || "unknown", status: event.isError === true ? "error" : "done", text: event.isError === true ? truncateMiddle(resultText, 160) : undefined });
-      emitHiveEvent(state, "worker_tool_end", {
-        agent: runtime.config.name,
-        toolName: event.toolName || event.name || "unknown",
-        toolCallId: event.toolCallId,
-        isError: event.isError === true,
-        resultPreview: truncateMiddle(resultText, 500),
-        truncated: resultText.length > 500,
-        durationMs: startedAt != null ? Date.now() - startedAt : undefined,
-      }, runtime.config.name);
-    } else if (event.type === "auto_retry_start") {
-      if (event.maxAttempts != null) lastRetryMaxAttempts = event.maxAttempts;
-      addHiveActivity(state, { kind: "retry", agent: runtime.config.name, status: "running", text: `retry ${event.attempt}${event.maxAttempts ? `/${event.maxAttempts}` : ""}${event.errorMessage ? `: ${truncateMiddle(String(event.errorMessage), 120)}` : ""}` });
-      emitHiveEvent(state, "worker_retry", {
-        agent: runtime.config.name,
-        attempt: event.attempt,
-        maxAttempts: event.maxAttempts,
-        errorMessage: event.errorMessage ? truncateMiddle(String(event.errorMessage), 500) : undefined,
-        // Phase 4.6: the backoff delay before this retry (W1.7: 0 is a valid delay).
-        delayMs: finiteOrUndef(event.delayMs),
-        phase: "start",
-      }, runtime.config.name);
-    } else if (event.type === "auto_retry_end") {
-      // The SDK does not carry maxAttempts on retry-end; fall back to the value
-      // captured at the matching retry-start.
-      emitHiveEvent(state, "worker_retry", {
-        agent: runtime.config.name,
-        attempt: event.attempt,
-        maxAttempts: event.maxAttempts ?? lastRetryMaxAttempts,
-        phase: "end",
-        success: event.success,
-        // Phase 4.6: the terminal error when retries are exhausted.
-        finalError: event.finalError ? truncateMiddle(String(event.finalError), 500) : undefined,
-      }, runtime.config.name);
-    } else if (event.type === "compaction_start") {
-      addHiveActivity(state, { kind: "compaction", agent: runtime.config.name, status: "running", text: `compacting${event.reason ? `: ${event.reason}` : ""}` });
-      emitHiveEvent(state, "worker_compaction", { agent: runtime.config.name, reason: event.reason, phase: "start" }, runtime.config.name);
-    } else if (event.type === "compaction_end") {
-      // Phase 4.5: keep the compaction RESULT fields, not just {reason, phase}.
-      const result = event.result || {};
-      emitHiveEvent(state, "worker_compaction", {
-        agent: runtime.config.name, reason: event.reason, phase: "end",
-        tokensBefore: finiteOrUndef(result.tokensBefore ?? event.tokensBefore),
-        estimatedTokensAfter: finiteOrUndef(result.estimatedTokensAfter ?? event.estimatedTokensAfter),
-        aborted: (result.aborted ?? event.aborted) === true ? true : undefined,
-        willRetry: (result.willRetry ?? event.willRetry) === true ? true : undefined,
-        errorMessage: (result.errorMessage ?? event.errorMessage) ? truncateMiddle(String(result.errorMessage ?? event.errorMessage), 500) : undefined,
-      }, runtime.config.name);
-    } else if (event.type === "queue_update") {
-      // Worker steering/follow-up queue depth (Phase 4). Bounded to counts — the
-      // queued message bodies are not carried into telemetry.
-      emitHiveEvent(state, "queue_update", {
-        agent: runtime.config.name,
-        steering: Array.isArray(event.steering) ? event.steering.length : 0,
-        followUp: Array.isArray(event.followUp) ? event.followUp.length : 0,
-      }, runtime.config.name);
-    } else if (event.type === "session_info_changed") {
-      emitHiveEvent(state, "session_info_changed", {
-        agent: runtime.config.name,
-        name: event.name ? truncateMiddle(String(event.name), 200) : undefined,
-      }, runtime.config.name);
-    } else if (event.type === "message_end") {
-      const message = event.message;
-      const actualModel = message?.model || message?.responseModel;
-      if (actualModel) modelsSeen.add(String(actualModel));
-      if (message?.provider) providersSeen.add(String(message.provider));
-      if (message?.api) apisSeen.add(String(message.api));
-      if (message?.responseId) {
-        const rid = String(message.responseId);
-        if (!firstResponseId) firstResponseId = rid;
-        lastResponseId = rid;
-      }
-      if (diagnostics.length < MAX_DIAGNOSTICS) {
-        // R4.3: shared bounded/undefined-omitting normalizer, capped across the run.
-        const norm = boundedDiagnostics(message?.diagnostics, MAX_DIAGNOSTICS - diagnostics.length);
-        if (norm) diagnostics.push(...norm);
-      }
-      if (message?.stopReason) lastStopReason = String(message.stopReason);
-      const usage = message?.usage;
-      if (usage) {
-        // Incremental accumulation for live display only. Authoritative totals
-        // are overwritten from getSessionStats() at run end (A1) — this avoids
-        // the historical double-count where agent_end re-added the final
-        // message's usage.
-        const u = extractUsage(usage);
-        runtime.inputTokens += u.input;
-        runtime.outputTokens += u.output;
-        runtime.cacheReadTokens += u.cacheRead;
-        runtime.cacheWriteTokens += u.cacheWrite;
-        runtime.reasoningTokens += u.reasoning;
-        runtime.costUsd += u.cost;
-
-        const remaining = budgetRemaining(state, runtime);
-        const teamLimits = state.config?.settings.teamBudgets || {};
-        const warn = (left: number | undefined, limit: number | undefined, scope: "worker" | "team", resource: "tokens" | "cost") => {
-          if (left === undefined || limit === undefined || left <= 0 || left / limit > 0.2) return;
-          const warningKey = `${scope}:${resource}:${scope === "worker" ? agentSlug(runtime.config) : "team"}`;
-          const warnings = state.budgetWarnings ||= new Set<string>();
-          if (warnings.has(warningKey)) return;
-          warnings.add(warningKey);
-          emitHiveEvent(state, "budget_warning", { agent: runtime.config.name, scope, resource, remaining: left, limit }, runtime.config.name);
-        };
-        warn(remaining.worker.tokens, governance.tokenBudget, "worker", "tokens");
-        warn(remaining.worker.costUsd, governance.costBudgetUsd, "worker", "cost");
-        warn(remaining.team.tokens, teamLimits.tokenBudget, "team", "tokens");
-        warn(remaining.team.costUsd, teamLimits.costBudgetUsd, "team", "cost");
-        const exhausted = remaining.worker.tokens === 0 ? { scope: "worker", resource: "tokens" }
-          : remaining.worker.costUsd === 0 ? { scope: "worker", resource: "cost" }
-          : remaining.team.tokens === 0 ? { scope: "team", resource: "tokens" }
-          : remaining.team.costUsd === 0 ? { scope: "team", resource: "cost" }
-          : undefined;
-        if (exhausted && !runController.signal.aborted) {
-          emitHiveEvent(state, "budget_exhausted", { agent: runtime.config.name, ...exhausted, remaining }, runtime.config.name);
-          runController.abort(new Error(`${exhausted.scope} ${exhausted.resource} budget exhausted`));
-        }
-      }
-    } else if (event.type === "agent_end") {
-      const messages = event.messages || [];
-      const last = [...messages].reverse().find((message: any) => message.role === "assistant");
-      // Keep the chunks fallback for output text; the usage-add block that used
-      // to live here is deleted (double-count fix, Decision 1).
-      if (last && !chunks.length && !streamedSnapshot) chunks.push(textFromMessage(last));
-    }
-    publishRuntimeUpdate(state);
-    writeHiveStateSnapshot(state);
-  });
+  // Non-budget session event subscription: streaming text, tool telemetry,
+  // retry, compaction telemetry, agent_end text fallback, per-message
+  // identity tracking. Extracted to src/engine/dispatch-subscribe.ts so this
+  // module stays under the ≤600 LOC refactor target. Budget paths (warning at
+  // 20%, abort at 0%, recordCompaction) live in installBudgetEventHooks and
+  // are installed separately (T2.1).
+  const unsubscribe = wireDispatchSubscription(state, runtime, session, streamState, governance, runController);
   lifecycle.attachSubscription(unsubscribe);
+
 
   try {
     // Scoped so currentAgentName() resolves to this worker for everything
@@ -728,7 +562,7 @@ export async function dispatchAgent(
   } catch (error: any) {
     errorMessage = errorMessage || error?.message || String(error);
   } finally {
-    toolStartedAt.clear();
+    streamState.toolStartedAt.clear();
     if (timeout) clearTimeout(timeout);
     abortSignal?.removeEventListener("abort", abortFromParent);
     await lifecycle.close(Boolean(errorMessage));
@@ -737,106 +571,16 @@ export async function dispatchAgent(
   }
   const exitCode = errorMessage ? 1 : 0;
 
-  const output = chunks.join("").trim() || streamedSnapshot.trim() || errorMessage || "[no output]";
+  const output = streamState.chunks.join("").trim() || streamState.streamedSnapshot.trim() || errorMessage || "[no output]";
   runtime.lastWork = output.split("\n").filter((line) => line.trim()).pop() || runtime.status;
-  // The shared log keeps a bounded copy of the result for the dashboard. The
-  // cap is intentionally high enough that normal review verdicts are not
-  // middle-elided in the web UI, while still protecting the shared telemetry log
-  // from accidental multi-hundred-KB rows.
-  const completionMessage = truncateMiddle(output, DELEGATION_EVENT_MESSAGE_LIMIT);
-  const completion = {
-    from: runtime.config.name,
-    // The real delegation parent: the ALS caller (A6). For top-level
-    // delegations this resolves to "Orchestrator"; nested lead→member
-    // delegations now record the truthful parent instead of a hardcoded root.
-    to: caller,
-    type: runtime.status,
-    message: completionMessage,
-    costUsd: runtime.costUsd,
-    inputTokens: runtime.inputTokens,
-    outputTokens: runtime.outputTokens,
-    elapsedMs: runtime.elapsedMs,
-  };
-  logRecord(state, completion);
-  addHiveActivity(state, { kind: "delegation_end", parent: caller, agent: runtime.config.name, status: runtime.status, text: `${runtime.status} in ${Math.round(runtime.elapsedMs / 1000)}s${runtime.toolCount ? ` · ${runtime.toolCount} tools` : ""}` });
-  // Per-run deltas (Decision 1): runtime.* now hold session-lifetime aggregates
-  // (overwritten from getSessionStats above), so a re-run agent's runtime would
-  // make SUM() over delegations double-count. Subtract the run-start baseline so
-  // each delegation_end row records only what THIS run consumed. Clamp at 0 in
-  // case the SDK's lifetime total ever regresses across a compaction — and as a
-  // last-resort guard for the fresh-archive path (where the baselines are reset to
-  // 0 above precisely so this clamp is NOT what saves the delta from going negative).
-  const nonneg = (n: number) => (Number.isFinite(n) && n > 0 ? n : 0);
-  const delta = {
-    inputTokens: nonneg(runtime.inputTokens - (runtime.runStartInputTokens ?? 0)),
-    outputTokens: nonneg(runtime.outputTokens - (runtime.runStartOutputTokens ?? 0)),
-    cacheReadTokens: nonneg(runtime.cacheReadTokens - (runtime.runStartCacheReadTokens ?? 0)),
-    cacheWriteTokens: nonneg(runtime.cacheWriteTokens - (runtime.runStartCacheWriteTokens ?? 0)),
-    reasoningTokens: nonneg(runtime.reasoningTokens - (runtime.runStartReasoningTokens ?? 0)),
-    costUsd: nonneg(runtime.costUsd - (runtime.runStartCostUsd ?? 0)),
-  };
-  // Scope-aware governance accumulation: input_output keeps the budget aligned
-  // with what fills the model's context window; "all" (default) preserves the
-  // legacy behavior that includes cache reads/writes and reasoning.
-  runtime.governanceTokens = (runtime.governanceTokens || 0)
-    + (tokenBudgetScope === "input_output"
-      ? delta.inputTokens + delta.outputTokens
-      : delta.inputTokens + delta.outputTokens + delta.cacheReadTokens + delta.cacheWriteTokens + delta.reasoningTokens);
-  runtime.governanceCostUsd = (runtime.governanceCostUsd || 0) + delta.costUsd;
-  if (runtime.config.agentType === "reviewer") {
-    // Persist per-artifact reviewer clearance whenever a review prompt is
-    // explicit enough to identify its target. Some dashboard-triggered review
-    // turns can run without plan-mode ambient state after a session restore; in
-    // that case, derive the change id from the OpenSpec paths in the task so the
-    // Plans UI does not reject a freshly PASSed artifact as "not ready".
-    const changeId = currentChangeId() || state.activeChangeId || inferChangeIdFromReviewTask(task) || "";
-    const artifact = inferArtifactFromReviewTask(task);
-    const verdict = inferReviewVerdict(output);
-    if (changeId && artifact && verdict) {
-      const recordPath = approvalRecordPath(ctx.cwd, changeId, artifact, "automated-review");
-      if (recordPath) {
-        await withFileMutationQueue(recordPath, async () => {
-          setAgentReviewVerdict(ctx.cwd, changeId, artifact, verdict, runtime.config.name);
-        });
-      }
-    }
-  }
+  // Post-prompt emit (delegation_end / error / completion log + activity +
+  // delta + governance + reviewer-verdict). Extracted to dispatch-end.ts so
+  // dispatch.ts stays under the ≤600 LOC refactor target.
+  await emitDelegationEnd({
+    state, runtime, caller, task, ctx, output, errorMessage, exitCode,
+    streamState, sdkCounts, tokenBudgetScope,
+  });
 
-  emitHiveEvent(state, "delegation_end", {
-    ...completion,
-    truncated: output.length > DELEGATION_EVENT_MESSAGE_LIMIT,
-    exitCode,
-    stopReason: lastStopReason,
-    errorMessage: errorMessage ? truncateMiddle(errorMessage, 500) : undefined,
-    models: [...modelsSeen],
-    // Per-message identity the SDK exposes on AssistantMessage (Item 9 / R3-1.4):
-    // distinct providers + apis behind this run's assistant messages, the first and
-    // last responseId (run bookends), and a bounded/truncated diagnostics list.
-    providers: providersSeen.size ? [...providersSeen] : undefined,
-    apis: apisSeen.size ? [...apisSeen] : undefined,
-    firstResponseId,
-    lastResponseId,
-    diagnostics: diagnostics.length ? diagnostics : undefined,
-    // Authoritative SDK message/tool counts for this session (Item 9), preferred
-    // over the hand-tallied toolCount. Session-lifetime (not per-run) — a re-run
-    // agent's stats cover the whole conversation.
-    counts: sdkCounts,
-    // Schema marker so the materializer stores per-run deltas and the dashboard
-    // never sums these rows with legacy cumulative ones (delegationsSchema=1).
-    delegationsSchema: 1,
-    delta,
-    runtime: runtimeSummary(state, runtime),
-  }, runtime.config.name);
-  // Surface delegation failures as the now-live `error` telemetry event (A3).
-  if (errorMessage) {
-    emitHiveEvent(state, "error", {
-      agent: runtime.config.name,
-      message: truncateMiddle(errorMessage, 500),
-      stopReason: lastStopReason,
-    }, runtime.config.name);
-  }
-  publishRuntimeUpdate(state);
-  writeHiveStateSnapshot(state);
-  state.onRuntimeFinish?.(runtime, ctx);
   return { output, exitCode, elapsed: runtime.elapsedMs };
 }
+
