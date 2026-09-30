@@ -50,6 +50,58 @@ test("BudgetPolicy stubs throw not implemented when called", () => {
   assert.throws(() => policy.crossedThreshold(0, 0), /not implemented/);
 });
 
+// ── Slice 3 — WorkerBudgetPolicy + WorkerBudgetStrategy ──────────────────────
+
+import { resolveWorkerBudgetPolicy, resolveWorkerBudgetStrategy } from "../src/engine/budget/strategy.ts";
+import type { WorkerBudgetPolicy as WBP, WorkerBudgetStrategy as WBS, HiveConfig } from "../src/core/types.ts";
+
+test("WorkerBudgetPolicy is exported with all the §2.10 nested-shape fields", () => {
+  // Compile-time shape check — the policy object must accept worker.tokens,
+  // worker.costUsd, worker.runs, worker.depth, team.tokens, team.costUsd,
+  // team.runs, and optional strategies. Wave 1 may populate the values; the
+  // shape is locked here.
+  const policy: WBP = {
+    worker: {
+      tokens: { cap: 1000, window: "per-session", include: ["input", "output"] },
+      costUsd: { cap: 0.5, window: "per-session" },
+      runs: { cap: 5 },
+      depth: { cap: 2 },
+    },
+    team: {
+      tokens: { cap: 10_000, window: "per-team-lifetime", include: ["input", "output", "cacheRead", "cacheWrite"] },
+      costUsd: { cap: 5, window: "per-team-lifetime" },
+      runs: { cap: 20 },
+    },
+    strategies: undefined,
+  };
+  assert.equal(policy.worker.tokens?.cap, 1000);
+  assert.equal(policy.worker.depth?.cap, 2);
+  assert.equal(policy.team.runs?.cap, 20);
+});
+
+test("WorkerBudgetStrategy is the 'default' | 'compact' union", () => {
+  const values: WBS[] = ["default", "compact"];
+  assert.deepEqual(values, ["default", "compact"]);
+  // Compile-time check that the literal type is the documented union.
+  const def: WBS = "default";
+  const compact: WBS = "compact";
+  assert.equal(def, "default");
+  assert.equal(compact, "compact");
+});
+
+test("strategy resolvers are exported with pinned arities", () => {
+  assert.equal(typeof resolveWorkerBudgetStrategy, "function");
+  assert.equal(typeof resolveWorkerBudgetPolicy, "function");
+  assert.equal(resolveWorkerBudgetStrategy.length, 2, "resolveWorkerBudgetStrategy takes (config, agentName)");
+  assert.equal(resolveWorkerBudgetPolicy.length, 2, "resolveWorkerBudgetPolicy takes (config, agentName)");
+});
+
+test("strategy resolver stubs throw not implemented", () => {
+  const fakeConfig = {} as HiveConfig;
+  assert.throws(() => resolveWorkerBudgetStrategy(fakeConfig, "agent"), /not implemented/);
+  assert.throws(() => resolveWorkerBudgetPolicy(fakeConfig, "agent"), /not implemented/);
+});
+
 test("BudgetLedger.restore is a static factory returning a Promise<BudgetLedger>", () => {
   assert.equal(typeof BudgetLedger.restore, "function", "BudgetLedger.restore must be a static method");
   // The signature must accept (sessionManager, agentName, policy, signal). We
