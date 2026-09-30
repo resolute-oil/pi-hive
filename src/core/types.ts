@@ -399,3 +399,42 @@ export interface HiveState {
   // its presence reliably means "a snapshot was taken for the current cycle."
   hiveCycleSnapshotLeafId?: string;
 }
+
+// ── Budget refactor (Wave 0 contract stubs) ─────────────────────────────────
+//
+// The types below are pinned here so the engine/budget/* stubs compile against
+// a stable contract. Slice 3 / 4 / 7 / 8 will refine them (WorkerBudgetPolicy
+// gets Strategies/etc., BudgetLedgerEntry gets the full data schema); the
+// initial shapes match the plan §2.5 / §2.10 / §2.13 / §2.14 enough for
+// compilation. Forward-reference is fine (per the Wave 0 contract notes).
+
+// Slice 3 placeholder — full shape with strategies lands in slice 3.
+export interface WorkerBudgetPolicy {
+  worker: {
+    tokens?: { cap: number; window?: string; include?: string[] };
+    costUsd?: { cap: number; window?: string };
+    runs?: { cap: number };
+    depth?: { cap: number };
+  };
+  team: {
+    tokens?: { cap: number; window?: string; include?: string[] };
+    costUsd?: { cap: number; window?: string };
+    runs?: { cap: number };
+  };
+  strategies?: unknown;
+}
+
+// Slice 8 placeholder — the full BudgetLedgerKind union and data schema lands
+// in slice 8. The shape is minimal here; the slice 8 stub expands `data`.
+export interface BudgetLedgerEntry {
+  type: "custom";
+  customType: "pi-hive-budget-ledger";
+  data: {
+    caps: Record<string, number | undefined>;
+    cumulative: { tokens: number; costUsd: number; runs: number };
+    writtenAt: number;
+    agentSlug: string;
+    marker?: "warning" | "exhausted" | "checkpoint";
+    kind?: string;
+  };
+}
