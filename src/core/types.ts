@@ -408,20 +408,25 @@ export interface HiveState {
 // initial shapes match the plan §2.5 / §2.10 / §2.13 / §2.14 enough for
 // compilation. Forward-reference is fine (per the Wave 0 contract notes).
 
-// Slice 3 placeholder — full shape with strategies lands in slice 3.
+// Slice 3 — WorkerBudgetPolicy (the resolved policy object). Composed of
+// worker + team blocks, each with optional tokens/costUsd/runs/depth caps
+// (per §2.10 nested shape). The WindowKind / IncludeKeys / Strategies fields
+// land in slice 7 but are forward-referenced here so the slice 3 stub
+// typechecks. `strategies` is optional because most projects will rely on
+// the global strategies default.
 export interface WorkerBudgetPolicy {
   worker: {
-    tokens?: { cap: number; window?: string; include?: string[] };
+    tokens?: { cap: number; window?: string; include?: IncludeKeys };
     costUsd?: { cap: number; window?: string };
     runs?: { cap: number };
     depth?: { cap: number };
   };
   team: {
-    tokens?: { cap: number; window?: string; include?: string[] };
+    tokens?: { cap: number; window?: string; include?: IncludeKeys };
     costUsd?: { cap: number; window?: string };
     runs?: { cap: number };
   };
-  strategies?: unknown;
+  strategies?: Strategies;
 }
 
 // Slice 8 placeholder — the full BudgetLedgerKind union and data schema lands
@@ -455,3 +460,23 @@ export interface BudgetBlock {
 // here for workerConsumedTokens.
 export type IncludeKey = "input" | "output" | "cacheRead" | "cacheWrite" | "reasoning";
 export type IncludeKeys = IncludeKey[];
+
+// Slice 3 — WorkerBudgetStrategy (the flat enum that the strategies: object
+// in §2.13/C5 projects to). Two values: default vs compact EOL behavior.
+export type WorkerBudgetStrategy = "default" | "compact";
+
+// Slice 3 — BudgetsConfig (the top-level config shape; full nested form
+// arrives in slice 7, but the discriminated-union reference is needed here).
+// Strategies is the slice 7 §2.13/C5 structured shape.
+export interface Strategies {
+  onApproachingLimit: { action: "wrap-up" | "compact" | "none"; threshold: number; hint: string };
+  onExhaustion: { action: "compact" | "abort" | "none"; customInstructions?: string };
+  summary: { maxTokens: number };
+}
+
+export interface BudgetsConfig {
+  defaultsEnabled?: boolean;
+  perWorker: WorkerBudgetPolicy["worker"];
+  perTeam: WorkerBudgetPolicy["team"];
+  strategies?: Strategies;
+}
