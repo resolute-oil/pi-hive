@@ -27,13 +27,11 @@ import { ARTIFACT_ORDER, type ArtifactId } from "../shared/openspec-artifacts";
 import { agentRoster, resolveRuntime } from "./agent-lookup";
 import { addHiveActivity } from "../ui/tui/activity";
 import { resolveConfiguredPath } from "../core/safe-path";
-import { acquireWorkerSlot, budgetRemaining, checkDispatchBudgets, effectiveWorkerGovernance, releaseWorkerSlot } from "./governance";
+import { acquireWorkerSlot, effectiveWorkerGovernance, releaseWorkerSlot } from "./governance";
 import { WorkerRunLifecycle } from "./worker-lifecycle";
 import { modelKey, resolveModel } from "./model-resolution";
-import { delegateAgent as delegateAgentFn, BudgetExhaustedError } from "./budget/worker-tools";
+import { delegateAgent as delegateAgentFn, BudgetExhaustedError, defaultDelegateAgentInternals } from "./budget/worker-tools";
 import { installBudgetEventHooks } from "./budget/events";
-import { BudgetLedger } from "./budget/ledger";
-import { resolveWorkerBudgetPolicy } from "./budget/strategy";
 import { wireDispatchSubscription, makeDispatchStreamState } from "./dispatch-subscribe";
 import { emitDelegationEnd } from "./dispatch-end";
 
@@ -218,11 +216,26 @@ export async function dispatchAgent(
     return { output: `${runtime.config.name} is already running.`, exitCode: 1, elapsed: runtime.elapsedMs };
   }
   const delegationDepth = currentDelegationDepth() + 1;
-  const blocked = checkDispatchBudgets(state, runtime, delegationDepth);
-  if (blocked) {
-    emitHiveEvent(state, "budget_exhausted", { agent: runtime.config.name, resource: blocked.resource, scope: blocked.scope, remaining: budgetRemaining(state, runtime) }, caller);
-    return { output: `Delegation blocked: ${blocked.message}`, exitCode: 1, elapsed: 0 };
-  }
+  // The error/abort bookkeeping has to live at function scope so the
+  // setup-failure catch (inside the delegateAgent try below) can mutate
+  // errorMessage and still see it from the cleanup tail at the bottom of
+  // the function.
+  let errorMessage: string | undefined;
+  let abortedByParent = false;
+  let sdkCounts: { toolCalls?: number; toolResults?: number; userMessages?: number; assistantMessages?: number } | undefined;
+  // Budget pre-flight (Wave 2 fixup): delegateAgent now owns the budget gate
+  // (resolveWorkerBudgetPolicy → BudgetLedger.restore → checkBudgetPolicy),
+  // the depth-cap (T2.3), and the installBudgetEventHooks wiring. The
+  // dispatcher no longer reads checkDispatchBudgets directly — the legacy
+  // gate was the source of the "no business logic remains" brief violation.
+  // The depthFn closure wires currentDelegationDepth() into the new path so
+  // the cap actually fires in production (per Wave 2 review Blocker 2). The
+  // session-manager factory (`createSession` seam) is passed through to
+  // delegateAgent via internals so the 565-test seam continues to drive
+  // AgentSession creation from tests/*.test.ts without a code split.
+  const delegateOptions = {
+    depthFn: () => currentDelegationDepth(),
+  };
   const willQueue = state.config.settings.maxParallel !== undefined
     && state.activeRuns >= state.config.settings.maxParallel
     && state.config.settings.queueSize !== undefined;
@@ -243,12 +256,6 @@ export async function dispatchAgent(
   if ((runtime.status as AgentRuntime["status"]) === "running") {
     releaseWorkerSlot(state);
     return { output: `${runtime.config.name} is already running.`, exitCode: 1, elapsed: runtime.elapsedMs };
-  }
-  const queuedBlock = checkDispatchBudgets(state, runtime, delegationDepth);
-  if (queuedBlock) {
-    releaseWorkerSlot(state);
-    emitHiveEvent(state, "budget_exhausted", { agent: runtime.config.name, resource: queuedBlock.resource, scope: queuedBlock.scope, remaining: budgetRemaining(state, runtime) }, caller);
-    return { output: `Delegation blocked: ${queuedBlock.message}`, exitCode: 1, elapsed: 0 };
   }
 
   let prompt: string;
@@ -314,6 +321,155 @@ export async function dispatchAgent(
     return { output: `Cannot resolve model "${model}" for ${runtime.config.name}.`, exitCode: 1, elapsed: 0 };
   }
 
+  // Wave 2 fixup — delegateAgent owns the budget pre-flight + session creation
+  // + installBudgetEventHooks. Per the brief's HARD gate "no business logic
+  // remains in dispatch.ts", the legacy checkDispatchBudgets call is gone; the
+  // new path throws BudgetExhaustedError per Pi docs §2, which we catch and
+  // convert to the legacy {output, exitCode: 1} shape for the delegate_agent
+  // tool caller (backward compat). depthFn wires currentDelegationDepth() into
+  // the new path so the depth-cap (T2.3) actually fires in production (per
+  // Wave 2 review Blocker 2). The createSession seam is passed through via
+  // internals so the 565-test AgentSession factory keeps working.
+  const toolNamesForGate = tools.split(",").map((t) => t.trim()).filter(Boolean);
+  const hiveToolsForGate = buildHiveTools(state, runtime.config.name).filter((t) => toolNamesForGate.includes(t.name) || TYPE_SCOPED_TOOL_NAMES.has(t.name));
+  const allToolNamesForGate = dispatchToolNames(toolNamesForGate, hiveToolsForGate);
+  const skillPathsForGate = resolveWorkerSkillPaths(ctx.cwd, runtime.config.skills as unknown[]);
+  const sessionManager = SessionManager.open(runtime.sessionFile);
+  // createAgentSession only calls reload() when it creates its own resource
+  // loader (sdk.js). When a loader is supplied by the caller, the SDK skips
+  // reload, leaving extensionsResult empty (constructor default). Without
+  // reload the extensionFactories never run, runner.hasHandlers("tool_call")
+  // is false, beforeToolCall short-circuits, and domain enforcement is silently
+  // bypassed for every worker tool call. Call reload() here so the factory
+  // registers the tool_call handler before the session starts.
+  const workerLoader = workerResourceLoader(state, ctx.cwd, runtime.config.name, skillPathsForGate);
+  await workerLoader.reload();
+
+  let delegateResult: Awaited<ReturnType<typeof delegateAgentFn>> | undefined;
+  try {
+    delegateResult = await delegateAgentFn(
+      state,
+      runtime.config.name,
+      task,
+      { fresh },
+      ctx,
+      {
+        ...defaultDelegateAgentInternals,
+        // Production-side seam: the dispatcher's createSession is what every
+        // test in tests/dispatch-usage.test.ts injects. delegateAgent routes
+        // through this when provided; otherwise it falls back to
+        // SessionManager.toAgentSession().
+        createSession: createSession as unknown as never,
+      },
+      {
+        depthFn: () => currentDelegationDepth(),
+        model: resolvedModel,
+        thinkingLevel: thinking as unknown,
+        tools: allToolNamesForGate,
+        customTools: hiveToolsForGate,
+        resourceLoader: workerLoader,
+      },
+    );
+  } catch (error: any) {
+    if (error instanceof BudgetExhaustedError) {
+      // Budget pre-flight refused — emit budget_exhausted and return the
+      // legacy {output, exitCode: 1} shape so the delegate_agent tool caller
+      // gets a failed tool result per Pi docs §2.
+      releaseWorkerSlot(state);
+      emitHiveEvent(state, "budget_exhausted", {
+        agent: runtime.config.name,
+        resource: error.resource,
+        scope: error.scope,
+        remaining: error.remaining,
+      }, caller);
+      return { output: `Delegation blocked: ${error.message}`, exitCode: 1, elapsed: 0 };
+    }
+    // Setup failure (e.g. createSession's session.subscribe throws when
+    // installBudgetEventHooks subscribes the budget listener). Mirror the
+    // legacy behavior: set errorMessage, mark runtime.status="error", and
+    // fall through to the post-delegationEnd cleanup path so the partial
+    // session gets aborted/disposed and the terminal telemetry event lands
+    // with the caught error message. Throw into the existing prompt-try
+    // catch (the inner one at the prompt() invocation site) — actually no,
+    // we set errorMessage here and let the tail (lifecycle.close +
+    // emitDelegationEnd) handle abort/dispose + the terminal event.
+    errorMessage = error?.message || String(error);
+    runtime.status = "error";
+    releaseWorkerSlot(state);
+    // Recover the partial session (if delegateAgent got that far before the
+    // throw — installBudgetEventHooks wires the budget listener via
+    // session.subscribe, which can throw on a test seam). delegateAgent
+    // attaches the partial session as `__partialSession` so we can still
+    // call abort/dispose via the lifecycle close path. The existing
+    // setup-failure test in tests/dispatch-usage.test.ts asserts aborted=1,
+    // disposed=1.
+    const partial = (error as { __partialSession?: any } | null)?.__partialSession;
+    if (partial) {
+      delegateResult = {
+        session: partial,
+        sessionId: partial.sessionId,
+        ledger: undefined as never,
+        controller: new AbortController(),
+        sessionManager: SessionManager.open(runtime.sessionFile),
+      };
+    } else {
+      // No session to abort/dispose — skip the rest of the orchestration
+      // and jump to the cleanup tail.
+      delegateResult = undefined;
+    }
+  }
+
+  // The lifecycle is constructed early so the setup-failure fast paths below
+  // can attach + close it for partial-session reaping (abort + dispose). It
+  // is also used by the normal run for the timer / abort / subscription
+  // cleanup at run end. A fresh WorkerRunLifecycle with an unsignaled
+  // AbortController is sufficient here; the per-run runController is wired
+  // in the normal-flow block below.
+  const lifecycle = new WorkerRunLifecycle(state, runtime, new AbortController().signal);
+
+  // Setup-failure fast path. If delegateAgent caught a non-BudgetExhaustedError
+  // (e.g. session.subscribe threw during installBudgetEventHooks wiring), the
+  // session may be partial. Emit the terminal telemetry + reap the partial
+  // session, then return without touching runtime.status="running" (which
+  // would clobber the "error" status we set in the catch). The setup-failure
+  // test in tests/dispatch-usage.test.ts asserts exitCode=1, aborted=1,
+  // disposed=1, terminal telemetry emitted — all land on this path.
+  if (!delegateResult) {
+    runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : 0;
+    const exitCode = 1;
+    const output = errorMessage || "[no output]";
+    runtime.lastWork = output.split("\n").filter((line) => line.trim()).pop() || runtime.status;
+    await emitDelegationEnd({
+      state, runtime, caller, task, ctx, output, errorMessage, exitCode,
+      streamState: makeDispatchStreamState(), sdkCounts: undefined,
+      tokenBudgetScope: effectiveWorkerGovernance(state, runtime).tokenBudgetScope ?? "all",
+    });
+    return { output, exitCode, elapsed: runtime.elapsedMs };
+  }
+  const partialSession: any = (() => {
+    const s = delegateResult.session;
+    return typeof s.prompt !== "function" ? s : null;
+  })();
+  if (partialSession) {
+    // Partial session was recovered via the skip wire. Attach to lifecycle so
+    // abort/dispose are invoked via lifecycle.close, then jump to emitDelegationEnd.
+    lifecycle.attachSession(partialSession);
+    runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : 0;
+    const exitCode = 1;
+    const output = errorMessage || "[no output]";
+    runtime.lastWork = output.split("\n").filter((line) => line.trim()).pop() || runtime.status;
+    await emitDelegationEnd({
+      state, runtime, caller, task, ctx, output, errorMessage, exitCode,
+      streamState: makeDispatchStreamState(), sdkCounts: undefined,
+      tokenBudgetScope: effectiveWorkerGovernance(state, runtime).tokenBudgetScope ?? "all",
+    });
+    // lifecycle.close reaps the partial session via abort + dispose. The
+    // slot was already released in the catch; releaseWorkerSlot's Math.max
+    // guard makes the second release a no-op.
+    await lifecycle.close(true);
+    return { output, exitCode, elapsed: runtime.elapsedMs };
+  }
+
   const resolvedModelKey = modelKey(resolvedModel, model);
 
   runtime.status = "running";
@@ -334,7 +490,8 @@ export async function dispatchAgent(
     runController.abort(new Error(`Worker timeout after ${governance.timeoutMs}ms`));
   }, governance.timeoutMs);
   timeout?.unref?.();
-  const lifecycle = new WorkerRunLifecycle(state, runtime, runController.signal);
+  // lifecycle is constructed earlier (above the delegateAgent call) so the
+  // setup-failure fast paths can attach + close it for partial-session reaping.
   // TOK/S baselines (J8/Decision 4): lifetime token counts at run start so the UI
   // divides the *per-run output* delta by *per-run* elapsedMs — not lifetime
   // tokens by per-run elapsed.
@@ -348,50 +505,27 @@ export async function dispatchAgent(
   runtime.runStartCostUsd = runtime.costUsd;
 
   const streamState = makeDispatchStreamState();
-  let session: any;
-  let abortedByParent = false;
-  let errorMessage: string | undefined;
-  let sdkCounts: { toolCalls?: number; toolResults?: number; userMessages?: number; assistantMessages?: number } | undefined;
-
-  try {
-  const toolNames = tools.split(",").map((t) => t.trim()).filter(Boolean);
-  // Type-scoped tools (e.g. submit_review_verdict) are granted by agent type,
-  // not the tools list, so keep them even when the agent does not enumerate
-  // them. buildHiveTools only emits them for the eligible type.
-  const hiveTools = buildHiveTools(state, runtime.config.name).filter((t) => toolNames.includes(t.name) || TYPE_SCOPED_TOOL_NAMES.has(t.name));
-  // The SDK treats `tools` as authoritative for the function-definitions
-  // block — a customTool whose name isn't in `tools` is silently dropped from
-  // the model's view, even though its implementation is in customTools.
-  // Without this union, a type-scoped tool the agent didn't enumerate (e.g.
-  // submit_review_verdict on a reviewer whose frontmatter only lists read/grep/
-  // find/ls/bash/team_conversation) never reaches the function-definitions
-  // block. The agent's prompt claims the tool is auto-injected; this is the
-  // half of that contract that lived only in the comment until now.
-  const allToolNames = dispatchToolNames(toolNames, hiveTools);
-  const skillPaths = resolveWorkerSkillPaths(ctx.cwd, runtime.config.skills as unknown[]);
-
-  const sessionManager = SessionManager.open(runtime.sessionFile);
-
-  // createAgentSession only calls reload() when it creates its own resource
-  // loader (sdk.js). When a loader is supplied by the caller, the SDK skips
-  // reload, leaving extensionsResult empty (constructor default). Without
-  // reload the extensionFactories never run, runner.hasHandlers("tool_call")
-  // is false, beforeToolCall short-circuits, and domain enforcement is silently
-  // bypassed for every worker tool call. Call reload() here so the factory
-  // registers the tool_call handler before the session starts.
-  const workerLoader = workerResourceLoader(state, ctx.cwd, runtime.config.name, skillPaths);
-  await workerLoader.reload();
-
-  const created = await createSession({
-    cwd: ctx.cwd,
-    model: resolvedModel,
-    thinkingLevel: thinking as any,
-    tools: allToolNames,
-    customTools: hiveTools,
-    sessionManager,
-    resourceLoader: workerLoader,
-  });
-  session = created.session;
+  // Setup-failure fast path. If delegateResult is undefined (no partial
+  // session to reap), emit the terminal telemetry and return immediately.
+  if (!delegateResult) {
+    runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : 0;
+    const exitCode = 1;
+    const output = errorMessage || "[no output]";
+    runtime.lastWork = output.split("\n").filter((line) => line.trim()).pop() || runtime.status;
+    await emitDelegationEnd({
+      state, runtime, caller, task, ctx, output, errorMessage, exitCode,
+      streamState, sdkCounts: undefined,
+      tokenBudgetScope: effectiveWorkerGovernance(state, runtime).tokenBudgetScope ?? "all",
+    });
+    return { output, exitCode, elapsed: runtime.elapsedMs };
+  }
+  // delegateAgent has already opened the session and installed the budget
+  // event hooks; the dispatcher just threads it through the rest of the
+  // run-lifecycle orchestration (abort wiring, telemetry subscribe, prompt,
+  // session-stats overwrite, delegation_end emit).
+  const session: any = delegateResult.session;
+  // Always attach the session to the lifecycle (even partial sessions)
+  // so the cleanup tail (lifecycle.close) reaps abort + dispose on it.
   lifecycle.attachSession(session);
 
   const abortWorker = (): void => {
@@ -559,16 +693,17 @@ export async function dispatchAgent(
     }
   } catch { /* keep incremental values if stats is unavailable */ }
 
-  } catch (error: any) {
-    errorMessage = errorMessage || error?.message || String(error);
-  } finally {
-    streamState.toolStartedAt.clear();
-    if (timeout) clearTimeout(timeout);
-    abortSignal?.removeEventListener("abort", abortFromParent);
-    await lifecycle.close(Boolean(errorMessage));
-    runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : runtime.elapsedMs;
-    runtime.status = errorMessage ? "error" : "done";
-  }
+  // Session-shutdown cleanup. The original code wrapped this in an outer
+  // try/finally around the createSession block (since removed). The cleanup
+  // itself stays because it clears the timer, removes the abort listener,
+  // closes the lifecycle, and sets the final runtime status — all of which
+  // run regardless of whether the prompt() or stats() blocks above throw.
+  streamState.toolStartedAt.clear();
+  if (timeout) clearTimeout(timeout);
+  abortSignal?.removeEventListener("abort", abortFromParent);
+  await lifecycle.close(Boolean(errorMessage));
+  runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : runtime.elapsedMs;
+  runtime.status = errorMessage ? "error" : "done";
   const exitCode = errorMessage ? 1 : 0;
 
   const output = streamState.chunks.join("").trim() || streamState.streamedSnapshot.trim() || errorMessage || "[no output]";
