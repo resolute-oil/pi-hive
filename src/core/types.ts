@@ -195,6 +195,17 @@ export interface HiveSettings {
   // hidden default. queueSize only activates fair waiting when maxParallel is hit.
   maxParallel?: number;
   queueSize?: number;
+  // The canonical §2.10 nested shape. Typed in core/schema.ts via typebox
+  // (`BudgetsConfigSchema`) and resolved by `resolveBudgetsConfig` so the
+  // `resource:` discriminator is always set. `strategies` is the C5 conditional
+  // block (Wave 3); absent means fall back to the legacy default behavior.
+  budgets?: BudgetsConfig;
+  // Legacy flat keys. Kept as a fallback path for users who haven't migrated
+  // from the pre-v2 config (plan §2.10 / G-16 hard-cutover targets). The
+  // resolver prefers `budgets` when present and falls back to these only when
+  // `budgets` is undefined. Wave 5A's legacy cleanup will drop these fields
+  // entirely; for the blocker fix we add the new path without breaking
+  // existing configs.
   workerBudgets?: WorkerGovernance;
   teamBudgets?: TeamBudgets;
   telemetry?: TelemetrySettings;

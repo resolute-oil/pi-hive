@@ -227,6 +227,15 @@ export function loadConfig(cwd: string): HiveConfig {
       defaultTools: settings.defaultTools ?? "read, grep, find, ls",
       maxParallel: settings.maxParallel,
       queueSize: settings.queueSize,
+      // Canonical §2.10 nested budgets. `parseYamlLite` returns this verbatim
+      // from YAML; resolveBudgetsConfig (slice 7) is the typebox validator
+      // that ensures `resource:` is present on every cap and window values
+      // match the tier allow-list. Validation is invoked lazily by
+      // resolveWorkerBudgetPolicy on first read — surfacing invalid configs
+      // at the runtime boundary instead of config-load keeps the strict
+      // error message co-located with the offending field.
+      budgets: settings.budgets,
+      // Legacy flat-shape fallback (Wave 5A cleanup drops these).
       workerBudgets: settings.workerBudgets,
       teamBudgets: settings.teamBudgets,
       secretPaths: Array.isArray(settings.secretPaths) ? settings.secretPaths.map((entry: unknown) => String(entry).trim()).filter(Boolean) : [],
