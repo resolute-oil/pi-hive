@@ -15,6 +15,41 @@ test("BudgetLedger is exported as a class", () => {
   assert.equal(BudgetLedger.name, "BudgetLedger", "BudgetLedger constructor must retain its name");
 });
 
+// ── Slice 2 — BudgetPolicy pure functions ───────────────────────────────────
+
+import * as policy from "../src/engine/budget/policy.ts";
+
+test("BudgetPolicy exports the six pure functions with pinned arities", () => {
+  assert.equal(typeof policy.checkBudgetPolicy, "function", "checkBudgetPolicy must be exported");
+  assert.equal(typeof policy.workerConsumedTokens, "function", "workerConsumedTokens must be exported");
+  assert.equal(typeof policy.workerConsumedCost, "function", "workerConsumedCost must be exported");
+  assert.equal(typeof policy.teamUsage, "function", "teamUsage must be exported");
+  assert.equal(typeof policy.ratioRemaining, "function", "ratioRemaining must be exported");
+  assert.equal(typeof policy.crossedThreshold, "function", "crossedThreshold must be exported");
+  // Arities pin the signature so Wave 1 cannot drop parameters.
+  assert.equal(policy.checkBudgetPolicy.length, 3, "checkBudgetPolicy takes (ledger, policy, branch)");
+  assert.equal(policy.workerConsumedTokens.length, 2, "workerConsumedTokens takes (session, scope)");
+  assert.equal(policy.workerConsumedCost.length, 1, "workerConsumedCost takes (session)");
+  assert.equal(policy.teamUsage.length, 1, "teamUsage takes (branch)");
+  assert.equal(policy.ratioRemaining.length, 2, "ratioRemaining takes (used, cap)");
+  assert.equal(policy.crossedThreshold.length, 2, "crossedThreshold takes (remaining, threshold)");
+});
+
+test("BudgetPolicy stubs throw not implemented when called", () => {
+  const fakeLedger = {} as never;
+  const fakePolicy = {} as never;
+  const fakeBranch: never[] = [];
+  const fakeSession = {} as never;
+  const fakeScope: never[] = [];
+
+  assert.throws(() => policy.checkBudgetPolicy(fakeLedger, fakePolicy, fakeBranch), /not implemented/);
+  assert.throws(() => policy.workerConsumedTokens(fakeSession, fakeScope), /not implemented/);
+  assert.throws(() => policy.workerConsumedCost(fakeSession), /not implemented/);
+  assert.throws(() => policy.teamUsage(fakeBranch), /not implemented/);
+  assert.throws(() => policy.ratioRemaining(0, 0), /not implemented/);
+  assert.throws(() => policy.crossedThreshold(0, 0), /not implemented/);
+});
+
 test("BudgetLedger.restore is a static factory returning a Promise<BudgetLedger>", () => {
   assert.equal(typeof BudgetLedger.restore, "function", "BudgetLedger.restore must be a static method");
   // The signature must accept (sessionManager, agentName, policy, signal). We
