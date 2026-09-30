@@ -273,10 +273,15 @@ export function validateBudgetsConfig(value: unknown): asserts value is BudgetsC
   // the plan §2.13 examples — inject the discriminator from the parent
   // nesting position BEFORE typebox runs so the validator accepts both
   // forms without losing the discriminated-union contract end-to-end.
-  // The injection mutates the input object in place; downstream callers
-  // (`resolveBudgetsConfig` + the resolver) read the same shape, so the
-  // mutation is intentional and documented.
-  injectResourceDiscriminators(value as Record<string, unknown>);
+  // injectResourceDiscriminators returns a new (post-injection) object;
+  // we apply its per-tier branches back onto `value` so the assertion
+  // signature still narrows `value` to BudgetsConfig (Block 4 contract:
+  // downstream consumers — resolveBudgetsConfig, the resolver — read
+  // `resource:` on every cap). The mutation is explicit here at the
+  // validator boundary, not hidden inside the helper.
+  const injected = injectResourceDiscriminators(value as Record<string, unknown>);
+  (value as Record<string, unknown>).perWorker = injected.perWorker;
+  (value as Record<string, unknown>).perTeam = injected.perTeam;
   const errors = Value.Errors(BudgetsConfigSchema, value);
   if (errors.length > 0) {
     // Surface the most specific error (skip root-level "missing required
@@ -383,26 +388,32 @@ export function resolveBudgetsConfig(config: BudgetsConfig): BudgetsConfig {
 // disambiguates and `resolveBudgetsConfig` injects the literal). A wrong
 // explicit value is almost always a copy-paste bug and should fail at config
 // load rather than silently mis-budget.
-function injectResourceDiscriminators(value: Record<string, unknown>): void {
+function injectResourceDiscriminators(value: Record<string, unknown>): Record<string, unknown> {
   // Walk perWorker.* and perTeam.* and inject `resource:` from the parent
-  // nesting key when the user omitted it. Mutates in place so typebox
-  // sees a fully-formed shape (Block 4: `resource:` is now REQUIRED on
-  // each schema variant).
-  const walkTier = (tier: "perWorker" | "perTeam"): void => {
+  // nesting key when the user omitted it. Returns a new object instead of
+  // mutating `value` in place — pure functional style matches
+  // resolveBudgetsConfig and avoids surprising callers that pass a
+  // deep-frozen or shared config (the prior in-place mutation was
+  // documented but invisible to the type system). Typebox needs the
+  // post-injection shape; callers MUST use the return value.
+  const walkTier = (tier: "perWorker" | "perTeam"): Record<string, unknown> | undefined => {
     const block = value[tier] as Record<string, unknown> | undefined;
-    if (!block || typeof block !== "object") return;
+    if (!block || typeof block !== "object") return block;
+    const next: Record<string, unknown> = { ...block };
     for (const key of ["tokens", "costUsd", "runs", "depth"] as const) {
       const cap = block[key] as Record<string, unknown> | undefined;
       // perTeam has no `depth` field; skip silently.
       if (key === "depth" && tier === "perTeam") continue;
       if (!cap || typeof cap !== "object") continue;
-      if (cap.resource === undefined) {
-        cap.resource = key;
-      }
+      next[key] = cap.resource === undefined ? { ...cap, resource: key } : cap;
     }
+    return next;
   };
-  walkTier("perWorker");
-  walkTier("perTeam");
+  return {
+    ...value,
+    perWorker: walkTier("perWorker"),
+    perTeam: walkTier("perTeam"),
+  };
 }
 
 function enforceResourceDiscriminator(config: BudgetsConfig): void {
