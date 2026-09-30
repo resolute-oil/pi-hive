@@ -192,7 +192,7 @@ test("operator command signatures match the §2.8 contract", () => {
     tearDownAllWorkers: /_?reason/,
   };
   for (const [name, pattern] of Object.entries(signatures)) {
-    const fn = (workerTools as Record<string, Function>)[name];
+    const fn = (workerTools as Record<string, (...args: unknown[]) => unknown>)[name];
     const text = fn.toString();
     assert.ok(pattern.test(text), `${name} signature must contain ${pattern}; got: ${text}`);
   }
@@ -205,7 +205,7 @@ test("cooperative tool signatures match the §2.8 contract", () => {
     request_snapshot: /_?label.*_?signal/,
   };
   for (const [name, pattern] of Object.entries(signatures)) {
-    const fn = (workerTools as Record<string, Function>)[name];
+    const fn = (workerTools as Record<string, (...args: unknown[]) => unknown>)[name];
     const text = fn.toString();
     assert.ok(pattern.test(text), `${name} signature must contain ${pattern}; got: ${text}`);
   }
@@ -468,10 +468,11 @@ test("BudgetLedger instance methods exist with the expected signatures", () => {
   assert.equal(typeof proto.recordCompaction, "function", "recordCompaction must exist on the prototype");
   assert.equal(typeof proto.snapshot, "function", "snapshot must exist on the prototype");
   // Each method's arity pins its contract — Wave 1 cannot drop parameters.
-  assert.equal((proto.recordEvent as Function).length, 3, "recordEvent must take 3 parameters (type, cumulative, signal)");
-  assert.equal((proto.maybeSnapshot as Function).length, 3, "maybeSnapshot must take 3 parameters (cumulative, policy, signal)");
-  assert.equal((proto.recordCompaction as Function).length, 2, "recordCompaction must take 2 parameters (savings, signal)");
-  assert.equal((proto.snapshot as Function).length, 4, "snapshot must take 4 parameters (stats, policy, marker, signal)");
+  type AnyFn = (...args: unknown[]) => unknown;
+  assert.equal((proto.recordEvent as AnyFn).length, 3, "recordEvent must take 3 parameters (type, cumulative, signal)");
+  assert.equal((proto.maybeSnapshot as AnyFn).length, 3, "maybeSnapshot must take 3 parameters (cumulative, policy, signal)");
+  assert.equal((proto.recordCompaction as AnyFn).length, 2, "recordCompaction must take 2 parameters (savings, signal)");
+  assert.equal((proto.snapshot as AnyFn).length, 4, "snapshot must take 4 parameters (stats, policy, marker, signal)");
 });
 
 test("BudgetLedger declares the entries and cumulative accessors as readonly", () => {
