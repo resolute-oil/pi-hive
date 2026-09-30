@@ -622,6 +622,10 @@ function materializeTypedEvent(event: HiveTelemetryEvent) {
     case "distill_end":
     case "budget_warning":
     case "budget_exhausted":
+    // Wave 0 contract stub — the budget_ledger event carries the full
+    // BudgetLedgerEntry payload; materialization (per-worker timeline rows)
+    // lands in Wave 3 when the dashboard hard-cuts over to the new shape.
+    case "budget_ledger": // eslint-disable-line no-fallthrough
     case "queue_update":
     case "review_verdict":
     case "plan_approval":

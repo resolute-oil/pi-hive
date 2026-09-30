@@ -1,6 +1,7 @@
 import type { AgentConfig, HiveConfig } from "./types";
 import { AGENT_TYPES, PLAN_STAGES } from "./normalize";
 import { agentSlug } from "./agent-tree";
+import { Type, type Static } from "typebox";
 
 function assertObject(value: unknown, label: string): asserts value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
@@ -156,3 +157,78 @@ export function validateHiveConfigShape(config: HiveConfig): void {
     }
   }
 }
+
+// ── Wave 0 contract stubs — Slice 7 typebox schemas ────────────────────────
+//
+// These coexist with the hand-written validators above. Wave 1 will add a
+// typebox-driven validator that consumes BudgetsConfigSchema at config-load
+// time and rejects invalid combinations (e.g., costUsd.window: "per-day")
+// with structured errors. The hand-written validators remain in place until
+// Wave 9's legacy cleanup removes them.
+
+const TokensCap = Type.Object({
+  resource: Type.Literal("tokens"),
+  cap: Type.Number({ minimum: 0 }),
+  window: Type.Optional(Type.Union([
+    Type.Literal("per-session"),
+    Type.Literal("per-run"),
+    Type.Literal("per-day"),
+    Type.Literal("per-team-lifetime"),
+  ])),
+  include: Type.Optional(Type.Array(Type.Union([
+    Type.Literal("input"),
+    Type.Literal("output"),
+    Type.Literal("cacheRead"),
+    Type.Literal("cacheWrite"),
+    Type.Literal("reasoning"),
+  ]))),
+});
+const CostUsdCap = Type.Object({
+  resource: Type.Literal("costUsd"),
+  cap: Type.Number({ minimum: 0 }),
+  window: Type.Optional(Type.Union([
+    Type.Literal("per-session"),
+    Type.Literal("per-team-lifetime"),
+  ])),
+});
+const RunsCap = Type.Object({
+  resource: Type.Literal("runs"),
+  cap: Type.Number({ minimum: 0 }),
+});
+const DepthCap = Type.Object({
+  resource: Type.Literal("depth"),
+  cap: Type.Number({ minimum: 0 }),
+});
+
+export const BudgetCap = Type.Union([TokensCap, CostUsdCap, RunsCap, DepthCap]);
+export type BudgetCap = Static<typeof BudgetCap>;
+
+export const BudgetsConfigSchema = Type.Object({
+  defaultsEnabled: Type.Optional(Type.Boolean()),
+  perWorker: Type.Object({
+    tokens: Type.Optional(TokensCap),
+    costUsd: Type.Optional(CostUsdCap),
+    runs: Type.Optional(RunsCap),
+    depth: Type.Optional(DepthCap),
+  }),
+  perTeam: Type.Object({
+    tokens: Type.Optional(TokensCap),
+    costUsd: Type.Optional(CostUsdCap),
+    runs: Type.Optional(RunsCap),
+  }),
+  strategies: Type.Optional(Type.Object({
+    onApproachingLimit: Type.Object({
+      action: Type.Union([Type.Literal("wrap-up"), Type.Literal("compact"), Type.Literal("none")]),
+      threshold: Type.Number({ minimum: 0, maximum: 1 }),
+      hint: Type.String(),
+    }),
+    onExhaustion: Type.Object({
+      action: Type.Union([Type.Literal("compact"), Type.Literal("abort"), Type.Literal("none")]),
+      customInstructions: Type.Optional(Type.String()),
+    }),
+    summary: Type.Object({
+      maxTokens: Type.Number({ minimum: 0 }),
+    }),
+  })),
+});
+export type BudgetsConfig = Static<typeof BudgetsConfigSchema>;
