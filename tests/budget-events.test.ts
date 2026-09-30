@@ -1,7 +1,11 @@
 // Wave 2 F2 — installBudgetEventHooks unit tests
 //
-// Covers T2.1 (12 tests) and T2.4 (2 tests) per the F2 brief:
-// https://...wave-2-f2-spine.md.
+// Covers T2.1 (12 tests) per the F2 brief.
+// T2.4 (2 tests — compaction_end.aborted + compaction_end.errorMessage)
+// lives in tests/budget-worker-tools.test.ts; relocated there because the
+// assertions exercise the same wiring (T2.4 is the handler's
+// compaction_end branch, exercised through the same session-publish seam
+// used by T2.1's compaction_end happy-path test).
 //
 // The handler subscribes a single listener to AgentSession events and routes
 // three event kinds (message_end, compaction_end, agent_settled) into the
