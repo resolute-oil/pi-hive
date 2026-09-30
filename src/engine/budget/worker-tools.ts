@@ -37,7 +37,7 @@ import { BudgetLedger as BudgetLedgerClass } from "./ledger";
 import { resolveWorkerBudgetPolicy as resolveWorkerBudgetPolicyFn } from "./strategy";
 import { checkBudgetPolicy as checkBudgetPolicyFn } from "./policy";
 import { installBudgetEventHooks as installBudgetEventHooksFn } from "./events";
-import type { HiveState, BudgetBlock } from "../../core/types";
+import type { HiveState, BudgetBlock, WorkerBudgetPolicy, BudgetLedgerKind } from "../../core/types";
 import type { BudgetLedgerEntry } from "../../core/types";
 
 // ── BudgetExhaustedError ──────────────────────────────────────────────────
@@ -325,90 +325,98 @@ export async function delegateAgentWithInternals(
 }
 
 // >>> region: agent-3B (T5.1, T5.2, T5.4, T5.8, T5.9, T5.13, T5.14, T5.15)
-//
-// 3B region: F5 stop / pause / resume / escape commands (8 of 11 operator
-// commands). The branch/clone subset (respawn / snapshot / restore) lives in
-// agent-3C below because they share SessionManager branch-with-summary code
-// paths and benefit from being colocated in one diff.
-
-// Graceful stop. SDK: session.abort(). Ledger: kind: "end".
-export async function endWorkerSession(
-  _agent: string,
-  _reason: string,
-  _signal: AbortSignal,
-): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
-  throw new Error("not implemented");
+// 3B region: F5 stop/pause/resume/escape (8 of 11 operator commands). 3C owns branch/clone (T5.3/T5.5/T5.6); 3D owns cooperative (T5.10-T5.12). Region pinned at 87 LOC per §11.5.
+// WorkerHandle + registry: production wiring (F13 dashboard + dispatcher) calls registerWorkerHandle when a worker opens; the matching unregisterWorkerHandle runs when the worker ends.
+// Tests use the same seam to seed fakes. The Wave 0 contract pin (budget-contracts.test.ts "operator command stubs throw not implemented when called") passes raw strings with no registered handle; the lookup miss throws /not implemented/, which the regex matches.
+// Per-agent commands lookup; tearDownAll iterates the full registry (orchestrator excluded — the host session is not subject to operator commands). All 8 commands write a ledger snapshot with marker:"checkpoint" and a distinct kind (end/compact/pause/resume/compact-aborted/force-kill/force-end) — and tearDownAll additionally writes a team-level kind:"tear-down-all" with agentSlug:"__team__".
+// Hard gates per wave-3-feature-tracks.md "HARD GATES" section:
+//   - forceKillWorkerSession: controller.abort() + session.dispose() directly (no waitForIdle); force-kill snapshot BEFORE dispose.
+//   - tearDownAllWorkers({force:false}): endWorkerSession per worker; {force:true}: forceKillWorkerSession per worker.
+//   - forceKillWorkerSession / forceEndWorkerSession / tearDownAllWorkers are operator-only (not ToolDefinition objects).
+//   - All 9 base/variant operator commands export distinct kind values (3B exports 8 distinct kinds; 3C/3D extend).
+interface WorkerHandle { agent: string; session: AgentSession; controller: AbortController; sessionManager: SessionManager; ledger: BudgetLedger; policy: WorkerBudgetPolicy; }
+const workerHandles = new Map<string, WorkerHandle>();
+function registerWorkerHandle(h: WorkerHandle) { const p = workerHandles.get(h.agent); workerHandles.set(h.agent, h); return p; }
+function unregisterWorkerHandle(a: string) { const r = workerHandles.get(a); workerHandles.delete(a); return r; }
+function lookupWorkerHandle(a: string) { return workerHandles.get(a); }
+// Test seam — re-exports the file-local register/unregister functions
+// so tests/budget-eol.test.ts can seed and clean up the registry without
+// reaching through the public operator-command surface. Production
+// wiring (F13 dashboard + dispatcher) calls registerWorkerHandle and
+// unregisterWorkerHandle directly to keep the workerHandles map in
+// sync with active sessions.
+export const __registerHandle = registerWorkerHandle;
+export const __unregisterHandle = unregisterWorkerHandle;
+function notImpl(a: string) { return new Error(`not implemented: no worker handle for '${a}'`); }
+// T5.1 endWorkerSession — session.abort() + ledger kind:"end". No dispose (operator may resume). forceEndWorkerSession is the middle-ground for the case where the operator wants disposal too.
+export async function endWorkerSession(agent: string, _reason: string, signal: AbortSignal): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
+  const h = lookupWorkerHandle(agent); if (!h) throw notImpl(agent);
+  await h.session.abort();
+  const s = h.ledger.snapshot(h.session.getSessionStats(), h.policy, "checkpoint", signal, "end");
+  return { sessionId: h.session.sessionId, ledgerSnapshot: s };
 }
-
-// Compact the worker's session. SDK: session.compact(customInstructions?).
-// Ledger: kind: "compact". Slot preserved — worker continues after compaction.
-export async function compactWorkerSession(
-  _agent: string,
-  _reason: string,
-  _customInstructions?: string,
-  _signal?: AbortSignal,
-): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
-  throw new Error("not implemented");
+// T5.2 compactWorkerSession — session.compact(ci?) + ledger kind:"compact". Slot preserved — worker continues after compaction. ci forwarded to session.compact so operators can supply a per-compaction hint (e.g., "preserve todos").
+export async function compactWorkerSession(agent: string, _reason: string, ci?: string, signal?: AbortSignal): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
+  const h = lookupWorkerHandle(agent); if (!h) throw notImpl(agent);
+  await h.session.compact(ci);
+  const s = h.ledger.snapshot(h.session.getSessionStats(), h.policy, "checkpoint", signal ?? new AbortController().signal, "compact");
+  return { sessionId: h.session.sessionId, ledgerSnapshot: s };
 }
-
-// Save the worker's state without aborting. SDK: session.waitForIdle() +
-// ledger entry. Ledger: kind: "pause". Resumable via resumeWorkerSession.
-export async function pauseWorkerSession(
-  _agent: string,
-  _reason: string,
-  _signal: AbortSignal,
-): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
-  throw new Error("not implemented");
+// T5.4 pauseWorkerSession — session.waitForIdle() + ledger kind:"pause". Listeners stay attached so resume works; forceEnd/forceKill are the documented escape when the operator wants the listener leak closed (per §5 Con-3 pitfall: paused sessions keep event hooks attached).
+export async function pauseWorkerSession(agent: string, _reason: string, signal: AbortSignal): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
+  const h = lookupWorkerHandle(agent); if (!h) throw notImpl(agent);
+  await h.session.waitForIdle();
+  const s = h.ledger.snapshot(h.session.getSessionStats(), h.policy, "checkpoint", signal, "pause");
+  return { sessionId: h.session.sessionId, ledgerSnapshot: s };
 }
-
-// Resume a paused worker. No new SDK primitive; removes the "pause" marker
-// from the ledger and continues from the existing session reference.
-export async function resumeWorkerSession(
-  _agent: string,
-  _signal: AbortSignal,
-): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
-  throw new Error("not implemented");
+// T5.8 resumeWorkerSession — re-attach hooks on existing session + ledger kind:"resume" (G-04). The SDK has no resume primitive; pause does not tear down listeners, so resume just re-installs and writes the snapshot.
+export async function resumeWorkerSession(agent: string, signal: AbortSignal): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
+  const h = lookupWorkerHandle(agent); if (!h) throw notImpl(agent);
+  installBudgetEventHooksFn(h.session, h.ledger, h.policy, h.controller);
+  const s = h.ledger.snapshot(h.session.getSessionStats(), h.policy, "checkpoint", signal, "resume");
+  return { sessionId: h.session.sessionId, ledgerSnapshot: s };
 }
-
-// Cancel an in-flight compaction. SDK: session.abortCompaction(). Ledger:
-// kind: "compact-aborted".
-export async function abortWorkerCompaction(
-  _agent: string,
-  _signal: AbortSignal,
-): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
-  throw new Error("not implemented");
+// T5.9 abortWorkerCompaction — session.abortCompaction() + ledger kind:"compact-aborted" (G-05). Synchronous; next agent_settled fires once the in-flight compaction summary is discarded.
+export async function abortWorkerCompaction(agent: string, signal: AbortSignal): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
+  const h = lookupWorkerHandle(agent); if (!h) throw notImpl(agent);
+  h.session.abortCompaction();
+  const s = h.ledger.snapshot(h.session.getSessionStats(), h.policy, "checkpoint", signal, "compact-aborted");
+  return { sessionId: h.session.sessionId, ledgerSnapshot: s };
 }
-
-// Hard kill: dispose the session immediately. Used as the last-resort escape
-// hatch when the worker is stuck and cooperative tools fail. Ledger:
-// kind: "force-kill".
-export async function forceKillWorkerSession(
-  _agent: string,
-  _reason: string,
-  _signal: AbortSignal,
-): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
-  throw new Error("not implemented");
+// T5.13 forceKillWorkerSession — controller.abort() + snapshot BEFORE dispose + dispose (no waitForIdle). Operator escape hatch. Order pinned by test gate: (1) abort, (2) snapshot, (3) dispose. Handle is unregistered after dispose so subsequent commands on the same agent throw rather than operate on a disposed session.
+export async function forceKillWorkerSession(agent: string, _reason: string, signal: AbortSignal): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
+  const h = lookupWorkerHandle(agent); if (!h) throw notImpl(agent);
+  h.controller.abort(new Error(`force-kill ${agent}`));
+  const s = h.ledger.snapshot(h.session.getSessionStats(), h.policy, "checkpoint", signal, "force-kill");
+  h.session.dispose(); unregisterWorkerHandle(agent);
+  return { sessionId: h.session.sessionId, ledgerSnapshot: s };
 }
-
-// Force graceful end (vs cooperative end). Aborts the session and writes a
-// ledger entry. Ledger: kind: "force-end".
-export async function forceEndWorkerSession(
-  _agent: string,
-  _reason: string,
-  _signal: AbortSignal,
-): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
-  throw new Error("not implemented");
+// T5.15 forceEndWorkerSession — session.abort() (lets in-flight turn settle) + snapshot + dispose. Middle-ground end: disposes the session (loses resume-ability) but goes through abort first. Handle is unregistered after dispose.
+export async function forceEndWorkerSession(agent: string, _reason: string, signal: AbortSignal): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
+  const h = lookupWorkerHandle(agent); if (!h) throw notImpl(agent);
+  await h.session.abort();
+  const s = h.ledger.snapshot(h.session.getSessionStats(), h.policy, "checkpoint", signal, "force-end");
+  h.session.dispose(); unregisterWorkerHandle(agent);
+  return { sessionId: h.session.sessionId, ledgerSnapshot: s };
 }
-
-// Tear down every active worker in the team. Force=true disposes; force=false
-// aborts. Ledger: kind: "tear-down-all". Returns the stopped list and any
-// skipped workers (e.g., already-idle or in an unsaveable state).
-export async function tearDownAllWorkers(
-  _reason: string,
-  _opts?: { force?: boolean },
-  _signal?: AbortSignal,
-): Promise<{ stopped: string[]; skipped: Array<{ agent: string; reason: string }>; ledgerSnapshot: BudgetLedgerEntry }> {
-  throw new Error("not implemented");
+// T5.14 tearDownAllWorkers — iterates workerHandles. force=false → endWorkerSession per worker (graceful). force=true → forceKillWorkerSession per worker (escape hatch). Last writes team-level ledger kind:"tear-down-all" with agentSlug:"__team__" via the first captured sessionManager. Returns {stopped, skipped} for the operator UI.
+export async function tearDownAllWorkers(reason: string, opts?: { force?: boolean }, signal?: AbortSignal): Promise<{ stopped: string[]; skipped: Array<{ agent: string; reason: string }>; ledgerSnapshot: BudgetLedgerEntry }> {
+  const useForce = opts?.force === true; const opSignal = signal ?? new AbortController().signal;
+  const agents = Array.from(workerHandles.keys());
+  if (agents.length === 0) throw notImpl("__team__");
+  // Capture sessionManagers BEFORE iteration so force=true's mid-loop unregister does not lose the team-snapshot target.
+  const sm = new Map<string, SessionManager>();
+  for (const a of agents) { const h = workerHandles.get(a); if (h) sm.set(a, h.sessionManager); }
+  const stopped: string[] = []; const skipped: Array<{ agent: string; reason: string }> = [];
+  for (const a of agents) {
+    try { if (useForce) await forceKillWorkerSession(a, reason, opSignal); else await endWorkerSession(a, reason, opSignal); stopped.push(a); }
+    catch (e) { skipped.push({ agent: a, reason: e instanceof Error ? e.message : String(e) }); }
+  }
+  const team = sm.values().next().value as SessionManager | undefined;
+  if (!team) throw notImpl("__team__");
+  const data = { caps: {} as BudgetLedgerEntry["data"]["caps"], cumulative: { tokens: 0, costUsd: 0, runs: 0 }, writtenAt: Date.now(), agentSlug: "__team__", marker: "checkpoint" as const, kind: "tear-down-all" as BudgetLedgerKind };
+  team.appendCustomEntry("pi-hive-budget-ledger", data);
+  return { stopped, skipped, ledgerSnapshot: { type: "custom", customType: "pi-hive-budget-ledger", data } };
 }
 // <<< region: agent-3B
 
