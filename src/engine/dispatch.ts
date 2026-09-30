@@ -27,7 +27,8 @@ import { ARTIFACT_ORDER, type ArtifactId } from "../shared/openspec-artifacts";
 import { agentRoster, resolveRuntime } from "./agent-lookup";
 import { addHiveActivity } from "../ui/tui/activity";
 import { resolveConfiguredPath } from "../core/safe-path";
-import { acquireWorkerSlot, effectiveWorkerGovernance, releaseWorkerSlot } from "./governance";
+import { acquireWorkerSlot, releaseWorkerSlot } from "./worker-queue";
+import { effectiveWorkerGovernance } from "./budget/remaining";
 import { WorkerRunLifecycle } from "./worker-lifecycle";
 import { modelKey, resolveModel, type ResolvedModel } from "./model-resolution";
 import { delegateAgent as delegateAgentFn, BudgetExhaustedError, type DelegateAgentThinkingLevel } from "./budget/worker-tools";
@@ -477,6 +478,12 @@ export async function dispatchAgent(
   runtime.elapsedMs = 0;
   runtime.runCount++;
   runtime.startedAt = Date.now();
+  // timeoutMs is not modeled in WorkerBudgetPolicy (it's a per-agent
+  // concurrency setting, not a budget cap), so the policy resolver can't
+  // supply it — keep using the legacy merge shim for this field alone.
+  // Migrated tokenBudgetScope callers to resolveWorkerBudgetPolicy above
+  // (see tokenScopeFromPolicy); tokenBudgetScope is the only effectiveWorkerGovernance
+  // field represented in the policy shape.
   const governance = effectiveWorkerGovernance(state, runtime);
   const runController = new AbortController();
   let timedOut = false;

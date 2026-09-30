@@ -10,7 +10,7 @@ import { agentSummary, teamTopology } from "../core/topology";
 import { currentAgentName } from "./session";
 import { withCrossProcessFileLock } from "../core/file-lock";
 import { redactSensitive } from "../shared/privacy";
-import { budgetRemaining } from "./governance";
+import { budgetRemaining } from "./budget/remaining";
 
 export type HiveObsEventType = HiveTelemetryEventType;
 export type HiveObsEvent<P = JsonRecord> = HiveTelemetryEvent<P>;
