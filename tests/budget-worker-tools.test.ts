@@ -18,7 +18,7 @@ import type { ExtensionContext, AgentSession, SessionManager, SessionEntry } fro
 import type { BudgetLedger } from "../src/engine/budget/ledger.ts";
 import type { WorkerBudgetPolicy } from "../src/core/types.ts";
 import type { HiveState } from "../src/core/types.ts";
-import { delegateAgent, BudgetExhaustedError } from "../src/engine/budget/worker-tools.ts";
+import { delegateAgent, delegateAgentWithInternals, BudgetExhaustedError } from "../src/engine/budget/worker-tools.ts";
 
 // ── Test fixtures ─────────────────────────────────────────────────────────
 
@@ -105,7 +105,7 @@ test("delegateAgent throws BudgetExhaustedError when checkBudgetPolicy returns a
 
   await assert.rejects(
     () =>
-      delegateAgent(
+      delegateAgentWithInternals(
         state,
         "coder",
         "do the thing",
@@ -168,7 +168,7 @@ test("delegateAgent calls SessionManager.create() when opts.fresh === true", asy
   let createCalled = false;
   let continueRecentCalled = false;
 
-  const result = await delegateAgent(
+  const result = await delegateAgentWithInternals(
     state,
     "coder",
     "task",
@@ -212,7 +212,7 @@ test("delegateAgent calls SessionManager.continueRecent() when opts.fresh === fa
   let continueRecentCalled = false;
 
   // First pass: explicit fresh: false.
-  await delegateAgent(
+  await delegateAgentWithInternals(
     state,
     "coder",
     "task",
@@ -245,7 +245,7 @@ test("delegateAgent calls SessionManager.continueRecent() when opts.fresh === fa
   continueRecentCalled = false;
 
   // Second pass: opts is undefined entirely.
-  await delegateAgent(
+  await delegateAgentWithInternals(
     state,
     "coder",
     "task",
@@ -286,7 +286,7 @@ test("delegateAgent calls installBudgetEventHooks(session, ledger, policy, contr
   let installArgs: any = undefined;
   const order: string[] = [];
 
-  await delegateAgent(
+  await delegateAgentWithInternals(
     state,
     "coder",
     "task",
@@ -331,7 +331,7 @@ test("delegateAgent returns { sessionId, session, ledger, controller }", async (
   const ledger = makeFakeLedger();
   const session = makeFakeSession(sm);
 
-  const result = await delegateAgent(
+  const result = await delegateAgentWithInternals(
     state,
     "coder",
     "task",
@@ -389,7 +389,7 @@ test("delegateAgent's controller.signal is honored by appendCustomEntry calls in
   const controller = new AbortController();
   controller.abort(new Error("test abort"));
 
-  await delegateAgent(
+  await delegateAgentWithInternals(
     state,
     "coder",
     "task",
@@ -434,7 +434,7 @@ test("T2.3: depth at policy.worker.depth.cap + 1 throws BudgetExhaustedError wit
 
   await assert.rejects(
     () =>
-      delegateAgent(
+      delegateAgentWithInternals(
         state,
         "coder",
         "task",
@@ -477,7 +477,7 @@ test("T2.3: depth at policy.worker.depth.cap - 1 succeeds (no throw)", async () 
   const session = makeFakeSession(sm);
 
   // cap=2, currentDelegationDepth()=1, delegateAgent adds +1 → 2 == cap → NOT exceeded.
-  const result = await delegateAgent(
+  const result = await delegateAgentWithInternals(
     state,
     "coder",
     "task",
@@ -528,22 +528,22 @@ test("T2.3: depth count is re-read via depthFn on every call (post-reload depth 
 
   // First delegation: depth=0, +1 → 1 (under cap=2). OK.
   depthNow = 0;
-  await delegateAgent(state, "coder", "task", { fresh: false }, ctx, noop, { depthFn });
+  await delegateAgentWithInternals(state, "coder", "task", { fresh: false }, ctx, noop, { depthFn });
 
   // Second delegation: depth=1, +1 → 2 (== cap). OK (cap means strict >).
   depthNow = 1;
-  await delegateAgent(state, "coder", "task", { fresh: false }, ctx, noop, { depthFn });
+  await delegateAgentWithInternals(state, "coder", "task", { fresh: false }, ctx, noop, { depthFn });
 
   // Third delegation: depth=2, +1 → 3 (> cap). Throws.
   depthNow = 2;
   await assert.rejects(
-    () => delegateAgent(state, "coder", "task", { fresh: false }, ctx, noop, { depthFn }),
+    () => delegateAgentWithInternals(state, "coder", "task", { fresh: false }, ctx, noop, { depthFn }),
     (err: unknown) => err instanceof BudgetExhaustedError && (err as BudgetExhaustedError).resource === "depth",
   );
 
   // After /reload, depthNow resets to 0 — first post-reload delegation OK again.
   depthNow = 0;
-  const postReload = await delegateAgent(state, "coder", "task", { fresh: false }, ctx, noop, { depthFn });
+  const postReload = await delegateAgentWithInternals(state, "coder", "task", { fresh: false }, ctx, noop, { depthFn });
   assert.equal(postReload.sessionId, "fake-session-id", "post-reload delegation succeeds when depth resets");
 });
 
@@ -560,7 +560,7 @@ test("SessionManager.create().toAgentSession() and continueRecent().toAgentSessi
   let toAgentCalls = 0;
   const toAgentSession = () => { toAgentCalls += 1; return session; };
 
-  const resultFresh = await delegateAgent(
+  const resultFresh = await delegateAgentWithInternals(
     state, "coder", "task", { fresh: true }, ctx,
     {
       resolveWorkerBudgetPolicy: (() => noCapPolicy) as never,
@@ -573,7 +573,7 @@ test("SessionManager.create().toAgentSession() and continueRecent().toAgentSessi
   );
   assert.ok(resultFresh.session, "fresh path yields a session");
 
-  const resultResume = await delegateAgent(
+  const resultResume = await delegateAgentWithInternals(
     state, "coder", "task", { fresh: false }, ctx,
     {
       resolveWorkerBudgetPolicy: (() => noCapPolicy) as never,
@@ -602,7 +602,7 @@ test("BudgetExhaustedError propagates through dispatchAgent's caller (no silent 
 
   let caught: unknown;
   try {
-    await delegateAgent(
+    await delegateAgentWithInternals(
       state, "coder", "task", { fresh: false }, ctx,
       {
         resolveWorkerBudgetPolicy: (() => noCapPolicy) as never,
