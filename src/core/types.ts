@@ -416,14 +416,14 @@ export interface HiveState {
 // the global strategies default.
 export interface WorkerBudgetPolicy {
   worker: {
-    tokens?: { cap: number; window?: string; include?: IncludeKeys };
-    costUsd?: { cap: number; window?: string };
+    tokens?: { cap: number; window?: WindowKind; include?: IncludeKeys };
+    costUsd?: { cap: number; window?: WindowKind };
     runs?: { cap: number };
     depth?: { cap: number };
   };
   team: {
-    tokens?: { cap: number; window?: string; include?: IncludeKeys };
-    costUsd?: { cap: number; window?: string };
+    tokens?: { cap: number; window?: WindowKind; include?: IncludeKeys };
+    costUsd?: { cap: number; window?: WindowKind };
     runs?: { cap: number };
   };
   strategies?: Strategies;
@@ -461,13 +461,13 @@ export interface BudgetBlock {
 export type IncludeKey = "input" | "output" | "cacheRead" | "cacheWrite" | "reasoning";
 export type IncludeKeys = IncludeKey[];
 
-// Slice 3 — WorkerBudgetStrategy (the flat enum that the strategies: object
-// in §2.13/C5 projects to). Two values: default vs compact EOL behavior.
-export type WorkerBudgetStrategy = "default" | "compact";
+// Slice 7 — WindowKind + Strategies + per-tier config shapes. The full
+// structured-strategies shape lands here (C5 conditional — the type is
+// unconditionally available; runtime honors the user's strategies block when
+// present and falls back to the legacy "default" | "compact" strategy enum
+// otherwise).
+export type WindowKind = "per-session" | "per-run" | "per-day" | "per-team-lifetime";
 
-// Slice 3 — BudgetsConfig (the top-level config shape; full nested form
-// arrives in slice 7, but the discriminated-union reference is needed here).
-// Strategies is the slice 7 §2.13/C5 structured shape.
 export interface Strategies {
   onApproachingLimit: { action: "wrap-up" | "compact" | "none"; threshold: number; hint: string };
   onExhaustion: { action: "compact" | "abort" | "none"; customInstructions?: string };
@@ -480,3 +480,24 @@ export interface BudgetsConfig {
   perTeam: WorkerBudgetPolicy["team"];
   strategies?: Strategies;
 }
+
+// Per-agent and per-team config shapes for the typebox schema projection.
+// These mirror the worker/team sub-blocks of WorkerBudgetPolicy but are exposed
+// as standalone types so the schema can reference them without cycling.
+export interface WorkerBudgetConfig {
+  tokens?: { cap: number; window?: WindowKind; include?: IncludeKeys };
+  costUsd?: { cap: number; window?: WindowKind };
+  runs?: { cap: number };
+  depth?: { cap: number };
+}
+
+export interface TeamBudgetConfig {
+  tokens?: { cap: number; window?: WindowKind; include?: IncludeKeys };
+  costUsd?: { cap: number; window?: WindowKind };
+  runs?: { cap: number };
+}
+
+// Slice 3 — WorkerBudgetStrategy (the flat enum that the strategies: object
+// in §2.13/C5 projects to). Two values: default vs compact EOL behavior.
+// (Strategies / BudgetsConfig are declared in the slice 7 block above.)
+export type WorkerBudgetStrategy = "default" | "compact";

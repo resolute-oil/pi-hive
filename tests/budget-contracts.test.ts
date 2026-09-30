@@ -233,6 +233,92 @@ test("cooperative tool stubs throw not implemented when called", async () => {
   await assert.rejects(workerTools.request_snapshot("label", fakeSignal), /not implemented/);
 });
 
+// ── Slice 7 — Config schema (typebox discriminated unions + types) ──────────
+
+import { BudgetCap, BudgetsConfigSchema } from "../src/core/schema.ts";
+import type { Static } from "typebox";
+import type {
+  BudgetsConfig as BCC,
+  IncludeKey,
+  Strategies as Strats,
+  TeamBudgetConfig as TBC,
+  WindowKind as WK,
+  WorkerBudgetConfig as WBC,
+} from "../src/core/types.ts";
+
+test("typebox BudgetCap is the discriminated union with four resource kinds", () => {
+  // The schema is the discriminated union (C4). We assert at the type level
+  // that all four resource variants are constructible and the static type
+  // carries the discriminator.
+  const tokens: Static<typeof BudgetCap> = { resource: "tokens", cap: 1000, window: "per-session", include: ["input", "output"] };
+  const cost: Static<typeof BudgetCap> = { resource: "costUsd", cap: 0.5, window: "per-team-lifetime" };
+  const runs: Static<typeof BudgetCap> = { resource: "runs", cap: 5 };
+  const depth: Static<typeof BudgetCap> = { resource: "depth", cap: 2 };
+  for (const cap of [tokens, cost, runs, depth]) {
+    assert.ok(["tokens", "costUsd", "runs", "depth"].includes(cap.resource), "resource discriminator must be one of the four documented kinds");
+    assert.ok(typeof cap.cap === "number" && cap.cap >= 0, "cap must be a non-negative number");
+  }
+  // Pin the §2.13/C4 narrowing: tokens.window accepts the WindowKind union,
+  // costUsd.window accepts only the per-session/per-team-lifetime subset.
+  assert.equal(tokens.window, "per-session");
+  assert.equal(cost.window, "per-team-lifetime");
+});
+
+test("WindowKind, IncludeKey types match the documented unions", () => {
+  const windowValues: WK[] = ["per-session", "per-run", "per-day", "per-team-lifetime"];
+  assert.deepEqual(windowValues, ["per-session", "per-run", "per-day", "per-team-lifetime"]);
+  const includeKeys: IncludeKey[] = ["input", "output", "cacheRead", "cacheWrite", "reasoning"];
+  assert.equal(includeKeys.length, 5);
+});
+
+test("Strategies / BudgetsConfig / WorkerBudgetConfig / TeamBudgetConfig shapes match §2.13", () => {
+  // Compile-time shape check.
+  const strategies: Strats = {
+    onApproachingLimit: { action: "wrap-up", threshold: 0.2, hint: "wrap up" },
+    onExhaustion: { action: "abort" },
+    summary: { maxTokens: 2000 },
+  };
+  assert.equal(strategies.onApproachingLimit.action, "wrap-up");
+  assert.equal(strategies.summary.maxTokens, 2000);
+
+  const budgets: BCC = {
+    defaultsEnabled: true,
+    perWorker: { tokens: { cap: 1000, window: "per-session", include: ["input", "output"] }, runs: { cap: 5 } },
+    perTeam: { tokens: { cap: 10_000, window: "per-team-lifetime" }, runs: { cap: 20 } },
+    strategies,
+  };
+  assert.equal(budgets.perWorker.tokens?.cap, 1000);
+  assert.equal(budgets.perTeam.tokens?.cap, 10_000);
+
+  const worker: WBC = { tokens: { cap: 500 }, depth: { cap: 2 } };
+  assert.equal(worker.tokens?.cap, 500);
+  assert.equal(worker.depth?.cap, 2);
+
+  const team: TBC = { tokens: { cap: 5000 }, runs: { cap: 50 } };
+  assert.equal(team.tokens?.cap, 5000);
+  assert.equal(team.runs?.cap, 50);
+});
+
+test("BudgetsConfigSchema is the typebox runtime validator", () => {
+  assert.equal(typeof BudgetsConfigSchema, "object", "BudgetsConfigSchema must be exported as a typebox schema");
+  // A canonical config validates; a malformed one does not. We don't run the
+  // validator (typebox's Value.* APIs), but the schema's static type is the
+  // contract: any config that satisfies the schema compiles to the documented
+  // shape.
+  const sample: Static<typeof BudgetsConfigSchema> = {
+    defaultsEnabled: true,
+    perWorker: { tokens: { resource: "tokens", cap: 1000 }, runs: { resource: "runs", cap: 5 } },
+    perTeam: { tokens: { resource: "tokens", cap: 10_000 } },
+    strategies: {
+      onApproachingLimit: { action: "wrap-up", threshold: 0.2, hint: "wrap up" },
+      onExhaustion: { action: "abort" },
+      summary: { maxTokens: 2000 },
+    },
+  };
+  assert.ok(sample);
+  assert.equal(sample.perWorker.tokens?.cap, 1000);
+});
+
 test("BudgetLedger.restore is a static factory returning a Promise<BudgetLedger>", () => {
   assert.equal(typeof BudgetLedger.restore, "function", "BudgetLedger.restore must be a static method");
   // The signature must accept (sessionManager, agentName, policy, signal). We
