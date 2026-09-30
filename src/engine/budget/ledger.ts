@@ -52,7 +52,12 @@ function isLedgerEntry(entry: SessionEntry): entry is SessionEntry & { data: Bud
 
 export class BudgetLedger {
   private readonly sessionManager: SessionManager;
-  private readonly agentName: string;
+  // Public read accessor (F3 T3.4) so events.ts can key its budget-context
+  // map by agent slug without exposing the write surface. Stored as
+  // `_agentName` to keep the public field name `agentName` reserved for the
+  // getter — avoids a setter and prevents callers from overwriting the
+  // constructor-supplied slug.
+  private readonly _agentName: string;
   private readonly policy: WorkerBudgetPolicy;
 
   // The authoritative cumulative spend. Updated on every recordEvent and used
@@ -82,7 +87,7 @@ export class BudgetLedger {
     initialCumulative: { tokens: number; costUsd: number; runs: number },
   ) {
     this.sessionManager = sessionManager;
-    this.agentName = agentName;
+    this._agentName = agentName;
     this.policy = policy;
     this.cumulative.tokens = initialCumulative.tokens;
     this.cumulative.costUsd = initialCumulative.costUsd;
@@ -243,6 +248,15 @@ export class BudgetLedger {
       customType: LEDGER_CUSTOM_TYPE,
       data,
     };
+  }
+
+  // Public read accessor for the worker slug (F3 T3.4). The `installBudget
+  // ToolCallHandler` extension in events.ts keys its budget-context map by
+  // this string so each worker's `tool_call` handler can look up its own
+  // session state. Read-only — the slug is fixed at restore() time and
+  // never reassigned for the ledger's lifetime.
+  get agentName(): string {
+    return this._agentName;
   }
 
   // Project the resolved policy into the ledger entry's caps shape. Each
