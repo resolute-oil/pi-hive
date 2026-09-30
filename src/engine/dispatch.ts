@@ -233,9 +233,6 @@ export async function dispatchAgent(
   // session-manager factory (`createSession` seam) is passed through to
   // delegateAgent via internals so the 565-test seam continues to drive
   // AgentSession creation from tests/*.test.ts without a code split.
-  const delegateOptions = {
-    depthFn: () => currentDelegationDepth(),
-  };
   const willQueue = state.config.settings.maxParallel !== undefined
     && state.activeRuns >= state.config.settings.maxParallel
     && state.config.settings.queueSize !== undefined;
