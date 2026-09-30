@@ -7,7 +7,8 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { SessionManager, SessionStats } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import type { SessionStats } from "@earendil-works/pi-coding-agent";
 import { BudgetLedger } from "../src/engine/budget/ledger.ts";
 
 test("BudgetLedger is exported as a class", () => {
@@ -35,19 +36,15 @@ test("BudgetPolicy exports the six pure functions with pinned arities", () => {
   assert.equal(policy.crossedThreshold.length, 2, "crossedThreshold takes (remaining, threshold)");
 });
 
-test("BudgetPolicy stubs throw not implemented when called", () => {
-  const fakeLedger = {} as never;
-  const fakePolicy = {} as never;
-  const fakeBranch: never[] = [];
-  const fakeSession = {} as never;
-  const fakeScope: never[] = [];
-
-  assert.throws(() => policy.checkBudgetPolicy(fakeLedger, fakePolicy, fakeBranch), /not implemented/);
-  assert.throws(() => policy.workerConsumedTokens(fakeSession, fakeScope), /not implemented/);
-  assert.throws(() => policy.workerConsumedCost(fakeSession), /not implemented/);
-  assert.throws(() => policy.teamUsage(fakeBranch), /not implemented/);
-  assert.throws(() => policy.ratioRemaining(0, 0), /not implemented/);
-  assert.throws(() => policy.crossedThreshold(0, 0), /not implemented/);
+test("BudgetPolicy contract (Wave 1 fills the pure functions — verified by smoke invocation)", () => {
+  // Wave 0 pinned the public surface via stub-state assertions. Wave 1 (T1.3)
+  // implements the pure functions, so the stub-state "not implemented"
+  // assertions are obsolete. This test now verifies the contract through a
+  // minimal smoke check: ratioRemaining and crossedThreshold (the two
+  // arithmetic functions) return numeric / boolean values; the full surface
+  // is exercised in tests/budget-policy.test.ts (11 tests).
+  assert.equal(typeof policy.ratioRemaining(50, 100), "number", "ratioRemaining returns a number");
+  assert.equal(typeof policy.crossedThreshold(0.10, 0.20), "boolean", "crossedThreshold returns a boolean");
 });
 
 // ── Slice 3 — WorkerBudgetPolicy + WorkerBudgetStrategy ──────────────────────
@@ -96,10 +93,17 @@ test("strategy resolvers are exported with pinned arities", () => {
   assert.equal(resolveWorkerBudgetPolicy.length, 2, "resolveWorkerBudgetPolicy takes (config, agentName)");
 });
 
-test("strategy resolver stubs throw not implemented", () => {
-  const fakeConfig = {} as HiveConfig;
-  assert.throws(() => resolveWorkerBudgetStrategy(fakeConfig, "agent"), /not implemented/);
-  assert.throws(() => resolveWorkerBudgetPolicy(fakeConfig, "agent"), /not implemented/);
+test("strategy resolver contract (Wave 1 fills the resolvers — verified by smoke invocation)", () => {
+  // Wave 0 pinned the public surface via stub-state assertions. Wave 1 (T1.4)
+  // implements the resolvers, so the stub-state "not implemented" assertions
+  // are obsolete. This test now verifies the resolvers return their
+  // documented types when called with a structurally-valid config.
+  const config = {} as HiveConfig;
+  const strategy = resolveWorkerBudgetStrategy(config, "agent");
+  assert.equal(typeof strategy, "string", "resolveWorkerBudgetStrategy returns a string (the documented enum)");
+  const policy = resolveWorkerBudgetPolicy(config, "agent");
+  assert.equal(typeof policy, "object", "resolveWorkerBudgetPolicy returns an object (the documented WorkerBudgetPolicy shape)");
+  assert.ok(policy !== null && "worker" in policy && "team" in policy, "policy has the worker / team blocks");
 });
 
 // ── Slice 4 — BudgetBlock discriminated union ───────────────────────────────
@@ -486,21 +490,18 @@ test("BudgetLedger declares the entries and cumulative accessors as readonly", (
   assert.ok(cumulativeType === undefined || typeof cumulativeType === "object", "cumulative must be the ledger's spend-shape at runtime");
 });
 
-test("BudgetLedger stub throws not implemented when called", async () => {
-  // Build a throwaway instance that bypasses the static factory (the factory
-  // itself is also a stub). We exercise the instance methods to verify each
-  // carries the documented throw contract.
-  const instance = Object.create(BudgetLedger.prototype) as BudgetLedger;
-  const fakeSignal = new AbortController().signal;
-  const fakePolicy = {} as never;
-  const fakeStats = {} as SessionStats;
-
-  assert.throws(() => instance.recordEvent("message_end", { tokens: 0, costUsd: 0, runs: 0 }, fakeSignal), /not implemented/);
-  assert.throws(() => instance.maybeSnapshot({ tokens: 0, costUsd: 0, runs: 0 }, fakePolicy, fakeSignal), /not implemented/);
-  assert.throws(() => instance.recordCompaction(0, fakeSignal), /not implemented/);
-  assert.throws(() => instance.snapshot(fakeStats, fakePolicy, "checkpoint", fakeSignal), /not implemented/);
-  await assert.rejects(
-    BudgetLedger.restore({} as SessionManager, "agent", fakePolicy, fakeSignal),
-    (error: Error) => error.message === "not implemented",
-  );
+test("BudgetLedger contract (Wave 1 fills the methods — verified via restore + invoke)", async () => {
+  // Wave 0 pinned the public surface via stub-state assertions. Wave 1 (T1.2)
+  // implements the methods, so the stub-state "not implemented" assertions
+  // are obsolete. This test now verifies the contract through the documented
+  // restore() entry point: a fresh SessionManager + restore() + a write call
+  // must produce a persisted CustomEntry. Method bodies live in
+  // tests/budget-ledger.test.ts (8 tests covering each write path).
+  const sm = SessionManager.inMemory("/tmp");
+  const ledger = await BudgetLedger.restore(sm, "agent", {} as never, new AbortController().signal);
+  const signal = new AbortController().signal;
+  ledger.recordEvent("message_end", { tokens: 1, costUsd: 0, runs: 1 }, signal);
+  const branch = sm.getBranch();
+  const wrote = branch.some((e) => e.type === "custom" && (e as unknown as { customType?: string }).customType === "pi-hive-budget-ledger");
+  assert.ok(wrote, "BudgetLedger.recordEvent persists a CustomEntry via sessionManager.appendCustomEntry");
 });
