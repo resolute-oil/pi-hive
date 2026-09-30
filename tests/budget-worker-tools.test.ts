@@ -293,7 +293,7 @@ test("delegateAgent calls installBudgetEventHooks(session, ledger, policy, contr
     { fresh: false },
     ctx,
     {
-      resolveWorkerBudgetPolicy: ((cfg) => { order.push("resolvePolicy"); return noCapPolicy; }) as never,
+      resolveWorkerBudgetPolicy: ((cfg: unknown) => { order.push("resolvePolicy"); return noCapPolicy; }) as never,
       restoreLedger: (async () => { order.push("restore"); return ledger; }) as never,
       checkBudgetPolicy: (() => { order.push("check"); return undefined; }) as never,
       installBudgetEventHooks: ((s: any, l: any, p: any, c: any) => {
