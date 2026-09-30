@@ -421,11 +421,21 @@ export async function dispatchAgent(
 
   // The lifecycle is constructed early so the setup-failure fast paths below
   // can attach + close it for partial-session reaping (abort + dispose). It
-  // is also used by the normal run for the timer / abort / subscription
-  // cleanup at run end. A fresh WorkerRunLifecycle with an unsignaled
-  // AbortController is sufficient here; the per-run runController is wired
-  // in the normal-flow block below.
-  const lifecycle = new WorkerRunLifecycle(state, runtime, new AbortController().signal);
+  // Lifecycle listens to runController.signal (NOT abortSignal directly):
+// Setup-failure fast path. If delegateAgent caught a non-BudgetExhaustedError
+// (e.g. session.subscribe threw during installBudgetEventHooks wiring), the
+// session may be partial. Emit the terminal telemetry + reap the partial
+// session, then return without touching runtime.status="running" (which
+// would clobber the "error" status we set in the catch). The setup-failure
+// test in tests/dispatch-usage.test.ts asserts exitCode=1, aborted=1,
+  //
+  // We need TWO lifecycles: an early one for the setup-failure path (created
+  // before runController exists, with a placeholder signal — session.abort
+  // is only called via the explicit `partial.abort?.()` below, not via signal
+  // listening), and the runController-backed one for the normal run path
+  // (created after runController below). The early one is replaced by the
+  // late one in the normal-flow block before session.prompt runs.
+  let lifecycle = new WorkerRunLifecycle(state, runtime, new AbortController().signal);
 
   // Setup-failure fast path. If delegateAgent caught a non-BudgetExhaustedError
   // (e.g. session.subscribe threw during installBudgetEventHooks wiring), the
@@ -490,8 +500,14 @@ export async function dispatchAgent(
     runController.abort(new Error(`Worker timeout after ${governance.timeoutMs}ms`));
   }, governance.timeoutMs);
   timeout?.unref?.();
-  // lifecycle is constructed earlier (above the delegateAgent call) so the
-  // setup-failure fast paths can attach + close it for partial-session reaping.
+  // Replace the placeholder lifecycle (created earlier for setup-failure
+  // handling) with one wired to runController.signal. Both abort paths now
+  // route through lifecycle.watchParentAbort → abortWorker → session.abort():
+  //   - parent abort:    abortSignal → abortFromParent → runController.abort
+  //   - per-run timeout: setTimeout → runController.abort
+  // The placeholder lifecycle's session/unsubscribe state carries forward
+  // (we re-attach below) so setup-failure handling keeps working.
+  lifecycle = new WorkerRunLifecycle(state, runtime, runController.signal);
   // TOK/S baselines (J8/Decision 4): lifetime token counts at run start so the UI
   // divides the *per-run output* delta by *per-run* elapsedMs — not lifetime
   // tokens by per-run elapsed.

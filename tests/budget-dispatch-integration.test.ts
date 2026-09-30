@@ -17,14 +17,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { dispatchAgent, type CreateAgentSession } from "../src/engine/dispatch.ts";
-import type { AgentRuntime, HiveState } from "../src/core/types.ts";
+import type { AgentRuntime, AgentType, HiveState } from "../src/core/types.ts";
 
 // ── Test fixtures ─────────────────────────────────────────────────────────
 
-function runtimeFor(name: string, sessionFile: string, governance: Record<string, any> = {}, agentType: string = "lead"): AgentRuntime {
+function runtimeFor(name: string, sessionFile: string, governance: Record<string, any> = {}, agentType: AgentType = "lead"): AgentRuntime {
   return {
-    config: { name, slug: name.toLowerCase(), path: `${name.toLowerCase()}.md`, agentType, role: "worker", governance, model: "test/model", thinking: "off", tools: "read" },
+    config: { name, slug: name.toLowerCase(), path: `${name.toLowerCase()}.md`, agentType, role: "member", governance, model: "test/model", thinking: "off", tools: "read" },
     sessionFile,
+    systemPrompt: "",
+    task: "",
+    lastWork: "",
+    contextPct: 0,
     inputTokens: 0,
     outputTokens: 0,
     cacheReadTokens: 0,
