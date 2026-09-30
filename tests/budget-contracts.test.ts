@@ -399,6 +399,21 @@ test("BudgetLedgerEntry is a CustomEntry with the documented caps/cumulative/mar
   assert.equal(entries[2].data.kind, undefined);
 });
 
+// ── Slice 9 — summarize_progress tool signature ──────────────────────────────
+
+import { summarizeProgressTool } from "../src/agents/tools/summarize-progress.ts";
+
+test("summarizeProgressTool is exported as a function returning a ToolDefinition", () => {
+  assert.equal(typeof summarizeProgressTool, "function", "summarizeProgressTool must be exported as a function");
+  // Wave 1 fills the body; for now the stub throws. The arity pins the contract
+  // so a future refactor that adds a required parameter breaks the test first.
+  assert.equal(summarizeProgressTool.length, 0, "summarizeProgressTool takes no required arguments (state is captured at registration time)");
+});
+
+test("summarizeProgressTool stub throws not implemented when called", () => {
+  assert.throws(() => summarizeProgressTool(), /not implemented/);
+});
+
 test("BudgetLedger.restore is a static factory returning a Promise<BudgetLedger>", () => {
   assert.equal(typeof BudgetLedger.restore, "function", "BudgetLedger.restore must be a static method");
   // The signature must accept (sessionManager, agentName, policy, signal). We
