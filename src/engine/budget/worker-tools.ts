@@ -18,7 +18,159 @@
 // 3A does not edit this file (it touches F3+F4 elsewhere); 3B / 3C / 3D own
 // the three regions below. The markers are pure comments — no runtime cost.
 
+import type { AgentSession, ExtensionContext, SessionManager, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { SessionManager as SessionManagerClass } from "@earendil-works/pi-coding-agent";
+import type { BudgetLedger } from "./ledger";
+import { BudgetLedger as BudgetLedgerClass } from "./ledger";
+import { resolveWorkerBudgetPolicy as resolveWorkerBudgetPolicyFn } from "./strategy";
+import { checkBudgetPolicy as checkBudgetPolicyFn } from "./policy";
+import { installBudgetEventHooks as installBudgetEventHooksFn } from "./events";
+import type { HiveState, WorkerBudgetPolicy, BudgetBlock } from "../../core/types";
 import type { BudgetLedgerEntry } from "../../core/types";
+
+// ── BudgetExhaustedError ──────────────────────────────────────────────────
+//
+// Per `04-refactor-plan.md` §2.4 + `pi-sdk-session-api.md`: throwing produces
+// a failed tool result; returning an object does not mark it as an error.
+// `delegateAgent` throws this when the pre-flight gate refuses, so the
+// dispatcher's caller sees the error through the standard tool-error path.
+
+export class BudgetExhaustedError extends Error {
+  readonly reason: string;
+  readonly scope: BudgetBlock["scope"];
+  readonly resource: BudgetBlock["resource"];
+  readonly remaining: BudgetBlock["remaining"];
+  readonly limit: BudgetBlock["limit"];
+
+  constructor(block: BudgetBlock) {
+    super(block.reason);
+    this.name = "BudgetExhaustedError";
+    this.reason = block.reason;
+    this.scope = block.scope;
+    this.resource = block.resource;
+    this.remaining = block.remaining;
+    this.limit = block.limit;
+  }
+}
+
+// ── DelegateAgent internals (test seam) ───────────────────────────────────
+//
+// The pre-flight gate (resolveWorkerBudgetPolicy → BudgetLedger.restore →
+// checkBudgetPolicy) is composed of pure functions plus one async restore.
+// In production `delegateAgent` uses the real implementations; tests inject
+// stubs through this seam so each path can be exercised in isolation without
+// a live session tree.
+
+export interface DelegateAgentInternals {
+  resolveWorkerBudgetPolicy: typeof resolveWorkerBudgetPolicyFn;
+  restoreLedger: typeof BudgetLedgerClass.restore;
+  checkBudgetPolicy: typeof checkBudgetPolicyFn;
+  installBudgetEventHooks: typeof installBudgetEventHooksFn;
+  sessionManagerCreate: (cwd: string) => SessionManager;
+  sessionManagerContinueRecent: (cwd: string) => SessionManager;
+}
+
+const defaultInternals: DelegateAgentInternals = {
+  resolveWorkerBudgetPolicy: resolveWorkerBudgetPolicyFn,
+  restoreLedger: BudgetLedgerClass.restore,
+  checkBudgetPolicy: checkBudgetPolicyFn,
+  installBudgetEventHooks: installBudgetEventHooksFn,
+  sessionManagerCreate: (cwd) => SessionManagerClass.create(cwd),
+  sessionManagerContinueRecent: (cwd) => SessionManagerClass.continueRecent(cwd),
+};
+
+// ── delegateAgent ──────────────────────────────────────────────────────────
+//
+// Wave 2 F2 T2.2 — the budget-aware `delegate_agent` entry point. Throw-to-
+// refuse per Pi docs §2 (BudgetExhaustedError on budget block; success
+// returns the opened session + restored ledger). Two plumbing concerns
+// handled here, both via composition with the pre-existing pure helpers:
+//   1. Pre-flight gate: resolve policy → restore ledger → check policy.
+//   2. Session open: fresh=true → SessionManager.create(); default →
+//      SessionManager.continueRecent() (per `04-refactor-plan.md` §2.4 / §2.9).
+//   3. Hook install: budget event hooks subscribe to message_end /
+//      compaction_end / agent_settled for the new session's lifetime.
+
+export async function delegateAgent(
+  state: HiveState,
+  agentName: string,
+  task: string,
+  opts: { fresh?: boolean } | undefined,
+  ctx: ExtensionContext,
+  internals: DelegateAgentInternals = defaultInternals,
+  options: {
+    controller?: AbortController;
+    depthFn?: () => number;
+    depthCap?: number;
+  } = {},
+): Promise<{ sessionId: string; session: AgentSession; ledger: BudgetLedger; controller: AbortController }> {
+  void task; // task is consumed by session.prompt() in the production wiring (Cycle 2 above the dispatch.ts refactor).
+
+  // 1. Resolve the worker's WorkerBudgetPolicy from the active config.
+  const policy = internals.resolveWorkerBudgetPolicy(state.config as never, agentName);
+
+  // 2. Restore the ledger from the active branch. The SessionManager comes
+  //    from the caller's session context; production wires it from
+  //    ctx.sessionManager (or opens one alongside the session for fresh).
+  //    For the pre-flight gate we open the manager now so restore() can walk
+  //    the branch before the session is created.
+  const sessionManager = opts?.fresh
+    ? internals.sessionManagerCreate(ctx.cwd)
+    : internals.sessionManagerContinueRecent(ctx.cwd);
+
+  // 2a. Depth-cap pre-flight (T2.3). Surfaced before BudgetLedger.restore so
+  //     a depth violation fails fast without an async ledger walk; matches
+  //     the documented checkBudgetPolicy order.
+  if (policy.worker.depth?.cap !== undefined) {
+    const depth = options.depthFn ? options.depthFn() + 1 : 0;
+    if (depth > policy.worker.depth.cap) {
+      throw new BudgetExhaustedError({
+        reason: `Worker maximum delegation depth exhausted (${policy.worker.depth.cap}).`,
+        scope: "worker",
+        resource: "depth",
+        remaining: {},
+        limit: { depth: policy.worker.depth.cap },
+      });
+    }
+  }
+
+  // 3. Restore the ledger. The SessionManager we just opened is empty for a
+  //    fresh session (branch walks zero entries), so the ledger's cumulative
+  //    starts at zero and the cap check below can only block if the cap is 0
+  //    (intentional refuse in that case).
+  const ledger = await internals.restoreLedger(
+    sessionManager,
+    agentName,
+    policy,
+    new AbortController().signal,
+  );
+
+  // 4. Pre-flight gate. checkBudgetPolicy returns a BudgetBlock when any
+  //    cap (worker or team; tokens / costUsd / runs) is exceeded. Throw to
+  //    refuse — Pi docs §2 requires throwing for a failed tool result.
+  const blocked = internals.checkBudgetPolicy(ledger, policy, sessionManager.getBranch());
+  if (blocked) {
+    throw new BudgetExhaustedError(blocked);
+  }
+
+  // 5. Open the session. fresh=true → SessionManager.create(); default →
+  //    SessionManager.continueRecent(). The .toAgentSession() chain is the
+  //    SDK's documented factory.
+  const session: AgentSession = (sessionManager as unknown as { toAgentSession: () => AgentSession }).toAgentSession();
+
+  // 6. Install the budget event hooks. Each appendCustomEntry /
+  //    appendCustomMessageEntry call inside the handler reads the supplied
+  //    signal — abort it to cancel any in-flight write.
+  const controller = options.controller ?? new AbortController();
+  internals.installBudgetEventHooks(session, ledger, policy, controller);
+
+  return {
+    sessionId: session.sessionId,
+    session,
+    ledger,
+    controller,
+  };
+}
 
 // >>> region: agent-3B (T5.1, T5.2, T5.4, T5.8, T5.9, T5.13, T5.14, T5.15)
 //
