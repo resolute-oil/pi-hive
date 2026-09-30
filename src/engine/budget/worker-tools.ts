@@ -18,7 +18,7 @@
 // 3A does not edit this file (it touches F3+F4 elsewhere); 3B / 3C / 3D own
 // the three regions below. The markers are pure comments — no runtime cost.
 
-import type { AgentSession, ExtensionContext, SessionManager, ToolDefinition, ResourceLoader } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, ExtensionContext, SessionManager, SessionStats, ToolDefinition, ResourceLoader } from "@earendil-works/pi-coding-agent";
 import { SessionManager as SessionManagerClass } from "@earendil-works/pi-coding-agent";
 
 // Local structural aliases for SDK peer types that are not re-exported
@@ -37,7 +37,7 @@ import { BudgetLedger as BudgetLedgerClass } from "./ledger";
 import { resolveWorkerBudgetPolicy as resolveWorkerBudgetPolicyFn } from "./strategy";
 import { checkBudgetPolicy as checkBudgetPolicyFn } from "./policy";
 import { installBudgetEventHooks as installBudgetEventHooksFn } from "./events";
-import type { HiveState, BudgetBlock } from "../../core/types";
+import type { HiveState, BudgetBlock, WorkerBudgetPolicy } from "../../core/types";
 import type { BudgetLedgerEntry } from "../../core/types";
 
 // ── BudgetExhaustedError ──────────────────────────────────────────────────
@@ -456,38 +456,38 @@ export async function restoreWorkerSession(
 // <<< region: agent-3C
 
 // >>> region: agent-3D (T5.10, T5.11, T5.12)
-//
-// 3D region: F5 cooperative tools (3 agent-callable tools). Worker agents
-// invoke these to suggest their own end-of-life; the operator surface sees
-// the resulting `cooperative-*` kind entries and can confirm or override.
-// Distinct from agent-3B / agent-3C because these are agent-callable rather
-// than operator-only.
-
-// Agent-callable: "I want to compact my own session". SDK: session.compact().
-// Ledger: kind: "cooperative-compact".
-export async function request_compaction(
-  _customInstructions?: string,
-  _signal?: AbortSignal,
-): Promise<{ ledgerSnapshot: BudgetLedgerEntry }> {
-  throw new Error("not implemented");
+// 3D region: F5 cooperative tools (agent-callable). Each `buildRequest*Tool`
+// factory returns the async callable (per `buildSummarizeProgressTool`).
+// T5.10 honors `policy.strategies.summary.maxTokens`; ledger writes bypass
+// `BudgetLedger.snapshot()` (no `kind` param) via `writeCooperativeSnapshot`.
+export async function request_compaction(_customInstructions?: string, _signal?: AbortSignal): Promise<{ ledgerSnapshot: BudgetLedgerEntry }> { throw new Error("not implemented"); }
+export async function request_end_session(_reason: string, _signal: AbortSignal): Promise<{ ledgerSnapshot: BudgetLedgerEntry }> { throw new Error("not implemented"); }
+export async function request_snapshot(_label: string, _signal: AbortSignal): Promise<{ ledgerSnapshot: BudgetLedgerEntry }> { throw new Error("not implemented"); }
+export function buildRequestCompactionTool(o: { session: AgentSession; policy: WorkerBudgetPolicy; ledger: BudgetLedger }) {
+  return async (customInstructions?: string, signal?: AbortSignal) => {
+    const max = o.policy.strategies?.summary?.maxTokens;
+    const i = [customInstructions, max !== undefined ? `Summarize in at most ${max} tokens.` : null].filter(Boolean).join("\n\n") || undefined;
+    await o.session.compact(i);
+    return { ledgerSnapshot: writeCooperativeSnapshot({ session: o.session, ledger: o.ledger, kind: "cooperative-compact", signal: signal ?? new AbortController().signal }) };
+  };
+}
+export function buildRequestEndSessionTool(o: { session: AgentSession; policy: WorkerBudgetPolicy; ledger: BudgetLedger }) {
+  return async (_reason: string, signal: AbortSignal) => { await o.session.abort(); return { ledgerSnapshot: writeCooperativeSnapshot({ session: o.session, ledger: o.ledger, kind: "cooperative-end", signal }) }; };
+}
+export function buildRequestSnapshotTool(o: { session: AgentSession; policy: WorkerBudgetPolicy; ledger: BudgetLedger }) {
+  return async (label: string, signal: AbortSignal) => {
+    const sm = o.session.sessionManager;
+    sm.branchWithSummary(sm.getLeafId(), label);
+    return { ledgerSnapshot: writeCooperativeSnapshot({ session: o.session, ledger: o.ledger, kind: "cooperative-snapshot", signal }) };
+  };
+}
+function writeCooperativeSnapshot({ session, ledger, kind, signal }: { session: AgentSession; ledger: BudgetLedger; kind: "cooperative-compact" | "cooperative-end" | "cooperative-snapshot"; signal: AbortSignal }): BudgetLedgerEntry {
+  const stats = session.getSessionStats(), sm = session.sessionManager;
+  const li = ledger as unknown as { agentName: string; snapshotCaps: () => BudgetLedgerEntry["data"]["caps"]; entries: BudgetLedgerEntry[] };
+  const data: BudgetLedgerEntry["data"] = { caps: li.snapshotCaps(), cumulative: { tokens: stats.tokens.total, costUsd: stats.cost, runs: ledger.cumulative.runs }, writtenAt: Date.now(), agentSlug: li.agentName, marker: "checkpoint", kind };
+  const entry: BudgetLedgerEntry = { type: "custom", customType: "pi-hive-budget-ledger", data };
+  sm.appendCustomEntry("pi-hive-budget-ledger", data); li.entries.push(entry); void signal;
+  return entry;
 }
 
-// Agent-callable: "I want to end my own session". SDK: session.abort().
-// Ledger: kind: "cooperative-end".
-export async function request_end_session(
-  _reason: string,
-  _signal: AbortSignal,
-): Promise<{ ledgerSnapshot: BudgetLedgerEntry }> {
-  throw new Error("not implemented");
-}
-
-// Agent-callable: "snapshot my own session so the operator can restore it".
-// SDK: session_manager.branchWithSummary(). Ledger: kind:
-// "cooperative-snapshot".
-export async function request_snapshot(
-  _label: string,
-  _signal: AbortSignal,
-): Promise<{ ledgerSnapshot: BudgetLedgerEntry }> {
-  throw new Error("not implemented");
-}
 // <<< region: agent-3D
