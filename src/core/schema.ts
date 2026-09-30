@@ -232,3 +232,39 @@ export const BudgetsConfigSchema = Type.Object({
   })),
 });
 export type BudgetsConfig = Static<typeof BudgetsConfigSchema>;
+
+// ── Wave 1 (F6) — typebox-driven validator ──────────────────────────────────
+//
+// Validates the new nested-budget config (T6.1) against BudgetsConfigSchema.
+// Throws with a path-bearing error so callers can surface the offending
+// config key (e.g., `settings.budgets.perWorker.tokens/cap`). Used by the
+// config-loading layer (src/core/config.ts) once the hard cutover lands; the
+// hand-written validators above stay in place until Wave 9 cleans them up.
+import { Value } from "typebox/value";
+
+function formatPath(path: string): string {
+  // typebox returns JSON Pointer paths like "/perWorker/tokens/cap"; turn
+  // them into the dotted/indexed form the rest of the schema uses
+  // (`settings.budgets.perWorker.tokens.cap`).
+  return path
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => /^\d+$/.test(segment) ? `[${segment}]` : segment)
+    .join(".")
+    .replace(/\.([^.]+)$/, "/$1");
+}
+
+export function validateBudgetsConfig(value: unknown): asserts value is BudgetsConfig {
+  assertObject(value, "budgets");
+  const errors = Value.Errors(BudgetsConfigSchema, value);
+  if (errors.length > 0) {
+    // Surface the most specific error (skip root-level "missing required
+    // property" complaints when a deeper path also fails). Otherwise the
+    // user sees "must have required properties perTeam" when the real bug
+    // is a negative cap deep inside perWorker.
+    const leaf = errors.find((err) => err.instancePath && err.instancePath !== "") ?? errors[0];
+    const path = leaf.instancePath ? formatPath(leaf.instancePath) : "<root>";
+    const detail = leaf.message ?? "value does not match BudgetsConfigSchema";
+    throw new Error(`budgets.${path}: ${detail}`);
+  }
+}
