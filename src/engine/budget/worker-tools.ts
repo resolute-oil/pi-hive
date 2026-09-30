@@ -110,12 +110,12 @@ const defaultInternals: DelegateAgentInternals = {
   sessionManagerContinueRecent: (cwd) => SessionManagerClass.continueRecent(cwd),
 };
 
-// Re-export the default internals so tests can spread them and override one
-// piece of the seam (preserving the 565-test session factory). The
-// production dispatcher uses `delegateAgent` (below) which never sees
-// these; the production function uses `defaultDelegateAgentInternals`
-// internally and only takes a sessionFactory closure as the seam.
-export const defaultDelegateAgentInternals: DelegateAgentInternals = defaultInternals;
+// Module-private default internals used by `delegateAgent` below. Tests that
+// need to stub internals pass a custom `DelegateAgentInternals` object
+// directly to `delegateAgentWithInternals`; the production function never
+// sees the seam, and no caller spreads these defaults, so the export is
+// unnecessary.
+const defaultDelegateAgentInternals: DelegateAgentInternals = defaultInternals;
 
 // ── delegateAgent ────────────────────────────────────────────────────────
 //

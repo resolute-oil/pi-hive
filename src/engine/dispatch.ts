@@ -130,9 +130,9 @@ function emitDelegationStart(opts: {
   task: string;
   fresh: boolean;
   resolvedModelKey: string;
-  model: unknown;
-  tools: unknown;
-  thinking: unknown;
+  model: string;
+  tools: string;
+  thinking: string;
 }): void {
   const { state, runtime, caller, task, fresh, resolvedModelKey, model, tools, thinking } = opts;
   logRecord(state, { from: caller, to: runtime.config.name, type: "delegation", message: task });
