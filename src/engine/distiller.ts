@@ -21,7 +21,7 @@ import { logRecord } from "./state";
 import { resolveConfiguredPath } from "../core/safe-path";
 import { agentMentalModelTarget, buildDistillerPrompt, extractTagged } from "./prompts";
 import { emitHiveEvent } from "./observability";
-import { effectiveWorkerGovernance } from "./governance";
+import { effectiveWorkerGovernance } from "./budget/remaining";
 import { resolveModel } from "./model-resolution";
 
 export async function runDistillerProcess(state: HiveState, ctx: ExtensionContext, prompt: string, model: string): Promise<string> {
