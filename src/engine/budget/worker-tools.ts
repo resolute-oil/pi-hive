@@ -401,20 +401,61 @@ export async function forceEndWorkerSession(agent: string, _reason: string, sign
 }
 // T5.14 tearDownAllWorkers — iterates workerHandles. force=false → endWorkerSession per worker (graceful). force=true → forceKillWorkerSession per worker (escape hatch). Last writes team-level ledger kind:"tear-down-all" with agentSlug:"__team__" via the first captured sessionManager. Returns {stopped, skipped} for the operator UI.
 export async function tearDownAllWorkers(reason: string, opts?: { force?: boolean }, signal?: AbortSignal): Promise<{ stopped: string[]; skipped: Array<{ agent: string; reason: string }>; ledgerSnapshot: BudgetLedgerEntry }> {
-  const useForce = opts?.force === true; const opSignal = signal ?? new AbortController().signal;
+  const useForce = opts?.force === true;
+  const opSignal = signal ?? new AbortController().signal;
   const agents = Array.from(workerHandles.keys());
   if (agents.length === 0) throw notImpl("__team__");
-  // Capture sessionManagers BEFORE iteration so force=true's mid-loop unregister does not lose the team-snapshot target.
+  // Capture sessionManagers + cumulative + policy BEFORE iteration so
+  // force=true's mid-loop unregister does not lose the team-snapshot
+  // target. Q2 = A: real team totals are the sum of captured workers'
+  // cumulative at iteration time.
   const sm = new Map<string, SessionManager>();
-  for (const a of agents) { const h = workerHandles.get(a); if (h) sm.set(a, h.sessionManager); }
-  const stopped: string[] = []; const skipped: Array<{ agent: string; reason: string }> = [];
+  const cumulativeByAgent = new Map<string, { tokens: number; costUsd: number; runs: number }>();
+  const policyByAgent = new Map<string, WorkerBudgetPolicy>();
+  for (const a of agents) {
+    const h = workerHandles.get(a);
+    if (h) {
+      sm.set(a, h.sessionManager);
+      cumulativeByAgent.set(a, { ...h.ledger.cumulative });
+      policyByAgent.set(a, h.policy);
+    }
+  }
+  const stopped: string[] = [];
+  const skipped: Array<{ agent: string; reason: string }> = [];
   for (const a of agents) {
     try { if (useForce) await forceKillWorkerSession(a, reason, opSignal); else await endWorkerSession(a, reason, opSignal); stopped.push(a); }
     catch (e) { skipped.push({ agent: a, reason: e instanceof Error ? e.message : String(e) }); }
   }
   const team = sm.values().next().value as SessionManager | undefined;
   if (!team) throw notImpl("__team__");
-  const data = { caps: {} as BudgetLedgerEntry["data"]["caps"], cumulative: { tokens: 0, costUsd: 0, runs: 0 }, writtenAt: Date.now(), agentSlug: "__team__", marker: "checkpoint" as const, kind: "tear-down-all" as BudgetLedgerKind };
+  // Sum cumulative across all stopped workers. Skipped workers' cumulatives
+  // are excluded — they did not actually run end-of-life commands.
+  const teamCumulative = { tokens: 0, costUsd: 0, runs: 0 };
+  for (const a of stopped) {
+    const c = cumulativeByAgent.get(a);
+    if (c) {
+      teamCumulative.tokens += c.tokens;
+      teamCumulative.costUsd += c.costUsd;
+      teamCumulative.runs += c.runs;
+    }
+  }
+  // Project caps from the merged policy of all stopped workers. Empty
+  // when no workers had any caps defined (defensive default).
+  const caps: BudgetLedgerEntry["data"]["caps"] = {};
+  for (const a of stopped) {
+    const p = policyByAgent.get(a);
+    if (!p) continue;
+    const w = p.worker ?? {};
+    const t = p.team ?? {};
+    if (caps.workerTokens === undefined && w.tokens?.cap !== undefined) caps.workerTokens = w.tokens.cap;
+    if (caps.workerCostUsd === undefined && w.costUsd?.cap !== undefined) caps.workerCostUsd = w.costUsd.cap;
+    if (caps.workerRuns === undefined && w.runs?.cap !== undefined) caps.workerRuns = w.runs.cap;
+    if (caps.workerDepth === undefined && w.depth?.cap !== undefined) caps.workerDepth = w.depth.cap;
+    if (caps.teamTokens === undefined && t.tokens?.cap !== undefined) caps.teamTokens = t.tokens.cap;
+    if (caps.teamCostUsd === undefined && t.costUsd?.cap !== undefined) caps.teamCostUsd = t.costUsd.cap;
+    if (caps.teamRuns === undefined && t.runs?.cap !== undefined) caps.teamRuns = t.runs.cap;
+  }
+  const data = { caps, cumulative: teamCumulative, writtenAt: Date.now(), agentSlug: "__team__", marker: "checkpoint" as const, kind: "tear-down-all" as BudgetLedgerKind };
   team.appendCustomEntry("pi-hive-budget-ledger", data);
   return { stopped, skipped, ledgerSnapshot: { type: "custom", customType: "pi-hive-budget-ledger", data } };
 }
