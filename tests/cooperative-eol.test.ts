@@ -533,7 +533,7 @@ test("Wave 3 fixup Issue 4: cooperative-tool registry contains exactly the 3 coo
     "tearDownAllWorkers",
   ];
   for (const name of operatorCommandNames) {
-    assert.ok(!registry.has(name), `operator command '${name}' does NOT appear in the cooperative registry`);
+    assert.ok(!registry.has(name as never), `operator command '${name}' does NOT appear in the cooperative registry`);
   }
 });
 

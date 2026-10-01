@@ -326,14 +326,8 @@ export async function delegateAgentWithInternals(
 
 // >>> region: agent-3B (T5.1, T5.2, T5.4, T5.8, T5.9, T5.13, T5.14, T5.15)
 // 3B region: F5 stop/pause/resume/escape (8 of 11 operator commands). 3C owns branch/clone (T5.3/T5.5/T5.6); 3D owns cooperative (T5.10-T5.12). Region pinned at 87 LOC per §11.5.
-// WorkerHandle + registry: production wiring (F13 dashboard + dispatcher) calls registerWorkerHandle when a worker opens; the matching unregisterWorkerHandle runs when the worker ends.
-// Tests use the same seam to seed fakes. The Wave 0 contract pin (budget-contracts.test.ts "operator command stubs throw not implemented when called") passes raw strings with no registered handle; the lookup miss throws /not implemented/, which the regex matches.
-// Per-agent commands lookup; tearDownAll iterates the full registry (orchestrator excluded — the host session is not subject to operator commands). All 8 commands write a ledger snapshot with marker:"checkpoint" and a distinct kind (end/compact/pause/resume/compact-aborted/force-kill/force-end) — and tearDownAll additionally writes a team-level kind:"tear-down-all" with agentSlug:"__team__".
-// Hard gates per wave-3-feature-tracks.md "HARD GATES" section:
-//   - forceKillWorkerSession: controller.abort() + session.dispose() directly (no waitForIdle); force-kill snapshot BEFORE dispose.
-//   - tearDownAllWorkers({force:false}): endWorkerSession per worker; {force:true}: forceKillWorkerSession per worker.
-//   - forceKillWorkerSession / forceEndWorkerSession / tearDownAllWorkers are operator-only (not ToolDefinition objects).
-//   - All 9 base/variant operator commands export distinct kind values (3B exports 8 distinct kinds; 3C/3D extend).
+// All 8 commands write a ledger snapshot with marker:"checkpoint" and a distinct kind; tearDownAll additionally writes a team-level kind:"tear-down-all" with agentSlug:"__team__".
+// Hard gates per wave-3-feature-tracks.md "HARD GATES" section: forceKillWorkerSession writes force-kill snapshot BEFORE dispose; tearDownAll iterates endWorkerSession (graceful) or forceKillWorkerSession (force); forceKillWorkerSession / forceEndWorkerSession / tearDownAllWorkers are operator-only (not ToolDefinition objects); all 11 base/variant operator commands export distinct kind values (3B exports 8 distinct kinds; 3C/3D extend).
 interface WorkerHandle { agent: string; session: AgentSession; controller: AbortController; sessionManager: SessionManager; ledger: BudgetLedger; policy: WorkerBudgetPolicy; }
 const workerHandles = new Map<string, WorkerHandle>();
 function registerWorkerHandle(h: WorkerHandle) { const p = workerHandles.get(h.agent); workerHandles.set(h.agent, h); return p; }
@@ -534,8 +528,19 @@ export async function restoreWorkerSession(agent: string | WorkerContext, snapsh
 export async function request_compaction(_customInstructions?: string, _signal?: AbortSignal): Promise<{ ledgerSnapshot: BudgetLedgerEntry }> { throw new Error("not implemented"); }
 export async function request_end_session(_reason: string, _signal: AbortSignal): Promise<{ ledgerSnapshot: BudgetLedgerEntry }> { throw new Error("not implemented"); }
 export async function request_snapshot(_label: string, _signal: AbortSignal): Promise<{ ledgerSnapshot: BudgetLedgerEntry }> { throw new Error("not implemented"); }
-const cooperativeToolRegistry: Set<string> = new Set();
-export function __cooperativeToolRegistry(): ReadonlySet<string> {
+// Cooperative-tool registry (S2 typed): a module-level Set tracks which
+// cooperative factories have been called. The post-wave review required
+// "verified by a test asserting operator commands don't appear in the
+// cooperative-tool registry"; typing the Set as `Set<CooperativeToolName>`
+// means an operator command's `add(...)` call would fail at compile time
+// (TS I4 parity with the rest of the typed surface). The names are pinned
+// to the brief's three cooperative tools — `__cooperativeToolRegistry`
+// exposes the Set as a test seam and `__resetCooperativeToolRegistryForTests`
+// clears it so each test starts hermetic.
+const COOPERATIVE_TOOL_NAMES = ["request_compaction", "request_end_session", "request_snapshot"] as const;
+type CooperativeToolName = (typeof COOPERATIVE_TOOL_NAMES)[number];
+const cooperativeToolRegistry: Set<CooperativeToolName> = new Set();
+export function __cooperativeToolRegistry(): ReadonlySet<CooperativeToolName> {
   return cooperativeToolRegistry;
 }
 export function __resetCooperativeToolRegistryForTests(): void {
