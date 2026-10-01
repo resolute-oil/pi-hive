@@ -52,7 +52,12 @@ function isLedgerEntry(entry: SessionEntry): entry is SessionEntry & { data: Bud
 
 export class BudgetLedger {
   private readonly sessionManager: SessionManager;
-  private readonly agentName: string;
+  // Public read accessor (F3 T3.4) so events.ts can key its budget-context
+  // map by agent slug without exposing the write surface. Stored as
+  // `_agentName` to keep the public field name `agentName` reserved for the
+  // getter — avoids a setter and prevents callers from overwriting the
+  // constructor-supplied slug.
+  private readonly _agentName: string;
   private readonly policy: WorkerBudgetPolicy;
 
   // The authoritative cumulative spend. Updated on every recordEvent and used
@@ -82,7 +87,7 @@ export class BudgetLedger {
     initialCumulative: { tokens: number; costUsd: number; runs: number },
   ) {
     this.sessionManager = sessionManager;
-    this.agentName = agentName;
+    this._agentName = agentName;
     this.policy = policy;
     this.cumulative.tokens = initialCumulative.tokens;
     this.cumulative.costUsd = initialCumulative.costUsd;
@@ -206,29 +211,62 @@ export class BudgetLedger {
   }
 
   // Explicit checkpoint snapshot. Always persisted (no throttle). Marker is
-  // one of "warning" / "exhausted" / "checkpoint"; kind is optional (used by
-  // cooperative tools / operator commands — see worker-tools.ts).
+  // one of "warning" / "exhausted" / "checkpoint". The optional `kind`
+  // parameter writes a distinct `data.kind` value on the ledger entry — the
+  // F5 operator commands (end / compact / pause / resume / force-kill /
+  // force-end / tear-down-all) and the cooperative tools
+  // (request_compaction / request_end_session / request_snapshot) all pass
+  // a distinct kind here so the dashboard can distinguish operator- vs
+  // worker-initiated shutdowns. When `kind` is omitted, the entry is a
+  // generic "checkpoint" with no documented kind — this matches the
+  // pre-Wave-3 contract that the F5 layer is the only producer of the typed
+  // kind values. Returns the persisted BudgetLedgerEntry so callers
+  // (operator commands) can hand the snapshot back to the operator surface.
+  // S1: options-object overload. The `(stats, policy, marker, signal, kind?)`
+  // positional signature is kept (callers migrate at their pace); the new
+  // `(stats, policy, opts: { marker, signal, kind? })` overload reads more
+  // clearly at the operator-command call sites and is preferred for new
+  // code. Both overloads share a single internal helper to avoid drift.
   snapshot(
     stats: SessionStats,
     _policy: WorkerBudgetPolicy,
     marker: "warning" | "exhausted" | "checkpoint",
-    _signal: AbortSignal,
-  ): void {
+    signal: AbortSignal,
+    kind?: BudgetLedgerKind,
+  ): BudgetLedgerEntry;
+  snapshot(
+    stats: SessionStats,
+    _policy: WorkerBudgetPolicy,
+    opts: { marker: "warning" | "exhausted" | "checkpoint"; signal: AbortSignal; kind?: BudgetLedgerKind },
+  ): BudgetLedgerEntry;
+  snapshot(
+    stats: SessionStats,
+    _policy: WorkerBudgetPolicy,
+    arg3: "warning" | "exhausted" | "checkpoint" | { marker: "warning" | "exhausted" | "checkpoint"; signal: AbortSignal; kind?: BudgetLedgerKind },
+    arg4?: AbortSignal,
+    arg5: BudgetLedgerKind | undefined = undefined,
+  ): BudgetLedgerEntry {
+    const opts: { marker: "warning" | "exhausted" | "checkpoint"; signal: AbortSignal; kind?: BudgetLedgerKind } = typeof arg3 === "string"
+      ? { marker: arg3, signal: arg4 as AbortSignal, kind: arg5 }
+      : arg3;
     const cumulative = {
       tokens: stats.tokens.total,
       costUsd: stats.cost,
       runs: this.cumulative.runs,
     };
-    const written = this.appendLedgerEntry({
+    const data: BudgetLedgerEntry["data"] = {
       caps: this.snapshotCaps(),
       cumulative,
       writtenAt: Date.now(),
       agentSlug: this.agentName,
-      marker,
-    });
+      marker: opts.marker,
+    };
+    if (opts.kind !== undefined) data.kind = opts.kind;
+    const written = this.appendLedgerEntry(data);
     this.entries.push(written);
     this.lastWrittenTokens = cumulative.tokens;
     this.messagesSinceLastSnapshot = 0;
+    return written;
   }
 
   // Append a CustomEntry via the SDK and return the typed projection. The
@@ -243,6 +281,15 @@ export class BudgetLedger {
       customType: LEDGER_CUSTOM_TYPE,
       data,
     };
+  }
+
+  // Public read accessor for the worker slug (F3 T3.4). The `installBudget
+  // ToolCallHandler` extension in events.ts keys its budget-context map by
+  // this string so each worker's `tool_call` handler can look up its own
+  // session state. Read-only — the slug is fixed at restore() time and
+  // never reassigned for the ledger's lifetime.
+  get agentName(): string {
+    return this._agentName;
   }
 
   // Project the resolved policy into the ledger entry's caps shape. Each
