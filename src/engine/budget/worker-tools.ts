@@ -472,10 +472,29 @@ export async function restoreWorkerSession(agent: string | WorkerContext, snapsh
 // (the `kind` parameter was added in Wave 3B so cooperative writes can flow
 // through the same write site as operator commands — no `as unknown as` cast
 // required).
+//
+// Cooperative-tool registry (Wave 3 fixup Issue 4): a module-level Set
+// tracks which cooperative factories have been called. The post-wave review
+// required "verified by a test asserting operator commands don't appear in
+// the cooperative-tool registry"; `__cooperativeToolRegistry` exposes the
+// Set as a test seam and `__resetCooperativeToolRegistryForTests` clears it
+// so each test starts hermetic. Operator commands (forceKillWorkerSession /
+// forceEndWorkerSession / tearDownAllWorkers / etc.) MUST NOT call
+// `cooperativeToolRegistry.add(...)` — the test in
+// `tests/cooperative-eol.test.ts` asserts exactly the three cooperative
+// tool names appear after calling all three factories.
 export async function request_compaction(_customInstructions?: string, _signal?: AbortSignal): Promise<{ ledgerSnapshot: BudgetLedgerEntry }> { throw new Error("not implemented"); }
 export async function request_end_session(_reason: string, _signal: AbortSignal): Promise<{ ledgerSnapshot: BudgetLedgerEntry }> { throw new Error("not implemented"); }
 export async function request_snapshot(_label: string, _signal: AbortSignal): Promise<{ ledgerSnapshot: BudgetLedgerEntry }> { throw new Error("not implemented"); }
+const cooperativeToolRegistry: Set<string> = new Set();
+export function __cooperativeToolRegistry(): ReadonlySet<string> {
+  return cooperativeToolRegistry;
+}
+export function __resetCooperativeToolRegistryForTests(): void {
+  cooperativeToolRegistry.clear();
+}
 export function buildRequestCompactionTool(o: { session: AgentSession; policy: WorkerBudgetPolicy; ledger: BudgetLedger }) {
+  cooperativeToolRegistry.add("request_compaction");
   return async (customInstructions?: string, signal?: AbortSignal) => {
     const max = o.policy.strategies?.summary?.maxTokens;
     const i = [customInstructions, max !== undefined ? `Summarize in at most ${max} tokens.` : null].filter(Boolean).join("\n\n") || undefined;
@@ -484,9 +503,11 @@ export function buildRequestCompactionTool(o: { session: AgentSession; policy: W
   };
 }
 export function buildRequestEndSessionTool(o: { session: AgentSession; policy: WorkerBudgetPolicy; ledger: BudgetLedger }) {
+  cooperativeToolRegistry.add("request_end_session");
   return async (_reason: string, signal: AbortSignal) => { await o.session.abort(); return { ledgerSnapshot: o.ledger.snapshot(o.session.getSessionStats(), o.policy, "checkpoint", signal, "cooperative-end") }; };
 }
 export function buildRequestSnapshotTool(o: { session: AgentSession; policy: WorkerBudgetPolicy; ledger: BudgetLedger }) {
+  cooperativeToolRegistry.add("request_snapshot");
   return async (label: string, signal: AbortSignal) => {
     const sm = o.session.sessionManager;
     sm.branchWithSummary(sm.getLeafId(), label);
