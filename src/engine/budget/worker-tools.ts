@@ -432,11 +432,18 @@ function writeKindLedgerEntry(sm: SessionManager, agent: string, policy: WorkerB
 export async function respawnWorkerSession(agent: string | WorkerContext, _reason: string, _newTask?: string, _signal?: AbortSignal): Promise<{ oldSessionId: string; newSessionId: string; newSession: AgentSession; newSessionManager: SessionManager; controller: AbortController; ledgerSnapshot: BudgetLedgerEntry }> {
   if (typeof agent === "string") throw new Error("not implemented");
   const ctx = agent;
-  const oldSessionId = ctx.session.sessionId, oldLeafId = ctx.sessionManager.getLeafId();
+  const oldSessionId = ctx.session.sessionId;
+  const oldLeafId = ctx.sessionManager.getLeafId();
   ctx.session.dispose();
   const createSM = ctx.internals?.sessionManagerCreate ?? ((c: string) => SessionManagerClass.create(c));
   const newSM = createSM(ctx.cwd);
-  const newSession = (newSM as unknown as { toAgentSession: () => AgentSession }).toAgentSession();
+  // Q1 = A (mirror T5.6 line 459-460): use createAgentSession directly. Drops
+  // the `(newSM as unknown as { toAgentSession: () => AgentSession })` cast
+  // and routes the new session through the same SDK seam restoreWorkerSession
+  // uses. Tests that need to stub the seam inject `createAgentSessionFn`
+  // through `ctx.internals`.
+  const createAgentSessionFn = ctx.internals?.createAgentSessionFn ?? createAgentSession;
+  const { session: newSession } = await createAgentSessionFn({ cwd: ctx.cwd, sessionManager: newSM });
   if (oldLeafId !== null) ctx.sessionManager.branchWithSummary(oldLeafId, "Resumed by operator");
   return { oldSessionId, newSessionId: newSession.sessionId, newSession, newSessionManager: newSM, controller: new AbortController(), ledgerSnapshot: writeKindLedgerEntry(ctx.sessionManager, ctx.agent, ctx.policy, ctx.session.getSessionStats(), ctx.ledger.cumulative.runs, "respawn") };
 }

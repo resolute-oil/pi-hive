@@ -703,7 +703,6 @@ test("T5.3: respawnWorkerSession happy path — creates new session, returns old
 
   const newFakeSessionManager: any = {
     ...sessionManager,
-    toAgentSession: () => ({ sessionId: "new-session-id" }),
   };
 
   const ctx: WorkerContext = {
@@ -713,7 +712,10 @@ test("T5.3: respawnWorkerSession happy path — creates new session, returns old
     ledger,
     policy: basePolicy,
     cwd: "/tmp/work",
-    internals: { sessionManagerCreate: () => newFakeSessionManager },
+    internals: {
+      sessionManagerCreate: () => newFakeSessionManager,
+      createAgentSessionFn: async (_opts: CreateAgentSessionOptions) => ({ session: { sessionId: "new-session-id" } as unknown as AgentSession }),
+    },
   };
 
   const result = await respawnWorkerSession(ctx, "operator requested restart");
@@ -740,7 +742,7 @@ test("T5.3 spy-based order: dispose is called BEFORE create BEFORE branchWithSum
   const { ledger } = makeFakeLedger();
 
   const tracker = makeOrderTracker();
-  const newFakeSM: any = { toAgentSession: () => ({ sessionId: "new-session-id" }) };
+  const newFakeSM: any = {};
   const createSpy = tracker.tagged("create", () => newFakeSM);
   const branchSpy = tracker.tagged("branch", () => "fake-snapshot-id");
   // Capture the original dispose BEFORE installing the spy to avoid
@@ -761,7 +763,10 @@ test("T5.3 spy-based order: dispose is called BEFORE create BEFORE branchWithSum
     ledger,
     policy: basePolicy,
     cwd: "/tmp/work",
-    internals: { sessionManagerCreate: createSpy },
+    internals: {
+      sessionManagerCreate: createSpy,
+      createAgentSessionFn: async (_opts: CreateAgentSessionOptions) => ({ session: { sessionId: "new-session-id" } as unknown as AgentSession }),
+    },
   };
 
   await respawnWorkerSession(ctx, "test");
@@ -784,9 +789,7 @@ test("T5.3 listeners removed after dispose: no event fires on the disposed sessi
   const unsubscribe = session.subscribe(() => { listenerCalls += 1; });
   assert.equal(getListeners().length, 1, "listener registered");
 
-  const newFakeSessionManager: any = {
-    toAgentSession: () => ({ sessionId: "new-session-id" }),
-  };
+  const newFakeSessionManager: any = {};
 
   const ctx: WorkerContext = {
     agent: "coder",
@@ -795,7 +798,10 @@ test("T5.3 listeners removed after dispose: no event fires on the disposed sessi
     ledger,
     policy: basePolicy,
     cwd: "/tmp/work",
-    internals: { sessionManagerCreate: () => newFakeSessionManager },
+    internals: {
+      sessionManagerCreate: () => newFakeSessionManager,
+      createAgentSessionFn: async (_opts: CreateAgentSessionOptions) => ({ session: { sessionId: "new-session-id" } as unknown as AgentSession }),
+    },
   };
 
   await respawnWorkerSession(ctx, "test");
@@ -1252,8 +1258,14 @@ test("Wave 3 fixup Issue 2: 11 operator commands + 3 cooperative tools each emit
   {
     const { session, sessionManager } = makeFakeRespawnSession({ sessionId: "kinds-respawn-session" });
     const { ledger } = makeFakeLedger();
-    const newFakeSM: any = { ...sessionManager, toAgentSession: () => ({ sessionId: "kinds-respawn-new" }) };
-    const ctx: WorkerContext = { agent: "kinds-respawn", session, sessionManager, ledger, policy: basePolicy, cwd: "/tmp/work", internals: { sessionManagerCreate: () => newFakeSM } };
+    const newFakeSM: any = { ...sessionManager };
+    const ctx: WorkerContext = {
+      agent: "kinds-respawn", session, sessionManager, ledger, policy: basePolicy, cwd: "/tmp/work",
+      internals: {
+        sessionManagerCreate: () => newFakeSM,
+        createAgentSessionFn: async (_opts: CreateAgentSessionOptions) => ({ session: { sessionId: "kinds-respawn-new" } as unknown as AgentSession }),
+      },
+    };
     const r = await workerTools.respawnWorkerSession(ctx, "operator requested restart");
     const k = r.ledgerSnapshot.data.kind;
     if (k !== undefined) collectedKinds.add(k);
