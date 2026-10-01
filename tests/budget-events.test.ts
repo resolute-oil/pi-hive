@@ -139,6 +139,22 @@ const basePolicy: WorkerBudgetPolicy = {
   team: {},
 };
 
+// I6: shared no-op ledger stub for tests that only need to satisfy
+// installBudgetEventHooks' BudgetLedger type. Replaces ~17 inline
+// `{ cumulative: { tokens: 0, costUsd: 0, runs: 0 }, recordEvent: () => {},
+// maybeSnapshot: () => {}, recordCompaction: () => {}, snapshot: () => {} }`
+// duplicates. Tests that need to record calls keep `makeLedger()`.
+function makeStubLedger(agentName?: string): BudgetLedger {
+  return {
+    cumulative: { tokens: 0, costUsd: 0, runs: 0 },
+    recordEvent: () => {},
+    maybeSnapshot: () => {},
+    recordCompaction: () => {},
+    snapshot: () => {},
+    agentName,
+  } as unknown as BudgetLedger;
+}
+
 // ── Test 1: installBudgetEventHooks returns an unsubscribe function ───────
 
 test("installBudgetEventHooks returns an unsubscribe function; no events fire after unsubscribe", () => {
@@ -289,7 +305,7 @@ test("message_end does NOT emit a second budget_warning when already warned (ide
 
   installBudgetEventHooks(
     session,
-    { cumulative: { tokens: 0, costUsd: 0, runs: 0 }, recordEvent: () => {}, maybeSnapshot: () => {}, recordCompaction: () => {}, snapshot: () => {} } as unknown as BudgetLedger,
+    makeStubLedger(),
     { worker: { tokens: { cap: 200 } }, team: {} },
     new AbortController(),
   );
@@ -324,7 +340,7 @@ test("message_end aborts via controller.signal at 0% remaining (default strategi
   const ctrl = new AbortController();
   installBudgetEventHooks(
     session,
-    { cumulative: { tokens: 0, costUsd: 0, runs: 0 }, recordEvent: () => {}, maybeSnapshot: () => {}, recordCompaction: () => {}, snapshot: () => {} } as unknown as BudgetLedger,
+    makeStubLedger(),
     { worker: { tokens: { cap: 200 } }, team: {} },
     ctrl,
   );
@@ -361,7 +377,7 @@ test("strategies.onExhaustion.action === 'compact' writes budget_exhausted but d
   const ctrl = new AbortController();
   installBudgetEventHooks(
     session,
-    { cumulative: { tokens: 0, costUsd: 0, runs: 0 }, recordEvent: () => {}, maybeSnapshot: () => {}, recordCompaction: () => {}, snapshot: () => {} } as unknown as BudgetLedger,
+    makeStubLedger(),
     {
       worker: { tokens: { cap: 200 } },
       team: {},
@@ -404,7 +420,7 @@ test("strategies.onExhaustion.action === 'none' does NOT abort and does NOT writ
   const ctrl = new AbortController();
   installBudgetEventHooks(
     session,
-    { cumulative: { tokens: 0, costUsd: 0, runs: 0 }, recordEvent: () => {}, maybeSnapshot: () => {}, recordCompaction: () => {}, snapshot: () => {} } as unknown as BudgetLedger,
+    makeStubLedger(),
     {
       worker: { tokens: { cap: 200 } },
       team: {},
@@ -560,7 +576,7 @@ test("strategies.onApproachingLimit.threshold drives the warning emit (custom th
   // would fire here; the default 0.20 threshold would NOT.
   installBudgetEventHooks(
     session,
-    { cumulative: { tokens: 0, costUsd: 0, runs: 0 }, recordEvent: () => {}, maybeSnapshot: () => {}, recordCompaction: () => {}, snapshot: () => {} } as unknown as BudgetLedger,
+    makeStubLedger(),
     {
       worker: { tokens: { cap: 100 } },
       team: {},
@@ -590,6 +606,39 @@ test("strategies.onApproachingLimit.threshold drives the warning emit (custom th
 // ordering), T3.6 (abort-then-agent_settled ordering), T4.2
 // (agent_end no longer does budget finalization). T4.1 (agent_settled
 // final snapshot) is already pinned by the test 11 above.
+
+// ── Wave 3 fixup I2: budget context registered BEFORE session.subscribe ──
+
+test("Wave 3 fixup I2: installBudgetEventHooks registers the budget context BEFORE calling session.subscribe (no leak window for the first event)", () => {
+  _resetBudgetContextsForTests();
+  // Recorder that captures whether the budget context is observable at
+  // the moment session.subscribe is called. If the implementation ever
+  // regresses and calls subscribe() before budgetContextsByAgent.set(),
+  // this assertion fires.
+  let contextPresentAtSubscribe = false;
+  let captured: Listener | undefined;
+  const session = {
+    subscribe(listener: Listener) {
+      // At the moment subscribe is called, the budget context must
+      // already be registered for the agent slug the test supplies.
+      contextPresentAtSubscribe = getBudgetContextForAgent("tester-i2") !== undefined;
+      captured = listener;
+      return () => { captured = undefined; };
+    },
+    getSessionStats: () => ({ sessionFile: undefined, sessionId: "x", userMessages: 0, assistantMessages: 0, toolCalls: 0, toolResults: 0, totalMessages: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
+    sessionManager: { appendCustomMessageEntry() {}, appendCustomEntry() {} },
+  } as unknown as AgentSession;
+
+  installBudgetEventHooks(
+    session,
+    makeStubLedger("tester-i2"),
+    { worker: {}, team: {} },
+    new AbortController(),
+  );
+
+  assert.equal(contextPresentAtSubscribe, true, "budget context is observable at session.subscribe() call time");
+  _resetBudgetContextsForTests();
+});
 
 // ── T3.1 hard gate: throttle works (≤200 writes per 1000 message_end) ───
 
@@ -696,7 +745,7 @@ test("F3 T3.1 hard gate: crossing both 20% and 0% in the same run writes both ma
   };
 
   const ctrl = new AbortController();
-  installBudgetEventHooks(session, { cumulative: { tokens: 0, costUsd: 0, runs: 0 }, recordEvent: () => {}, maybeSnapshot: () => {}, recordCompaction: () => {}, snapshot: () => {} } as unknown as BudgetLedger, { worker: { tokens: { cap: 100 } }, team: {} }, ctrl);
+  installBudgetEventHooks(session, makeStubLedger(), { worker: { tokens: { cap: 100 } }, team: {} }, ctrl);
 
   captured!({ type: "message_end", message: { usage: {} as any, role: "assistant" } } as any);
   captured!({ type: "message_end", message: { usage: {} as any, role: "assistant" } } as any);
@@ -733,7 +782,7 @@ test("F3 T3.2 hard gate: warning emitted exactly once per worker across 100 mess
   // threshold. Fire 100 message_end events; the dedup key
   // "worker:tokens" (hardcoded at events.ts:72 per the brief's T3.2
   // note) MUST keep the warning emit at exactly 1.
-  installBudgetEventHooks(session, { cumulative: { tokens: 0, costUsd: 0, runs: 0 }, recordEvent: () => {}, maybeSnapshot: () => {}, recordCompaction: () => {}, snapshot: () => {} } as unknown as BudgetLedger, { worker: { tokens: { cap: 100 } }, team: {} }, new AbortController());
+  installBudgetEventHooks(session, makeStubLedger(), { worker: { tokens: { cap: 100 } }, team: {} }, new AbortController());
 
   for (let i = 0; i < 100; i++) {
     captured!({ type: "message_end", message: { usage: {} as any, role: "assistant" } } as any);
@@ -770,7 +819,7 @@ test("F3 T3.2 hard gate: worker SEES the warning in next prompt context (CustomM
     },
   } as unknown as AgentSession;
 
-  installBudgetEventHooks(session, { cumulative: { tokens: 0, costUsd: 0, runs: 0 }, recordEvent: () => {}, maybeSnapshot: () => {}, recordCompaction: () => {}, snapshot: () => {} } as unknown as BudgetLedger, { worker: { tokens: { cap: 100 } }, team: {} }, new AbortController());
+  installBudgetEventHooks(session, makeStubLedger(), { worker: { tokens: { cap: 100 } }, team: {} }, new AbortController());
 
   captured!({ type: "message_end", message: { usage: {} as any, role: "assistant" } } as any);
 
@@ -806,7 +855,7 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks bash when workerTokensRema
     sessionManager: { appendCustomMessageEntry() {}, appendCustomEntry() {} },
   } as unknown as AgentSession;
 
-  installBudgetEventHooks(session, { cumulative: { tokens: 0, costUsd: 0, runs: 0 }, recordEvent: () => {}, maybeSnapshot: () => {}, recordCompaction: () => {}, snapshot: () => {}, agentName: "tester" } as unknown as BudgetLedger, { worker: { tokens: { cap: 100 } }, team: {} }, new AbortController());
+  installBudgetEventHooks(session, makeStubLedger("tester"), { worker: { tokens: { cap: 100 } }, team: {} }, new AbortController());
 
   // 100 used / 100 cap → 0 remaining → bash MUST be blocked.
   const handler = buildBudgetToolCallHandler("tester");
@@ -815,7 +864,7 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks bash when workerTokensRema
   const result = await handler({ toolName: "bash", input: { command: "ls" } }, {} as any);
   assert.ok(result, "block result returned for bash when exhausted");
   assert.equal(result!.block, true);
-  assert.match(result!.reason, /tokens 100\/100/);
+  assert.match(result!.reason!, /tokens 100\/100/);
   assert.equal(result!.terminate, false, "tool_call block sets terminate=false; controller.abort handles termination");
   _resetBudgetContextsForTests();
 });
@@ -834,7 +883,7 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks edit when workerTokensRema
     sessionManager: { appendCustomMessageEntry() {}, appendCustomEntry() {} },
   } as unknown as AgentSession;
 
-  installBudgetEventHooks(session, { cumulative: { tokens: 0, costUsd: 0, runs: 0 }, recordEvent: () => {}, maybeSnapshot: () => {}, recordCompaction: () => {}, snapshot: () => {}, agentName: "tester" } as unknown as BudgetLedger, { worker: { tokens: { cap: 100 } }, team: {} }, new AbortController());
+  installBudgetEventHooks(session, makeStubLedger("tester"), { worker: { tokens: { cap: 100 } }, team: {} }, new AbortController());
 
   const result = await buildBudgetToolCallHandler("tester")({ toolName: "edit", input: { path: "x" } }, {} as any);
   assert.ok(result, "block result returned for edit when exhausted");
@@ -856,7 +905,7 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks write when workerTokensRem
     sessionManager: { appendCustomMessageEntry() {}, appendCustomEntry() {} },
   } as unknown as AgentSession;
 
-  installBudgetEventHooks(session, { cumulative: { tokens: 0, costUsd: 0, runs: 0 }, recordEvent: () => {}, maybeSnapshot: () => {}, recordCompaction: () => {}, snapshot: () => {}, agentName: "tester" } as unknown as BudgetLedger, { worker: { tokens: { cap: 100 } }, team: {} }, new AbortController());
+  installBudgetEventHooks(session, makeStubLedger("tester"), { worker: { tokens: { cap: 100 } }, team: {} }, new AbortController());
 
   const result = await buildBudgetToolCallHandler("tester")({ toolName: "write", input: { path: "x", content: "y" } }, {} as any);
   assert.ok(result, "block result returned for write when exhausted");
@@ -878,7 +927,7 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks read when workerTokensRema
     sessionManager: { appendCustomMessageEntry() {}, appendCustomEntry() {} },
   } as unknown as AgentSession;
 
-  installBudgetEventHooks(session, { cumulative: { tokens: 0, costUsd: 0, runs: 0 }, recordEvent: () => {}, maybeSnapshot: () => {}, recordCompaction: () => {}, snapshot: () => {}, agentName: "tester" } as unknown as BudgetLedger, { worker: { tokens: { cap: 100 } }, team: {} }, new AbortController());
+  installBudgetEventHooks(session, makeStubLedger("tester"), { worker: { tokens: { cap: 100 } }, team: {} }, new AbortController());
 
   const result = await buildBudgetToolCallHandler("tester")({ toolName: "read", input: { path: "x" } }, {} as any);
   assert.ok(result, "block result returned for read when exhausted");
@@ -901,12 +950,12 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks bash when workerCostUsdRem
     sessionManager: { appendCustomMessageEntry() {}, appendCustomEntry() {} },
   } as unknown as AgentSession;
 
-  installBudgetEventHooks(session, { cumulative: { tokens: 0, costUsd: 0, runs: 0 }, recordEvent: () => {}, maybeSnapshot: () => {}, recordCompaction: () => {}, snapshot: () => {}, agentName: "tester" } as unknown as BudgetLedger, { worker: { tokens: { cap: 100 }, costUsd: { cap: 1.0 } }, team: {} }, new AbortController());
+  installBudgetEventHooks(session, makeStubLedger("tester"), { worker: { tokens: { cap: 100 }, costUsd: { cap: 1.0 } }, team: {} }, new AbortController());
 
   const result = await buildBudgetToolCallHandler("tester")({ toolName: "bash", input: { command: "ls" } }, {} as any);
   assert.ok(result, "block result returned for bash when cost exhausted (tokens OK)");
   assert.equal(result!.block, true);
-  assert.match(result!.reason, /cost/);
+  assert.match(result!.reason!, /cost/);
   _resetBudgetContextsForTests();
 });
 
@@ -926,7 +975,7 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler is a no-op when controller.signal
 
   const ctrl = new AbortController();
   ctrl.abort(); // pre-aborted — the budget gate is no longer authoritative; controller handles end-of-run.
-  installBudgetEventHooks(session, { cumulative: { tokens: 0, costUsd: 0, runs: 0 }, recordEvent: () => {}, maybeSnapshot: () => {}, recordCompaction: () => {}, snapshot: () => {}, agentName: "tester" } as unknown as BudgetLedger, { worker: { tokens: { cap: 100 } }, team: {} }, ctrl);
+  installBudgetEventHooks(session, makeStubLedger("tester"), { worker: { tokens: { cap: 100 } }, team: {} }, ctrl);
 
   // Even though tokens are at the cap, the handler returns undefined
   // because the controller is already aborted — letting the abort take
@@ -950,7 +999,7 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler does NOT block grep/find/ls/custo
     sessionManager: { appendCustomMessageEntry() {}, appendCustomEntry() {} },
   } as unknown as AgentSession;
 
-  installBudgetEventHooks(session, { cumulative: { tokens: 0, costUsd: 0, runs: 0 }, recordEvent: () => {}, maybeSnapshot: () => {}, recordCompaction: () => {}, snapshot: () => {}, agentName: "tester" } as unknown as BudgetLedger, { worker: { tokens: { cap: 100 } }, team: {} }, new AbortController());
+  installBudgetEventHooks(session, makeStubLedger("tester"), { worker: { tokens: { cap: 100 } }, team: {} }, new AbortController());
 
   const handler = buildBudgetToolCallHandler("tester");
   for (const toolName of ["grep", "find", "ls", "custom"]) {
@@ -989,7 +1038,7 @@ test("F3 T3.5 G-17: warning CustomMessageEntry lands BEFORE summarize_progress p
     },
   } as unknown as AgentSession;
 
-  installBudgetEventHooks(session, { cumulative: { tokens: 0, costUsd: 0, runs: 0 }, recordEvent: () => {}, maybeSnapshot: () => {}, recordCompaction: () => {}, snapshot: () => {}, agentName: "tester" } as unknown as BudgetLedger, { worker: { tokens: { cap: 100 } }, team: {}, strategies: { onApproachingLimit: { action: "wrap-up", threshold: 0.20, hint: "" }, onExhaustion: { action: "abort" }, summary: { maxTokens: 1000 } } }, new AbortController());
+  installBudgetEventHooks(session, makeStubLedger("tester"), { worker: { tokens: { cap: 100 } }, team: {}, strategies: { onApproachingLimit: { action: "wrap-up", threshold: 0.20, hint: "" }, onExhaustion: { action: "abort" }, summary: { maxTokens: 1000 } } }, new AbortController());
 
   // Fire a message_end past the warning threshold (10% remaining
   // with the default 20% threshold — warning fires).
@@ -1129,7 +1178,7 @@ test("F4 T4.2 verify-clean: agent_end without agent_settled does NOT write a fin
     },
   } as unknown as AgentSession;
 
-  installBudgetEventHooks(session, { cumulative: { tokens: 0, costUsd: 0, runs: 0 }, recordEvent: () => {}, maybeSnapshot: () => {}, recordCompaction: () => {}, snapshot: () => {} } as unknown as BudgetLedger, basePolicy, new AbortController());
+  installBudgetEventHooks(session, makeStubLedger(), basePolicy, new AbortController());
 
   // Fire ONLY agent_end (no follow-up agent_settled). No
   // budget_checkpoint snapshot should be written by the
