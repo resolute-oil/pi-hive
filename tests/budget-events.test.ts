@@ -1151,3 +1151,82 @@ test("F4 T4.2 verify-clean: agent_end without agent_settled does NOT write a fin
   assert.equal(checkpoints.length, 0, "agent_end's text-fallback path never appends a budget_checkpoint entry");
   _resetBudgetContextsForTests();
 });
+
+// ── Wave 3 fixup Issue 3: agent_end + agent_settled → exactly one final snapshot (T4.1) ──
+
+// Per the post-wave review: \"agent_settled triggers exactly one final
+// snapshot (T4.1) — verified by a test that fires agent_end then
+// agent_settled and asserts the snapshot count.\" The pre-fix Test 11
+// above fires agent_settled by itself; this test pins the END-to-SETTLED
+// sequence to assert that the second event (agent_settled) triggers the
+// final snapshot and NOT agent_end — so the snapshot count for the
+// pair of events is exactly 1.
+test("Wave 3 fixup Issue 3 / T4.1: agent_end followed by agent_settled yields exactly one final budget_checkpoint snapshot", () => {
+  _resetBudgetContextsForTests();
+  let captured: Listener | undefined;
+  const appendedEntries: Array<{ customType: string; data?: any }> = [];
+  const session = {
+    subscribe(listener: Listener) {
+      captured = listener;
+      return () => { captured = undefined; };
+    },
+    getSessionStats: () => ({
+      sessionFile: undefined,
+      sessionId: "x",
+      userMessages: 1,
+      assistantMessages: 1,
+      toolCalls: 0,
+      toolResults: 0,
+      totalMessages: 2,
+      tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, total: 150 },
+      cost: 0.01,
+    }),
+    sessionManager: {
+      appendCustomMessageEntry() {},
+      appendCustomEntry(customType: string, data?: any) {
+        appendedEntries.push({ customType, data });
+      },
+    },
+  } as unknown as AgentSession;
+
+  // Recording snapshot that mirrors BudgetLedger.snapshot() enough to
+  // satisfy the test: it pushes a pi-hive-budget-ledger CustomEntry with
+  // the documented marker shape AND records its own call count so the
+  // test can verify the gate is on agent_settled (not agent_end).
+  const snapshotCalls: Array<{ marker: string }> = [];
+  installBudgetEventHooks(
+    session,
+    {
+      cumulative: { tokens: 0, costUsd: 0, runs: 0 },
+      recordEvent: () => {},
+      maybeSnapshot: () => {},
+      recordCompaction: () => {},
+      snapshot(_stats: unknown, _policy: unknown, marker: string) {
+        snapshotCalls.push({ marker });
+        appendedEntries.push({
+          customType: "pi-hive-budget-ledger",
+          data: { marker, cumulative: { tokens: 0, costUsd: 0, runs: 0 }, writtenAt: 0, agentSlug: "x" },
+        });
+      },
+    } as unknown as BudgetLedger,
+    basePolicy,
+    new AbortController(),
+  );
+
+  // Step 1: fire agent_end. The handler must NOT call ledger.snapshot —
+  // agent_end is text-fallback only (per T4.2).
+  captured!({ type: "agent_end", messages: [], willRetry: false } as any);
+  assert.equal(snapshotCalls.length, 0, "agent_end does NOT call ledger.snapshot (no snapshot, no checkpoint)");
+  const ledgersAfterAgentEnd = appendedEntries.filter((e) => e.customType === "pi-hive-budget-ledger");
+  assert.equal(ledgersAfterAgentEnd.length, 0, "agent_end does NOT write a budget-ledger entry");
+
+  // Step 2: fire agent_settled. The handler MUST call ledger.snapshot
+  // exactly once with marker='checkpoint'.
+  captured!({ type: "agent_settled" } as any);
+  assert.equal(snapshotCalls.length, 1, "agent_settled calls ledger.snapshot exactly once");
+  assert.equal(snapshotCalls[0].marker, "checkpoint", "the final snapshot marker is 'checkpoint'");
+  const ledgersAfterAgentSettled = appendedEntries.filter((e) => e.customType === "pi-hive-budget-ledger");
+  assert.equal(ledgersAfterAgentSettled.length, 1, "exactly one budget-ledger entry written across the agent_end → agent_settled sequence");
+  assert.equal(ledgersAfterAgentSettled[0].data.marker, "checkpoint", "the written entry's marker is 'checkpoint'");
+  _resetBudgetContextsForTests();
+});
