@@ -28,7 +28,7 @@
 // budget-context registration so a stale agent name cannot leak the context
 // to a future worker that happens to reuse the slug.
 
-import type { AgentSession, SessionStats } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, AgentSessionEvent, ExtensionToolContext, SessionStats, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import type { BudgetLedger } from "./ledger";
 import type { WorkerBudgetPolicy } from "../../core/types";
 
@@ -87,8 +87,9 @@ export function _resetBudgetContextsForTests(): void {
 
 // The four tool names the F3 brief calls out (T3.4 G-01). Other tools
 // (grep, find, ls, custom tools) pass through the budget gate untouched;
-// the brief's scope is explicit on these four.
-const BLOCKED_TOOL_NAMES = new Set(["bash", "edit", "write", "read"]);
+// the brief's scope is explicit on these four. S4: exported so the
+// four-tool gate can be pinned from a single source of truth.
+export const BLOCKED_TOOL_NAMES = new Set(["bash", "edit", "write", "read"]);
 
 // Build a `tool_call` handler for a specific worker. The returned closure
 // is registered via the extension API (`pi.on("tool_call", handler)`) by
@@ -118,7 +119,12 @@ export function buildBudgetToolCallHandler(agentName: string) {
   // The event shape is `ToolCallEvent` (extensions/types.d.ts:884) — a
   // discriminated union on `toolName`; for budget-gating we only need the
   // `toolName` discriminator, so the wider shape is structurally compatible.
-  return async (event: { toolName: string; input?: unknown }, _ctx: unknown): Promise<{ block: true; reason: string; terminate: false } | undefined> => {
+  // C4 + I5: typed as `ToolCallEventResult` / `ExtensionToolContext` from
+  // the SDK. The handler still returns the same `{ block, reason,
+  // terminate }` shape; the type just moves from a local literal to the
+  // SDK's discriminated `ToolCallEventResult` so future arms (e.g.,
+  // `notify`, `content`) are typed automatically.
+  return async (event: { toolName: string; input?: unknown }, _ctx: ExtensionToolContext): Promise<ToolCallEventResult | undefined> => {
     const budgetCtx = budgetContextsByAgent.get(agentName);
     if (!budgetCtx) return undefined;
 
@@ -168,10 +174,15 @@ export function installBudgetEventHooks(
   // so a re-delegation that reuses the same slug overwrites the prior
   // context — the prior context's unsubscribe already removed the old
   // entry, so there is no leak window.
+  //
+  // I2 fix: register the context BEFORE `session.subscribe(...)` so the
+  // very first event the listener sees can already resolve the budget
+  // context. The regression test in tests/budget-events.test.ts asserts
+  // the registration order via a captured subscribe-call timing.
   const agentSlug = ledger.agentName;
   budgetContextsByAgent.set(agentSlug, { session, ledger, policy, controller });
 
-  const off = session.subscribe((event: any) => {
+  const off = session.subscribe((event: AgentSessionEvent) => {
     if (event.type === "message_end") {
       const stats = session.getSessionStats();
       const cumulative = cumulativeFromStats(stats, ledger);
@@ -244,8 +255,8 @@ export function installBudgetEventHooks(
         });
         return;
       }
-      const result = event.result ?? {};
-      if (result.tokensBefore != null && result.estimatedTokensAfter != null) {
+      const result = event.result;
+      if (result != null && result.tokensBefore != null && result.estimatedTokensAfter != null) {
         const savings = result.tokensBefore - result.estimatedTokensAfter;
         ledger.recordCompaction(savings, controller.signal);
       }
