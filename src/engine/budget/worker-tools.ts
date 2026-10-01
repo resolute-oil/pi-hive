@@ -467,8 +467,11 @@ export async function restoreWorkerSession(agent: string | WorkerContext, snapsh
 // >>> region: agent-3D (T5.10, T5.11, T5.12)
 // 3D region: F5 cooperative tools (agent-callable). Each `buildRequest*Tool`
 // factory returns the async callable (per `buildSummarizeProgressTool`).
-// T5.10 honors `policy.strategies.summary.maxTokens`; ledger writes bypass
-// `BudgetLedger.snapshot()` (no `kind` param) via `writeCooperativeSnapshot`.
+// T5.10 honors `policy.strategies.summary.maxTokens`; the cooperative tools
+// share the F5 ledger write path via `ledger.snapshot(stats, policy, "checkpoint", signal, kind)`
+// (the `kind` parameter was added in Wave 3B so cooperative writes can flow
+// through the same write site as operator commands — no `as unknown as` cast
+// required).
 export async function request_compaction(_customInstructions?: string, _signal?: AbortSignal): Promise<{ ledgerSnapshot: BudgetLedgerEntry }> { throw new Error("not implemented"); }
 export async function request_end_session(_reason: string, _signal: AbortSignal): Promise<{ ledgerSnapshot: BudgetLedgerEntry }> { throw new Error("not implemented"); }
 export async function request_snapshot(_label: string, _signal: AbortSignal): Promise<{ ledgerSnapshot: BudgetLedgerEntry }> { throw new Error("not implemented"); }
@@ -477,26 +480,18 @@ export function buildRequestCompactionTool(o: { session: AgentSession; policy: W
     const max = o.policy.strategies?.summary?.maxTokens;
     const i = [customInstructions, max !== undefined ? `Summarize in at most ${max} tokens.` : null].filter(Boolean).join("\n\n") || undefined;
     await o.session.compact(i);
-    return { ledgerSnapshot: writeCooperativeSnapshot({ session: o.session, ledger: o.ledger, kind: "cooperative-compact", signal: signal ?? new AbortController().signal }) };
+    return { ledgerSnapshot: o.ledger.snapshot(o.session.getSessionStats(), o.policy, "checkpoint", signal ?? new AbortController().signal, "cooperative-compact") };
   };
 }
 export function buildRequestEndSessionTool(o: { session: AgentSession; policy: WorkerBudgetPolicy; ledger: BudgetLedger }) {
-  return async (_reason: string, signal: AbortSignal) => { await o.session.abort(); return { ledgerSnapshot: writeCooperativeSnapshot({ session: o.session, ledger: o.ledger, kind: "cooperative-end", signal }) }; };
+  return async (_reason: string, signal: AbortSignal) => { await o.session.abort(); return { ledgerSnapshot: o.ledger.snapshot(o.session.getSessionStats(), o.policy, "checkpoint", signal, "cooperative-end") }; };
 }
 export function buildRequestSnapshotTool(o: { session: AgentSession; policy: WorkerBudgetPolicy; ledger: BudgetLedger }) {
   return async (label: string, signal: AbortSignal) => {
     const sm = o.session.sessionManager;
     sm.branchWithSummary(sm.getLeafId(), label);
-    return { ledgerSnapshot: writeCooperativeSnapshot({ session: o.session, ledger: o.ledger, kind: "cooperative-snapshot", signal }) };
+    return { ledgerSnapshot: o.ledger.snapshot(o.session.getSessionStats(), o.policy, "checkpoint", signal, "cooperative-snapshot") };
   };
-}
-function writeCooperativeSnapshot({ session, ledger, kind, signal }: { session: AgentSession; ledger: BudgetLedger; kind: "cooperative-compact" | "cooperative-end" | "cooperative-snapshot"; signal: AbortSignal }): BudgetLedgerEntry {
-  const stats = session.getSessionStats(), sm = session.sessionManager;
-  const li = ledger as unknown as { agentName: string; snapshotCaps: () => BudgetLedgerEntry["data"]["caps"]; entries: BudgetLedgerEntry[] };
-  const data: BudgetLedgerEntry["data"] = { caps: li.snapshotCaps(), cumulative: { tokens: stats.tokens.total, costUsd: stats.cost, runs: ledger.cumulative.runs }, writtenAt: Date.now(), agentSlug: li.agentName, marker: "checkpoint", kind };
-  const entry: BudgetLedgerEntry = { type: "custom", customType: "pi-hive-budget-ledger", data };
-  sm.appendCustomEntry("pi-hive-budget-ledger", data); li.entries.push(entry); void signal;
-  return entry;
 }
 
 // <<< region: agent-3D
