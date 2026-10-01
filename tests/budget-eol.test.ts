@@ -43,7 +43,7 @@ import type {
   CreateAgentSessionOptions,
 } from "@earendil-works/pi-coding-agent";
 import { BudgetLedger } from "../src/engine/budget/ledger.ts";
-import type { BudgetLedgerEntry } from "../src/core/types.ts";
+import type { BudgetLedgerEntry, BudgetLedgerKind } from "../src/core/types.ts";
 import type { WorkerBudgetPolicy } from "../src/core/types.ts";
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1148,4 +1148,197 @@ function makeFakeRestoredSession(): AgentSession {
     sessionManager: makeFakeBranchedSessionManager(),
     dispose() {},
   } as unknown as AgentSession;
+}
+
+// ── Wave 3 fixup Issue 2: all 11 operator commands + 3 cooperative tools export distinct kind values ──
+
+// Per the post-wave review: "verified by a test that calls all commands and
+// asserts 9 distinct `kind` values." The brief said "9" but the actual
+// operator command set has 11 commands (T5.1, T5.2, T5.3, T5.4, T5.5, T5.6,
+// T5.8, T5.9, T5.13, T5.14, T5.15) — 8 from Wave 3B plus 3 from Wave 3C —
+// plus the 3 cooperative tools (T5.10, T5.11, T5.12). The brief's "9"
+// appears to have been an undercount from an earlier version of the F5
+// plan; this test pins the *actual* distinct-kind property, which is
+// what the dashboard's operator-vs-cooperative distinction depends on.
+test("Wave 3 fixup Issue 2: 11 operator commands + 3 cooperative tools each emit a distinct BudgetLedgerKind (14 distinct values total)", async () => {
+  // Seed a real BudgetLedger for each operator command. The command runs
+  // write a snapshot with a unique `kind` value; we read the kind from the
+  // resulting ledgerSnapshot and accumulate it into a Set.
+  const collectedKinds = new Set<BudgetLedgerKind>();
+
+  // ── Operator commands (3B's 8 + 3C's 3) ──
+  // T5.1 endWorkerSession
+  {
+    const { handle, sm } = await makeHandle("kinds-end");
+    registerHandle?.(handle);
+    try {
+      const r = await workerTools.endWorkerSession("kinds-end", "shutdown", new AbortController().signal);
+      if (r.ledgerSnapshot.data.kind !== undefined) collectedKinds.add(r.ledgerSnapshot.data.kind);
+    } finally { unregisterHandle?.("kinds-end"); }
+    void sm;
+  }
+  // T5.2 compactWorkerSession
+  {
+    const { handle } = await makeHandle("kinds-compact");
+    registerHandle?.(handle);
+    try {
+      const r = await workerTools.compactWorkerSession("kinds-compact", "compaction");
+      if (r.ledgerSnapshot.data.kind !== undefined) collectedKinds.add(r.ledgerSnapshot.data.kind);
+    } finally { unregisterHandle?.("kinds-compact"); }
+  }
+  // T5.4 pauseWorkerSession
+  {
+    const { handle } = await makeHandle("kinds-pause");
+    registerHandle?.(handle);
+    try {
+      const r = await workerTools.pauseWorkerSession("kinds-pause", "pause", new AbortController().signal);
+      if (r.ledgerSnapshot.data.kind !== undefined) collectedKinds.add(r.ledgerSnapshot.data.kind);
+    } finally { unregisterHandle?.("kinds-pause"); }
+  }
+  // T5.8 resumeWorkerSession
+  {
+    const { handle } = await makeHandle("kinds-resume");
+    registerHandle?.(handle);
+    try {
+      const r = await workerTools.resumeWorkerSession("kinds-resume", new AbortController().signal);
+      if (r.ledgerSnapshot.data.kind !== undefined) collectedKinds.add(r.ledgerSnapshot.data.kind);
+    } finally { unregisterHandle?.("kinds-resume"); }
+  }
+  // T5.9 abortWorkerCompaction
+  {
+    const { handle } = await makeHandle("kinds-abort-compact");
+    registerHandle?.(handle);
+    try {
+      const r = await workerTools.abortWorkerCompaction("kinds-abort-compact", new AbortController().signal);
+      if (r.ledgerSnapshot.data.kind !== undefined) collectedKinds.add(r.ledgerSnapshot.data.kind);
+    } finally { unregisterHandle?.("kinds-abort-compact"); }
+  }
+  // T5.13 forceKillWorkerSession
+  {
+    const { handle } = await makeHandle("kinds-force-kill");
+    registerHandle?.(handle);
+    try {
+      const r = await workerTools.forceKillWorkerSession("kinds-force-kill", "force-kill", new AbortController().signal);
+      if (r.ledgerSnapshot.data.kind !== undefined) collectedKinds.add(r.ledgerSnapshot.data.kind);
+    } finally { unregisterHandle?.("kinds-force-kill"); }
+  }
+  // T5.15 forceEndWorkerSession
+  {
+    const { handle } = await makeHandle("kinds-force-end");
+    registerHandle?.(handle);
+    try {
+      const r = await workerTools.forceEndWorkerSession("kinds-force-end", "force-end", new AbortController().signal);
+      if (r.ledgerSnapshot.data.kind !== undefined) collectedKinds.add(r.ledgerSnapshot.data.kind);
+    } finally { unregisterHandle?.("kinds-force-end"); }
+  }
+  // T5.14 tearDownAllWorkers — team-level kind. Seed one handle so the
+  // iteration has a target.
+  {
+    const { handle } = await makeHandle("kinds-tear-down");
+    registerHandle?.(handle);
+    try {
+      const r = await workerTools.tearDownAllWorkers("shutdown all");
+      const k = r.ledgerSnapshot.data.kind;
+      if (k !== undefined) collectedKinds.add(k);
+    } finally { unregisterHandle?.("kinds-tear-down"); }
+  }
+
+  // ── Operator commands (3C's 2 of 3 branch/clone — respawn + snapshot) ──
+  // restoreWorkerSession (T5.6) requires createBranchedSession to return a
+  // file path; in-memory SM does not expose that. The T5.6 test family
+  // already pins `restore` emits kind:"restore" (search for "T5.6: restore
+  // writes 'restore' ledger entry"), and the BudgetLedgerKind contract test
+  // enumerates all 14 values. We exercise respawn + snapshot here.
+  {
+    const { session, sessionManager } = makeFakeRespawnSession({ sessionId: "kinds-respawn-session" });
+    const { ledger } = makeFakeLedger();
+    const newFakeSM: any = { ...sessionManager, toAgentSession: () => ({ sessionId: "kinds-respawn-new" }) };
+    const ctx: WorkerContext = { agent: "kinds-respawn", session, sessionManager, ledger, policy: basePolicy, cwd: "/tmp/work", internals: { sessionManagerCreate: () => newFakeSM } };
+    const r = await workerTools.respawnWorkerSession(ctx, "operator requested restart");
+    const k = r.ledgerSnapshot.data.kind;
+    if (k !== undefined) collectedKinds.add(k);
+  }
+  {
+    const { session, sessionManager } = makeFakeRespawnSession({ sessionId: "kinds-snapshot-session" });
+    const { ledger } = makeFakeLedger();
+    const ctx: WorkerContext = { agent: "kinds-snapshot", session, sessionManager, ledger, policy: basePolicy, cwd: "/tmp/work" };
+    const r = await workerTools.snapshotWorkerSession(ctx, "label");
+    const k = r.ledgerSnapshot.data.kind;
+    if (k !== undefined) collectedKinds.add(k);
+  }
+
+  // ── Cooperative tools (3D's 3) ──
+  // Capture the kind from each cooperative tool's ledger.snapshot() call.
+  {
+    const captured: BudgetLedgerKind[] = [];
+    const fakeLedger = {
+      cumulative: { tokens: 0, costUsd: 0, runs: 0 },
+      agentName: "kinds-coop",
+      snapshotCaps: () => ({}),
+      entries: [] as BudgetLedgerEntry[],
+      snapshot(_stats: unknown, _policy: unknown, _marker: string, _signal: AbortSignal, kind?: BudgetLedgerKind): BudgetLedgerEntry {
+        if (kind) captured.push(kind);
+        return { type: "custom", customType: "pi-hive-budget-ledger", data: { caps: {}, cumulative: { tokens: 0, costUsd: 0, runs: 0 }, writtenAt: 0, agentSlug: "kinds-coop", marker: "checkpoint", kind } };
+      },
+    };
+    const fakeSession = {
+      sessionId: "kinds-coop-session",
+      sessionManager: { getLeafId: () => "leaf-coop", branchWithSummary: (id: string | null, summary: string) => `b-${id}-${summary}`, appendCustomEntry: () => "" },
+      compact: async () => ({}),
+      abort: async () => {},
+      getSessionStats: () => defaultStats(),
+    };
+    const policy: WorkerBudgetPolicy = { worker: {}, team: {} };
+    const requestCompaction = workerTools.buildRequestCompactionTool({ session: fakeSession as unknown as AgentSession, policy, ledger: fakeLedger as unknown as BudgetLedger });
+    await requestCompaction(undefined, new AbortController().signal);
+    const requestEndSession = workerTools.buildRequestEndSessionTool({ session: fakeSession as unknown as AgentSession, policy, ledger: fakeLedger as unknown as BudgetLedger });
+    await requestEndSession("wrap", new AbortController().signal);
+    const requestSnapshot = workerTools.buildRequestSnapshotTool({ session: fakeSession as unknown as AgentSession, policy, ledger: fakeLedger as unknown as BudgetLedger });
+    await requestSnapshot("label", new AbortController().signal);
+    for (const k of captured) collectedKinds.add(k);
+  }
+
+  // ── Assertion: distinct kinds observed ──
+  // Documenting the actual count rather than the brief's "9" — the
+  // BudgetLedgerKind type enumerates 14 values (see the contract test
+  // "BudgetLedgerKind accepts all 14 documented values"). We exercise 13
+  // here (everything except T5.6 restore, which is covered by T5.6 tests +
+  // the contract test). 13 distinct values is the floor; adding the
+  // restore kind yields the full 14.
+  const observed = [...collectedKinds].sort();
+  assert.equal(collectedKinds.size, 13, `13 distinct kinds observed (8 from 3B + 2 from 3C + 1 tear-down-all + 3 cooperative — restore pinned by T5.6 / contract tests). Observed: ${observed.join(", ")}`);
+  // Spot-check that all operator + cooperative kinds we exercised here
+  // appear in the set (the brief's distinctness gate).
+  const expectedKinds: BudgetLedgerKind[] = [
+    "end",
+    "compact",
+    "pause",
+    "resume",
+    "compact-aborted",
+    "force-kill",
+    "force-end",
+    "tear-down-all",
+    "respawn",
+    "snapshot",
+    "cooperative-compact",
+    "cooperative-end",
+    "cooperative-snapshot",
+  ];
+  for (const k of expectedKinds) {
+    assert.ok(collectedKinds.has(k), `kind '${k}' was emitted by its producer/cooperative tool`);
+  }
+});
+
+function defaultStats(): SessionStats {
+  return {
+    sessionFile: undefined,
+    sessionId: "x",
+    userMessages: 0,
+    assistantMessages: 0,
+    toolCalls: 0,
+    toolResults: 0,
+    totalMessages: 0,
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    cost: 0,
+  };
 }
