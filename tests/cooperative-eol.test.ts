@@ -25,6 +25,7 @@ import {
   buildRequestEndSessionTool,
   buildRequestSnapshotTool,
 } from "../src/engine/budget/worker-tools.ts";
+import type { BudgetLedgerKind } from "../src/core/types.ts";
 
 // ── Test fixtures ─────────────────────────────────────────────────────────
 
@@ -134,19 +135,45 @@ interface LedgerStub {
   entries: BudgetLedgerEntry[];
   // Capture: every ledger method call so tests can verify the cooperative
   // tool did (or did NOT) write a snapshot on the failure path.
-  snapshotCalls: Array<{ stats: unknown; policy: unknown; marker: string; signal: AbortSignal }>;
+  snapshotCalls: Array<{ stats: unknown; policy: unknown; marker: string; signal: AbortSignal; kind?: BudgetLedgerKind }>;
+  // Wave 3 fixup Issue 1 — cooperative tools now use the public
+  // `ledger.snapshot(stats, policy, "checkpoint", signal, kind)` API
+  // instead of the `writeCooperativeSnapshot` cast bypass. The stub's
+  // snapshot() mirrors `BudgetLedger.snapshot()`: builds a
+  // BudgetLedgerEntry with the documented caps/cumulative/marker/kind
+  // shape, pushes it to `entries`, and returns the same reference so
+  // `result.ledgerSnapshot === entries[N]` holds.
+  snapshot(stats: { tokens: { total: number }; cost: number }, _policy: unknown, marker: "warning" | "exhausted" | "checkpoint", _signal: AbortSignal, kind?: BudgetLedgerKind): BudgetLedgerEntry;
 }
 
 function makeLedgerStub(opts: { agentName?: string; caps?: BudgetLedgerEntry["data"]["caps"]; cumulative?: { tokens: number; costUsd: number; runs: number } } = {}): LedgerStub {
   const entries: BudgetLedgerEntry[] = [];
-  const snapshotCalls: Array<{ stats: unknown; policy: unknown; marker: string; signal: AbortSignal }> = [];
-  return {
+  const snapshotCalls: Array<{ stats: unknown; policy: unknown; marker: string; signal: AbortSignal; kind?: BudgetLedgerKind }> = [];
+  const stub: LedgerStub = {
     cumulative: opts.cumulative ?? { tokens: 0, costUsd: 0, runs: 1 },
     agentName: opts.agentName ?? "cooperative-worker",
     snapshotCaps: () => opts.caps ?? { workerTokens: 1000, workerCostUsd: 5 },
     entries,
     snapshotCalls,
+    snapshot(stats, _policy, marker, _signal, kind) {
+      snapshotCalls.push({ stats, policy: _policy, marker, signal: _signal, kind });
+      const entry: BudgetLedgerEntry = {
+        type: "custom",
+        customType: "pi-hive-budget-ledger",
+        data: {
+          caps: stub.snapshotCaps(),
+          cumulative: { tokens: stats.tokens.total, costUsd: stats.cost, runs: stub.cumulative.runs },
+          writtenAt: 0,
+          agentSlug: stub.agentName,
+          marker,
+          ...(kind !== undefined ? { kind } : {}),
+        },
+      };
+      stub.entries.push(entry);
+      return entry;
+    },
   };
+  return stub;
 }
 
 function makePolicyWithMaxTokens(maxTokens: number | undefined): WorkerBudgetPolicy {
