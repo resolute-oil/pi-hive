@@ -24,6 +24,8 @@ import {
   buildRequestCompactionTool,
   buildRequestEndSessionTool,
   buildRequestSnapshotTool,
+  __cooperativeToolRegistry,
+  __resetCooperativeToolRegistryForTests,
 } from "../src/engine/budget/worker-tools.ts";
 import type { BudgetLedgerKind } from "../src/core/types.ts";
 
@@ -478,4 +480,79 @@ test("T5.12 concurrent EOL: cooperative-snapshot entry is written only AFTER bra
   assert.equal(ledger.entries[0].data.kind, "cooperative-snapshot", "the post-branch entry has kind cooperative-snapshot");
 
   assert.ok(true, "T5.12 concurrent EOL pinned via ordering (integration-test status per brief)");
+});
+
+// ── Wave 3 fixup Issue 4: cooperative-tool registry + operator-only assertion ──
+
+// Per the post-wave review: "verified by a test asserting they don't appear
+// in the cooperative-tool registry." The brief targets operator commands that are
+// the explicit escape hatches (forceKillWorkerSession, forceEndWorkerSession,
+// tearDownAllWorkers) — those MUST NOT register themselves in the
+// cooperative-tool registry because the cooperative registry is the agent-
+// callable surface (only `request_compaction`, `request_end_session`,
+// `request_snapshot` are agent-callable).
+test("Wave 3 fixup Issue 4: cooperative-tool registry contains exactly the 3 cooperative tool names and NO operator commands", () => {
+  // Reset to keep the test hermetic — the registry persists across the
+  // whole module's lifetime, and earlier tests in this file call the
+  // cooperative factories (each adds an entry).
+  __resetCooperativeToolRegistryForTests();
+  const sessionManager = makeSessionManagerStub();
+  const session = makeSessionStub({ sessionManager });
+  const ledger = makeLedgerStub();
+  const policy = noCapPolicy;
+
+  // Call each cooperative factory. The factories register their tool name
+  // on entry — this is the side effect under test.
+  buildRequestCompactionTool({ session: session as unknown as AgentSession, policy, ledger: ledger as unknown as BudgetLedger });
+  buildRequestEndSessionTool({ session: session as unknown as AgentSession, policy, ledger: ledger as unknown as BudgetLedger });
+  buildRequestSnapshotTool({ session: session as unknown as AgentSession, policy, ledger: ledger as unknown as BudgetLedger });
+
+  const registry = __cooperativeToolRegistry();
+  assert.equal(registry.size, 3, "registry contains exactly 3 entries (one per cooperative tool)");
+
+  // The three cooperative tool names appear in the registry.
+  assert.ok(registry.has("request_compaction"), "request_compaction in cooperative registry");
+  assert.ok(registry.has("request_end_session"), "request_end_session in cooperative registry");
+  assert.ok(registry.has("request_snapshot"), "request_snapshot in cooperative registry");
+
+  // Operator commands do NOT appear — explicitly check the three escape-
+  // hatch commands called out by the brief plus a sample of base operator
+  // commands. None of these functions are called above, so none should
+  // register themselves.
+  const operatorCommandNames = [
+    "endWorkerSession",
+    "compactWorkerSession",
+    "respawnWorkerSession",
+    "pauseWorkerSession",
+    "snapshotWorkerSession",
+    "restoreWorkerSession",
+    "resumeWorkerSession",
+    "abortWorkerCompaction",
+    "forceKillWorkerSession",
+    "forceEndWorkerSession",
+    "tearDownAllWorkers",
+  ];
+  for (const name of operatorCommandNames) {
+    assert.ok(!registry.has(name), `operator command '${name}' does NOT appear in the cooperative registry`);
+  }
+});
+
+// Verify the registry-clearing test seam: after resetting, a cooperative
+// factory call re-adds the name. Pins the test seam so a future regression
+// in __resetCooperativeToolRegistryForTests cannot silently break Issue 4.
+test("Wave 3 fixup Issue 4: __resetCooperativeToolRegistryForTests clears the registry and re-adds on next factory call", () => {
+  __resetCooperativeToolRegistryForTests();
+  assert.equal(__cooperativeToolRegistry().size, 0, "registry empty after reset");
+
+  const sessionManager = makeSessionManagerStub();
+  const session = makeSessionStub({ sessionManager });
+  const ledger = makeLedgerStub();
+  const policy = noCapPolicy;
+
+  buildRequestCompactionTool({ session: session as unknown as AgentSession, policy, ledger: ledger as unknown as BudgetLedger });
+  assert.equal(__cooperativeToolRegistry().size, 1, "first factory call adds 1 entry");
+  assert.ok(__cooperativeToolRegistry().has("request_compaction"), "registry now contains request_compaction");
+
+  __resetCooperativeToolRegistryForTests();
+  assert.equal(__cooperativeToolRegistry().size, 0, "registry empty after second reset");
 });
