@@ -39,13 +39,27 @@ export interface DelegationEndInput {
   // lifetime totals from getSessionStats are the single source of truth),
   // so emitDelegationEnd does not read it.
   tokenBudgetScope: "input_output" | "all";
+  // The runtime's lifetime totals captured BEFORE the SessionStats overwrite in
+  // dispatch-lifecycle.ts. Used to compute the per-run delta in the v1 emission:
+  // delta = current_lifetime - priorLifetime (clamped nonneg). For the first
+  // run, priorLifetime is the runtime's initial state (typically zeros); for a
+  // fresh=true re-run, dispatch.ts zeros the lifetime counters before this runs
+  // so priorLifetime is also zeros (W1.1 fix).
+  priorLifetime: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    reasoningTokens: number;
+    costUsd: number;
+  };
 }
 
 // Run the post-prompt emit sequence. The shape mirrors the inline block
 // dispatch.ts used to carry (preserved verbatim so the 537-test behavior
 // gate continues to pass).
 export async function emitDelegationEnd(input: DelegationEndInput): Promise<void> {
-  const { state, runtime, caller, task, ctx, output, errorMessage, exitCode, streamState, sdkCounts, tokenBudgetScope: _tokenBudgetScope } = input;
+  const { state, runtime, caller, task, ctx, output, errorMessage, exitCode, streamState, sdkCounts, tokenBudgetScope: _tokenBudgetScope, priorLifetime } = input;
 
   // The shared log keeps a bounded copy of the result for the dashboard.
   const completionMessage = truncateMiddle(output, DELEGATION_EVENT_MESSAGE_LIMIT);
@@ -64,11 +78,12 @@ export async function emitDelegationEnd(input: DelegationEndInput): Promise<void
 
   // Per-run deltas (Decision 1): runtime.* now hold session-lifetime aggregates
   // (overwritten from getSessionStats above), so a re-run agent's runtime would
-  // make SUM() over delegations double-count. Per §1.1 of the refactor plan,
-  // the per-run `runStart*` baselines are gone — the lifetime totals are the
-  // single source of truth and the per-run contribution is computed at the
-  // dashboard from the difference between this event's lifetime values and
-  // the previous ledger snapshot.
+  // make SUM() over delegations double-count. The per-run `runStart*` baselines
+  // are gone from AgentRuntime (Fix A); the prior lifetime is captured in
+  // dispatch-lifecycle.ts (above the overwrite) and threaded through as
+  // priorLifetime. We compute delta = current_lifetime - priorLifetime, clamped
+  // nonneg to absorb a single rare race where the stats probe returns slightly
+  // less than the prior overwrite.
   const nonneg = (n: number) => (Number.isFinite(n) && n > 0 ? n : 0);
   const lifetime = {
     inputTokens: nonneg(runtime.inputTokens),
@@ -77,6 +92,18 @@ export async function emitDelegationEnd(input: DelegationEndInput): Promise<void
     cacheWriteTokens: nonneg(runtime.cacheWriteTokens),
     reasoningTokens: nonneg(runtime.reasoningTokens),
     costUsd: nonneg(runtime.costUsd),
+  };
+  const deltaClamp = (current: number, prior: number) => {
+    const diff = (Number.isFinite(current) ? current : 0) - (Number.isFinite(prior) ? prior : 0);
+    return diff > 0 ? diff : 0;
+  };
+  const delta = {
+    inputTokens: deltaClamp(lifetime.inputTokens, priorLifetime.inputTokens),
+    outputTokens: deltaClamp(lifetime.outputTokens, priorLifetime.outputTokens),
+    cacheReadTokens: deltaClamp(lifetime.cacheReadTokens, priorLifetime.cacheReadTokens),
+    cacheWriteTokens: deltaClamp(lifetime.cacheWriteTokens, priorLifetime.cacheWriteTokens),
+    reasoningTokens: deltaClamp(lifetime.reasoningTokens, priorLifetime.reasoningTokens),
+    costUsd: deltaClamp(lifetime.costUsd, priorLifetime.costUsd),
   };
 
   if (runtime.config.agentType === "reviewer") {
@@ -106,11 +133,16 @@ export async function emitDelegationEnd(input: DelegationEndInput): Promise<void
     lastResponseId: streamState.lastResponseId,
     diagnostics: streamState.diagnostics.length ? streamState.diagnostics : undefined,
     counts: sdkCounts,
-    // v2: payload carries session-cumulative `lifetime` instead of a per-run
-    // `delta` (the §1.1 `runStart*` baselines are gone from AgentRuntime).
-    // Dashboards compute the per-run contribution by differencing consecutive
-    // delegation_end events; legacy v1 consumers can detect and skip.
-    delegationsSchema: 2,
+    // v1: payload carries BOTH the per-run `delta` (for dashboard SUM()) and the
+    // session-cumulative `lifetime` (kept for live display + historical consumers).
+    // delegationsSchema=1 signals to ingestion that delta is the authoritative
+    // per-run value; the dashboard's `p.delta` branch stores schema_version=1 rows
+    // directly. Wave 6's brief v2 (delegationsSchema=2, lifetime-only) required
+    // dashboard-side differencing of consecutive lifetime values, which is more
+    // invasive than the producer-side baseline subtraction; this revert restores
+    // the pre-Wave-6 contract.
+    delegationsSchema: 1,
+    delta,
     lifetime,
     runtime: runtimeSummary(state, runtime),
   }, runtime.config.name);

@@ -166,10 +166,22 @@ async function emitSetupFailure(opts: {
   const exitCode = 1;
   const output = errorMessage || "[no output]";
   runtime.lastWork = output.split("\n").filter((line) => line.trim()).pop() || runtime.status;
+  // Setup-failure path: the session was never created, so no SessionStats
+  // overwrite happened. The runtime's lifetime counters are unchanged from
+  // whatever the prior run left them at; pass them as priorLifetime so the
+  // emitted delta is 0 (no new spend occurred during setup failure).
   await emitDelegationEnd({
     state, runtime, caller, task, ctx, output, errorMessage, exitCode,
     streamState: makeDispatchStreamState(), sdkCounts: undefined,
     tokenBudgetScope: effectiveWorkerGovernance(state, runtime).tokenBudgetScope ?? "all",
+    priorLifetime: {
+      inputTokens: runtime.inputTokens,
+      outputTokens: runtime.outputTokens,
+      cacheReadTokens: runtime.cacheReadTokens,
+      cacheWriteTokens: runtime.cacheWriteTokens,
+      reasoningTokens: runtime.reasoningTokens,
+      costUsd: runtime.costUsd,
+    },
   });
   return { output, exitCode, elapsed: runtime.elapsedMs };
 }
@@ -680,6 +692,23 @@ export async function dispatchAgent(
   // endWorkerSession itself preserves the handle for resume, which is
   // intentional and matches the documented "no dispose (operator may
   // resume)" contract).
+  //
+  // Capture the prior lifetime totals here, AFTER the fresh-reset block
+  // above (so a fresh=true re-run sees prior=0) and BEFORE the prompt
+  // runs (so the per-message reasoning accumulation that happens during
+  // the prompt is NOT included in prior). The §1.1 removal of
+  // `runStart*` from AgentRuntime moved this capture out of the runtime
+  // and into the dispatch flow; reasoning is the only counter not covered
+  // by SessionStats, so it must be captured pre-prompt to produce a
+  // correct per-run reasoning delta.
+  const priorLifetime = {
+    inputTokens: Number(runtime.inputTokens) || 0,
+    outputTokens: Number(runtime.outputTokens) || 0,
+    cacheReadTokens: Number(runtime.cacheReadTokens) || 0,
+    cacheWriteTokens: Number(runtime.cacheWriteTokens) || 0,
+    reasoningTokens: Number(runtime.reasoningTokens) || 0,
+    costUsd: Number(runtime.costUsd) || 0,
+  };
   try {
     const finalOutcome = await runPromptAndFinalize({
       state,
@@ -701,6 +730,7 @@ export async function dispatchAgent(
       getTimedOut: () => timedOut,
       governanceTimeoutMs: governance.timeoutMs,
       tokenBudgetScope,
+      priorLifetime,
     });
     unregisterWorkerHandleForProduction(runtime.config.name);
     return finalOutcome;

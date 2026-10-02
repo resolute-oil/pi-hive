@@ -39,6 +39,19 @@ export interface PostPromptInput {
   getTimedOut: () => boolean;
   governanceTimeoutMs: number | undefined;
   tokenBudgetScope: "input_output" | "all";
+  // Captured by dispatch.ts at run start (after the fresh-reset block, before
+  // the prompt). Threaded through to emitDelegationEnd to compute the per-run
+  // delta as `current_lifetime - priorLifetime` (clamped nonneg). For a first
+  // run, priorLifetime is the runtime's initial state (zeros); for fresh=true,
+  // dispatch.ts zeroed the lifetime counters above so prior is also zeros.
+  priorLifetime: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    reasoningTokens: number;
+    costUsd: number;
+  };
 }
 
 export interface PostPromptResult {
@@ -66,7 +79,7 @@ export async function runPromptAndFinalize(input: PostPromptInput): Promise<Post
     state, runtime, session, streamState, fresh, task, ctx, caller, prompt,
     delegationDepth, sessionFileExisted, lifecycle, timeout, abortSignal,
     abortFromParent, getAbortedByParent, getTimedOut, governanceTimeoutMs,
-    tokenBudgetScope,
+    tokenBudgetScope, priorLifetime,
   } = input;
 
   let errorMessage: string | undefined;
@@ -189,7 +202,7 @@ export async function runPromptAndFinalize(input: PostPromptInput): Promise<Post
   // dispatch.ts stays under the ≤600 LOC refactor target.
   await emitDelegationEnd({
     state, runtime, caller, task, ctx, output, errorMessage, exitCode,
-    streamState, sdkCounts, tokenBudgetScope,
+    streamState, sdkCounts, tokenBudgetScope, priorLifetime,
   });
 
   return { output, exitCode, elapsed: runtime.elapsedMs };
