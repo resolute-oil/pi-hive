@@ -68,13 +68,6 @@ test("worker and team budgets block independently and report remaining values", 
   assert.equal(checkDispatchBudgets(hive, second, 1)?.scope, "team");
 });
 
-test("monotonic governance usage prevents fresh transcript resets from bypassing budgets", () => {
-  const worker = runtime("worker", { inputTokens: 5, governanceTokens: 100, costUsd: 0.1, governanceCostUsd: 4 });
-  const hive = state([worker], { workerBudgets: { tokenBudget: 100, costBudgetUsd: 10 } });
-  assert.equal(checkDispatchBudgets(hive, worker, 1)?.resource, "tokens");
-  assert.equal(budgetRemaining(hive, worker).worker.costUsd, 6);
-});
-
 // tokenBudgetScope lets a project's hive-config.yaml restrict the budget to
 // just input + output tokens (what fills the model's context window on each
 // call). Default "all" preserves the legacy cumulative-of-everything

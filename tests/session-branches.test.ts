@@ -142,14 +142,17 @@ test("runtime counter restoration handles sparse, corrupt, and explicit snapshot
   ].join("\n") + "\n");
 
   restoreRuntimeCounters(state);
+  // §1.1: `governanceTokens` and `governanceCostUsd` were removed from
+  // AgentRuntime; the lifetime aggregates on `inputTokens`/`outputTokens`/
+  // `costUsd` (and the per-dimension cache/reasoning counters) are now the
+  // single source of truth, so the test asserts only those.
   assert.deepEqual({
     input: runtime.inputTokens, output: runtime.outputTokens, cacheRead: runtime.cacheReadTokens,
     cacheWrite: runtime.cacheWriteTokens, reasoning: runtime.reasoningTokens, cost: runtime.costUsd,
-    governanceTokens: runtime.governanceTokens, governanceCost: runtime.governanceCostUsd,
     runs: runtime.runCount, tools: runtime.toolCount, distillers: runtime.distillerRunCount,
   }, {
     input: 10, output: 4, cacheRead: 3, cacheWrite: 2, reasoning: 1, cost: 0.5,
-    governanceTokens: 25, governanceCost: 0.75, runs: 5, tools: 6, distillers: 3,
+    runs: 5, tools: 6, distillers: 3,
   });
   assert.equal(absent.inputTokens, 7);
 });

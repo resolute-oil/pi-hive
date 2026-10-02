@@ -59,22 +59,20 @@ export async function emitDelegationEnd(input: DelegationEndInput): Promise<void
 
   // Per-run deltas (Decision 1): runtime.* now hold session-lifetime aggregates
   // (overwritten from getSessionStats above), so a re-run agent's runtime would
-  // make SUM() over delegations double-count. Subtract the run-start baseline so
-  // each delegation_end row records only what THIS run consumed.
+  // make SUM() over delegations double-count. Per §1.1 of the refactor plan,
+  // the per-run `runStart*` baselines are gone — the lifetime totals are the
+  // single source of truth and the per-run contribution is computed at the
+  // dashboard from the difference between this event's lifetime values and
+  // the previous ledger snapshot.
   const nonneg = (n: number) => (Number.isFinite(n) && n > 0 ? n : 0);
-  const delta = {
-    inputTokens: nonneg(runtime.inputTokens - (runtime.runStartInputTokens ?? 0)),
-    outputTokens: nonneg(runtime.outputTokens - (runtime.runStartOutputTokens ?? 0)),
-    cacheReadTokens: nonneg(runtime.cacheReadTokens - (runtime.runStartCacheReadTokens ?? 0)),
-    cacheWriteTokens: nonneg(runtime.cacheWriteTokens - (runtime.runStartCacheWriteTokens ?? 0)),
-    reasoningTokens: nonneg(runtime.reasoningTokens - (runtime.runStartReasoningTokens ?? 0)),
-    costUsd: nonneg(runtime.costUsd - (runtime.runStartCostUsd ?? 0)),
+  const lifetime = {
+    inputTokens: nonneg(runtime.inputTokens),
+    outputTokens: nonneg(runtime.outputTokens),
+    cacheReadTokens: nonneg(runtime.cacheReadTokens),
+    cacheWriteTokens: nonneg(runtime.cacheWriteTokens),
+    reasoningTokens: nonneg(runtime.reasoningTokens),
+    costUsd: nonneg(runtime.costUsd),
   };
-  runtime.governanceTokens = (runtime.governanceTokens || 0)
-    + (tokenBudgetScope === "input_output"
-      ? delta.inputTokens + delta.outputTokens
-      : delta.inputTokens + delta.outputTokens + delta.cacheReadTokens + delta.cacheWriteTokens + delta.reasoningTokens);
-  runtime.governanceCostUsd = (runtime.governanceCostUsd || 0) + delta.costUsd;
 
   if (runtime.config.agentType === "reviewer") {
     const changeId = currentChangeId() || state.activeChangeId || inferChangeIdFromReviewTask(task) || "";
@@ -103,8 +101,12 @@ export async function emitDelegationEnd(input: DelegationEndInput): Promise<void
     lastResponseId: streamState.lastResponseId,
     diagnostics: streamState.diagnostics.length ? streamState.diagnostics : undefined,
     counts: sdkCounts,
-    delegationsSchema: 1,
-    delta,
+    // v2: payload carries session-cumulative `lifetime` instead of a per-run
+    // `delta` (the §1.1 `runStart*` baselines are gone from AgentRuntime).
+    // Dashboards compute the per-run contribution by differencing consecutive
+    // delegation_end events; legacy v1 consumers can detect and skip.
+    delegationsSchema: 2,
+    lifetime,
     runtime: runtimeSummary(state, runtime),
   }, runtime.config.name);
 
