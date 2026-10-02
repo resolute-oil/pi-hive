@@ -17,9 +17,10 @@ import {
   teamUsage,
   ratioRemaining,
   crossedThreshold,
+  budgetRemaining,
 } from "../src/engine/budget/policy.ts";
 import { BudgetLedger } from "../src/engine/budget/ledger.ts";
-import type { BudgetLedgerEntry, WorkerBudgetPolicy } from "../src/core/types.ts";
+import type { AgentRuntime, BudgetLedgerEntry, HiveState, WorkerBudgetPolicy } from "../src/core/types.ts";
 
 const noCapPolicy: WorkerBudgetPolicy = { worker: {}, team: {} };
 
@@ -255,4 +256,121 @@ test("G-29: checkBudgetPolicy raises TypeError on a structurally-malformed polic
     TypeError,
     "missing-worker policy must raise TypeError at the typebox boundary",
   );
+});
+
+// ── Test 12: budgetRemaining live-mirror semantics (Fix E) ────────────────
+//
+// Wave 6's Gap 3 (remaining.ts → policy.ts migration) changed budgetRemaining
+// from "cumulative across runs" to "live mirror of the current session's
+// lifetime tokens" — the runtime now holds session-lifetime aggregates
+// (overwritten from getSessionStats at run end), and budgetRemaining reads
+// those fields directly. These three tests pin the new semantics so a future
+// regression to per-run accumulation is caught.
+
+function runtimeFor(name: string, slug: string, counters: Partial<AgentRuntime>): AgentRuntime {
+  return {
+    config: { name, slug, role: "member" },
+    systemPrompt: "",
+    status: "idle",
+    task: "",
+    lastWork: "",
+    toolCount: 0,
+    elapsedMs: 0,
+    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+    reasoningTokens: 0, costUsd: 0, contextPct: 0,
+    runCount: 0, sessionFile: `/tmp/${slug}.jsonl`,
+    ...counters,
+  } as AgentRuntime;
+}
+
+function stateFor(runtimes: AgentRuntime[], settings: Record<string, unknown>): HiveState {
+  return {
+    pi: {} as any,
+    config: { settings } as any,
+    session: null,
+    runtimes: new Map(runtimes.map((r) => [r.config.slug!, r])),
+    widgetCtx: null,
+    activeRuns: 0,
+    mode: "hive",
+    normalToolNames: [],
+    sddStatus: null,
+    obsSeq: 0,
+  } as unknown as HiveState;
+}
+
+test("budgetRemaining: single running session mirrors the live lifetime counters (scope=all)", () => {
+  // After getSessionStats() overwrites the runtime, the lifetime counters
+  // hold the session's running totals. budgetRemaining must read those
+  // directly — no historical per-run accumulation.
+  const worker = runtimeFor("Worker", "worker", {
+    inputTokens: 700, outputTokens: 300, cacheReadTokens: 100, cacheWriteTokens: 50, reasoningTokens: 25,
+    costUsd: 1.25, runCount: 1, distillerRunCount: 0,
+  });
+  const state = stateFor([worker], {
+    workerBudgets: { tokenBudget: 2000, costBudgetUsd: 5, maxRuns: 10, distillerRuns: 5 },
+    teamBudgets: { tokenBudget: 4000, costBudgetUsd: 10, maxRuns: 50 },
+  });
+  const { worker: rem, team } = budgetRemaining(state, worker);
+  // scope=all: tokens = input + output + cacheRead + cacheWrite + reasoning = 1175.
+  assert.equal(rem.tokens, 2000 - 1175, "remaining.tokens = cap - (input+output+cache*+reasoning)");
+  assert.equal(rem.costUsd, 5 - 1.25, "remaining.costUsd = cap - costUsd");
+  assert.equal(rem.runs, 10 - 1, "remaining.runs = cap - runCount");
+  assert.equal(rem.distillerRuns, 5 - 0, "remaining.distillerRuns = cap - distillerRunCount");
+  // Single-agent team total equals the worker total when team caps are set.
+  assert.equal(team.tokens, 4000 - 1175, "single-agent team mirrors the worker total (team cap set)");
+});
+
+test("budgetRemaining: multiple completed runs reflect CURRENT session lifetime, not cumulative across runs", () => {
+  // The brief's key regression pin: a worker that has run 3 times should NOT
+  // show budgetRemaining = cap - 3×single_run_usage. The runtime holds the
+  // session-lifetime totals from getSessionStats (per Wave 5A Decision 1),
+  // so budgetRemaining reads the SAME values whether the worker ran once
+  // or three times — as long as the current session's lifetime is the same.
+  // (For a re-run agent, lifetime is session-cumulative via the SDK; the
+  // per-run growth lives in delegation_end.delta, not on the runtime.)
+  const worker = runtimeFor("Worker", "worker", {
+    inputTokens: 900, outputTokens: 400, cacheReadTokens: 200, cacheWriteTokens: 100, reasoningTokens: 50,
+    costUsd: 2.10, runCount: 3, // runCount=3 from prior runs, but the lifetime totals reflect the CURRENT session only
+  });
+  const state = stateFor([worker], {
+    workerBudgets: { tokenBudget: 5000, costBudgetUsd: 10, maxRuns: 20, distillerRuns: 5, tokenBudgetScope: "all" },
+  });
+  const { worker: rem } = budgetRemaining(state, worker);
+  // scope=all: tokens used = 900 + 400 + 200 + 100 + 50 = 1650 (the CURRENT session).
+  // The pre-Wave-6 bug would have shown remaining = 5000 - 3*1650 = 50 (cumulative
+  // across 3 runs). Post-Wave-6 semantics: remaining = 5000 - 1650 = 3350.
+  assert.equal(rem.tokens, 5000 - 1650, "remaining is the CURRENT session's lifetime, not cumulative across runs");
+  assert.equal(rem.costUsd, 10 - 2.10, "costUsd is the current session's lifetime, not cumulative");
+  // runCount IS a counter that tracks total runs, so remaining.runs does subtract runCount.
+  assert.equal(rem.runs, 20 - 3, "runCount tracks total runs across the lifetime; remaining reflects that");
+});
+
+test("budgetRemaining: agent with no session / no usage returns cap - 0 (the full budget remaining)", () => {
+  // A runtime with all-zero counters and no prior history: remaining equals
+  // the cap exactly. This is the steady-state "fresh agent, not yet started"
+  // view used by the orchestrator prompt.
+  const worker = runtimeFor("Worker", "worker", {});
+  const state = stateFor([worker], {
+    workerBudgets: { tokenBudget: 2000, costBudgetUsd: 5, maxRuns: 10, distillerRuns: 5 },
+  });
+  const { worker: rem } = budgetRemaining(state, worker);
+  assert.equal(rem.tokens, 2000, "no usage → full token budget remaining");
+  assert.equal(rem.costUsd, 5, "no usage → full cost budget remaining");
+  assert.equal(rem.runs, 10, "no usage → full run budget remaining");
+  assert.equal(rem.distillerRuns, 5, "no usage → full distiller-run budget remaining");
+});
+
+test("budgetRemaining: input_output scope ignores cache + reasoning tokens", () => {
+  // The scope flag restricts which counter dimensions feed into the tokens
+  // remaining calculation. input_output excludes cache and reasoning.
+  const worker = runtimeFor("Worker", "worker", {
+    inputTokens: 600, outputTokens: 200, cacheReadTokens: 999, cacheWriteTokens: 999, reasoningTokens: 999,
+    costUsd: 1.0, runCount: 1,
+  });
+  const state = stateFor([worker], {
+    workerBudgets: { tokenBudget: 1000, costBudgetUsd: 5, maxRuns: 10, distillerRuns: 5, tokenBudgetScope: "input_output" },
+  });
+  const { worker: rem } = budgetRemaining(state, worker);
+  // scope=input_output: only input + output = 800 counts toward tokens used.
+  assert.equal(rem.tokens, 1000 - 800, "input_output scope ignores cache and reasoning");
 });
