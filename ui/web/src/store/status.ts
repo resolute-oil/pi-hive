@@ -2,6 +2,39 @@ import type { HiveEvent } from "../types";
 
 export type AgentStatusBySession = Map<string, Map<string, string>>;
 
+// T13.2 dashboard half — per-session intervention-available flag, derived from
+// the most recent `budget_warning` event for that worker. The engine emits
+// `interventionAvailable: boolean` on each warning (computed from the worker's
+// budget strategy: `true` under the default strategy, `false` under `compact`).
+// The F13 dashboard reads this flag to decide whether to enable the rescue
+// buttons (respawn / force-kill / force-end) on the per-worker button strip —
+// under auto-recovery (compact), showing them would mislead the operator into
+// thinking a manual intervention is required when the system will recover.
+//
+// Keyed by `session_id` because every `budget_warning` event is written from
+// the worker session's own `sessionManager.appendCustomMessageEntry` (per
+// `src/engine/budget/events.ts:221`), and one SDK AgentSession corresponds to
+// exactly one worker — so per-session = per-worker for this surface.
+//
+// Sessions whose workers have not yet emitted a `budget_warning` are absent
+// from this map (the dashboard falls back to "intervention available" —
+// all buttons enabled — which matches the brief's gate).
+export type InterventionBySession = Map<string, boolean>;
+export function buildInterventionBySession(events: HiveEvent[]): InterventionBySession {
+  const out: InterventionBySession = new Map();
+  for (const e of events) {
+    if (e.type !== "budget_warning") continue;
+    const flag = e.payload?.interventionAvailable;
+    if (typeof flag !== "boolean") continue;
+    // Latest event wins — strategies are static for the lifetime of the worker
+    // policy, so the first and last warning carry the same value, but using
+    // "latest" keeps the reducer monotonic in the face of any future
+    // mid-session policy swap (e.g. a tool re-arming the strategy).
+    out.set(e.session_id, flag);
+  }
+  return out;
+}
+
 // Event-driven agent status overlay. The topology must reflect activity the
 // instant an event arrives (same channel as the activity feed) — snapshots
 // arrive later (file-poll) and can coalesce, so they alone make the graph lag.

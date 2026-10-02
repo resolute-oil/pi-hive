@@ -51,7 +51,7 @@ Single sub-agent (or, optionally, parallel with Wave 3 if the engine contract is
 |---|---|
 | [ ] T13.0 | Sunset `fresh` parameter from `delegate_agent` + `dispatchAgent`. Add explicit `hive_reload_agent_config` operator command to preserve config-reload-on-edit workflow. Update tests that asserted on `fresh`. Gate: `just typecheck && just test` clean; `grep -rn "fresh" src/agents/tools.ts src/engine/dispatch.ts` returns 0 hits in production code (test fixture comments may remain); TUI rendering of `delegate_agent` calls no longer shows the `[fresh=...]` suffix |
 | [x] T13.1 | Add TUI/RPC buttons for the 11 EOL commands. Gate: `just dashboard-build` clean; visual review |
-| [ ] T13.2 | Surface `interventionAvailable` flag on `budget_warning` events (engine + dashboard halves). Gate: visible in dashboard; engine test asserts the flag is present on `default` strategy and absent on `compact` strategy |
+| [x] T13.2 | Surface `interventionAvailable` flag on `budget_warning` events (engine + dashboard halves). Gate: visible in dashboard; engine test asserts the flag is present on `default` strategy and absent on `compact` strategy |
 | [ ] T13.3 | Verify mode-independence — TUI, RPC, print, JSON modes all work. Gate: smoke test in all 4 modes |
 
 For full task prose and gates, the implementing agent reads `04-refactor-plan.md` §5 F13 directly.

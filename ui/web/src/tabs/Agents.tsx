@@ -220,7 +220,7 @@ export default function Agents(props: { search: string }) {
               <td className="muted-cell mono">{remainingBudget(r)}</td>
               <td className="num">{turnLatency.has(r.name) ? fmtMs(turnLatency.get(r.name)!) : "—"}</td>
               {!collapsed && <td className="num" title={contextTitle(r)}>{r.contextPct != null ? `${Math.round(r.contextPct)}%` : "—"}</td>}
-              <td className="op-cell"><OperatorCommands agent={r} /></td>
+              <td className="op-cell"><OperatorCommands agent={r} interventionAvailable={r.interventionAvailable} /></td>
             </tr>
           ))}
         </tbody>

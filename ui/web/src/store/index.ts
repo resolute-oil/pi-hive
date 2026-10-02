@@ -27,6 +27,12 @@ export interface ScopeAgent {
   contextTokens?: number; contextWindow?: number;
   budgetRemaining?: { worker: { runs?: number; tokens?: number; costUsd?: number; distillerRuns?: number }; team: { runs?: number; tokens?: number; costUsd?: number } };
   task?: string; session_id: string; depth: number; order: number;
+  // T13.2 — whether operator intervention is available for this row's worker.
+  // `true` under the default budget strategy (operator may rescue by hand);
+  // `false` under the `compact` strategy (system auto-recovers, so the rescue
+  // buttons would mislead). Undefined when no `budget_warning` event has
+  // been emitted yet — OperatorCommands treats this as "enabled" by default.
+  interventionAvailable?: boolean;
   // Enforcement contract from the topology node (Phase 6.1): what the agent may
   // touch / commit / which gates it owns. Undefined for runtime-only agents that
   // have no topology row yet.
@@ -95,6 +101,12 @@ export interface HiveState {
   scopedTeamCount: number;
   scopeTitle: ScopeTitle;
   eventStatus: Map<string, Map<string, string>>;
+  // T13.2 — per-session `interventionAvailable` flag derived from the most
+  // recent `budget_warning` event for that worker session. Drives the
+  // OperatorCommands rescue-button enable/disable state (false under the
+  // compact strategy). Absent sessions fall through to "enabled" in the
+  // component — see `ui/web/src/components/OperatorCommands.tsx`.
+  interventionBySession: Map<string, boolean>;
   // Agent thinking/reasoning by session (fetched from transcripts, not events).
   thinkingBySession: Map<string, ThinkingEntry[]>;
   // Per-project display-name overrides, keyed by canonical project ID.
@@ -175,6 +187,7 @@ const initialState: HiveState = {
     scopedTeamCount: 0,
     scopeTitle: { title: "Overview", crumbs: ["Overview"], live: 0 },
     eventStatus: new Map(),
+    interventionBySession: new Map(),
     thinkingBySession: new Map(),
     projectOverrides: new Map(),
     modelLevels: new Map(),

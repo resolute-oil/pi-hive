@@ -61,6 +61,7 @@ beforeEach(() => {
     scopedTeamCount: 0,
     scopeTitle: { title: "Agents", crumbs: ["Agents"], live: 0 },
     eventStatus: new Map(),
+    interventionBySession: new Map(),
     thinkingBySession: new Map(),
     projectOverrides: new Map(),
     modelLevels: new Map(),
@@ -118,5 +119,40 @@ describe("Agents", () => {
     expect(titleEl?.getAttribute("title")).toMatch(/commit: yes/);
     expect(titleEl?.getAttribute("title")).toMatch(/domains: src/);
     expect(titleEl?.getAttribute("title")).toMatch(/plan gates: specs, plan/);
+  });
+
+  // T13.2 dashboard half — the `interventionAvailable` flag on the row data
+  // gates the rescue buttons in OperatorCommands. The Agents tab forwards
+  // `agent.interventionAvailable` to the component, so:
+  //   - flag = false  → rescue buttons get disabled (compact strategy)
+  //   - flag = true / undefined → rescue buttons stay enabled (default)
+  it("disables rescue buttons on the per-worker strip when interventionAvailable=false (T13.2)", () => {
+    const compact = agentRow("AutoCompactor", { interventionAvailable: false });
+    store.setState({
+      scopedAgents: [compact],
+      scopedAgentCount: 1,
+    });
+    render(<Agents search="" />);
+    // The 3 rescue commands (per F13 brief) carry data-rescue; the rest are
+    // base / shape commands and stay enabled under any strategy.
+    for (const cmd of ["respawn", "force-kill", "force-end"]) {
+      const btn = document.querySelector(`[data-cmd="${cmd}"][data-testid="operator-cmd-AutoCompactor-${cmd}"]`) as HTMLButtonElement | null;
+      expect(btn, `rescue button "${cmd}" should be disabled under compact strategy`).not.toBeNull();
+      expect(btn!.disabled, `rescue button "${cmd}" should be disabled`).toBe(true);
+    }
+  });
+
+  it("keeps rescue buttons enabled when interventionAvailable=true (default strategy, T13.2)", () => {
+    const open = agentRow("Builder", { interventionAvailable: true });
+    store.setState({
+      scopedAgents: [open],
+      scopedAgentCount: 1,
+    });
+    render(<Agents search="" />);
+    for (const cmd of ["respawn", "force-kill", "force-end"]) {
+      const btn = document.querySelector(`[data-cmd="${cmd}"][data-testid="operator-cmd-Builder-${cmd}"]`) as HTMLButtonElement | null;
+      expect(btn, `rescue button "${cmd}" should exist`).not.toBeNull();
+      expect(btn!.disabled, `rescue button "${cmd}" should be enabled under default strategy`).toBe(false);
+    }
   });
 });
