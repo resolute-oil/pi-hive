@@ -67,7 +67,7 @@ import { SessionManager as SessionManagerClass, createAgentSession } from "@eare
 // enough that callers (the dispatcher's createSession factory) pass
 // through without `as unknown as` casts — the structural assignment
 // narrows the seam.
-export type DelegateAgentModel<TApi = unknown> = { provider: string; id: string; [key: string]: unknown };
+export type DelegateAgentModel<_TApi = unknown> = { provider: string; id: string; [key: string]: unknown };
 export type DelegateAgentThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 import type { BudgetLedger } from "./ledger";
 import { BudgetLedger as BudgetLedgerClass } from "./ledger";
@@ -584,8 +584,8 @@ export async function request_snapshot(_label: string, _signal: AbortSignal): Pr
 // to the brief's three cooperative tools — `__cooperativeToolRegistry`
 // exposes the Set as a test seam and `__resetCooperativeToolRegistryForTests`
 // clears it so each test starts hermetic.
-const COOPERATIVE_TOOL_NAMES = ["request_compaction", "request_end_session", "request_snapshot"] as const;
-type CooperativeToolName = (typeof COOPERATIVE_TOOL_NAMES)[number];
+const _COOPERATIVE_TOOL_NAMES = ["request_compaction", "request_end_session", "request_snapshot"] as const;
+type CooperativeToolName = (typeof _COOPERATIVE_TOOL_NAMES)[number];
 const cooperativeToolRegistry: Set<CooperativeToolName> = new Set();
 export function __cooperativeToolRegistry(): ReadonlySet<CooperativeToolName> {
   return cooperativeToolRegistry;

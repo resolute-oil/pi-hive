@@ -13,9 +13,7 @@
 import type { AgentSession, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetLedger } from "./ledger";
 import { isLedgerEntry } from "./ledger";
-import type { BudgetBlock, BudgetLedgerEntry, IncludeKeys, WorkerBudgetPolicy } from "../../core/types";
-
-const LEDGER_CUSTOM_TYPE = "pi-hive-budget-ledger";
+import type { BudgetBlock, IncludeKeys, WorkerBudgetPolicy } from "../../core/types";
 
 // Pre-flight gate: returns a BudgetBlock describing the first violated cap
 // (worker or team scope; tokens/costUsd/runs/depth), or undefined when the
