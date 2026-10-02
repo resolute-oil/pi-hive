@@ -61,10 +61,10 @@ export function makeDispatchStreamState(): DispatchStreamState {
 }
 
 // Install the (non-budget) dispatch subscribe handler on the session. Returns
-// the unsubscribe function. `governance` and `runController` are kept in the
-// signature for downstream event-handling parity (the budget warning / abort
-// code path is installed separately via installBudgetEventHooks; this handler
-// only tracks runtime telemetry + streaming output).
+// the unsubscribe function. `runController` is kept in the signature for
+// downstream event-handling parity (the budget warning / abort code path is
+// installed separately via installBudgetEventHooks; this handler only tracks
+// runtime telemetry + streaming output).
 //
 // TS I12: the event handler is a `switch (event.type)` over the
 // AgentSessionEvent union so adding a new SDK event type surfaces as a
@@ -74,7 +74,6 @@ export function wireDispatchSubscription(
   runtime: AgentRuntime,
   session: { subscribe(listener: (event: AgentSessionEvent) => void): () => void },
   streamState: DispatchStreamState,
-  governance: { tokenBudget?: number; costBudgetUsd?: number; timeoutMs?: number },
   runController: AbortController,
 ): () => void {
   const {
