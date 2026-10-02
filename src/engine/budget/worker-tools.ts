@@ -572,9 +572,6 @@ export async function restoreWorkerSession(agent: string | WorkerContext, snapsh
 // `cooperativeToolRegistry.add(...)` — the test in
 // `tests/cooperative-eol.test.ts` asserts exactly the three cooperative
 // tool names appear after calling all three factories.
-export async function request_compaction(_customInstructions?: string, _signal?: AbortSignal): Promise<{ ledgerSnapshot: BudgetLedgerEntry }> { throw new Error("not implemented"); }
-export async function request_end_session(_reason: string, _signal: AbortSignal): Promise<{ ledgerSnapshot: BudgetLedgerEntry }> { throw new Error("not implemented"); }
-export async function request_snapshot(_label: string, _signal: AbortSignal): Promise<{ ledgerSnapshot: BudgetLedgerEntry }> { throw new Error("not implemented"); }
 // Cooperative-tool registry (S2 typed): a module-level Set tracks which
 // cooperative factories have been called. The post-wave review required
 // "verified by a test asserting operator commands don't appear in the
