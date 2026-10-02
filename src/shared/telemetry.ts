@@ -186,8 +186,6 @@ export interface TelemetryAgentRuntime {
   cacheWriteTokens?: number;
   reasoningTokens?: number;
   costUsd?: number;
-  governanceTokens?: number;
-  governanceCostUsd?: number;
   contextPct?: number;
   // Raw context-window fill behind contextPct (Phase 4.7): the tokens currently
   // in context and the model's window. Threaded from the worker poll / main
@@ -198,11 +196,6 @@ export interface TelemetryAgentRuntime {
   model?: string;
   thinking?: string;
   thinkingLevels?: string[];
-  // Lifetime token counts at the start of the current run. The UI uses the
-  // output baseline to compute per-run generation TOK/S (J8); input is kept for
-  // telemetry symmetry and historical consumers.
-  runStartInputTokens?: number;
-  runStartOutputTokens?: number;
   budgetRemaining?: {
     worker: { runs?: number; tokens?: number; costUsd?: number; distillerRuns?: number };
     team: { runs?: number; tokens?: number; costUsd?: number };

@@ -117,8 +117,6 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
     if (status === "running") {
       orch.startedAt = Date.now();
       orch.elapsedMs = 0;
-      orch.runStartInputTokens = orch.inputTokens;
-      orch.runStartOutputTokens = orch.outputTokens;
     } else if (orch.startedAt) {
       orch.elapsedMs = Date.now() - orch.startedAt;
       orch.startedAt = undefined;

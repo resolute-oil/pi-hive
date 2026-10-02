@@ -316,8 +316,6 @@ export interface OrchestratorRuntime {
   status?: AgentRuntime["status"];
   startedAt?: number;
   elapsedMs?: number;
-  runStartInputTokens?: number;
-  runStartOutputTokens?: number;
   // Live context-window fill for the MAIN session (Phase 4.3), mirroring the
   // per-worker poll. Read from ctx.getContextUsage(); null until first response.
   contextPct?: number;

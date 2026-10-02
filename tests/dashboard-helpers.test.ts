@@ -29,11 +29,13 @@ test("buildEventStatus tracks nested delegation waiting and resume states", () =
 
 test("tokPerSec reports generation throughput, not prompt throughput", () => {
   // 100k prompt tokens over 10s is provider context processing, not generation.
-  assert.equal(tokPerSec(100_000, 500, 10_000, 0, 0), 50);
-  // Re-runs subtract the output baseline so old output does not inflate the rate.
-  assert.equal(tokPerSec(150_000, 800, 10_000, 100_000, 500), 30);
-  // Legacy snapshots without baselines fall back to lifetime output only.
+  // The rate uses lifetime output (the input arg is ignored — the comment lives
+  // in agents.ts); §1.1 retired the per-run baseline subtraction.
   assert.equal(tokPerSec(100_000, 500, 10_000), 50);
+  // Same shape with more input — input still does not contribute.
+  assert.equal(tokPerSec(150_000, 800, 10_000), 80);
+  // Zero output with elapsed time is unknowable (no generation happened yet).
+  assert.equal(tokPerSec(0, 0, 10_000), null);
 });
 
 test("buildHistoryBySession keeps peak cumulative usage per agent", () => {

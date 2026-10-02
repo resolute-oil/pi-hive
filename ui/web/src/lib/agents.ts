@@ -142,26 +142,20 @@ export function modelTag(model?: string): string {
 }
 
 // Per-run generation throughput (K4/Decision 4). elapsedMs resets each run in
-// dispatch.ts, so the rate must divide the OUTPUT tokens produced DURING this
-// run — live output minus the run-start output baseline (J8) — by that same
-// per-run elapsed. Input tokens are prompt/context read by the provider; adding
-// them makes short turns with large context look like impossible generation
-// speeds (for example 100k+ prompt tokens over a few seconds). Falls back to
-// lifetime output only when no baseline was recorded (pre-J8 snapshots). Returns
-// null when unknowable/idle.
+// dispatch.ts, so the rate divides the OUTPUT tokens produced during this run
+// by that same per-run elapsed. Input tokens are prompt/context read by the
+// provider; adding them makes short turns with large context look like
+// impossible generation speeds (for example 100k+ prompt tokens over a few
+// seconds). §1.1 removed the per-run start baseline; the rate is now computed
+// from the live output total (lifetime), which is the same shape pre-J8
+// snapshots used. Returns null when unknowable/idle.
 export function tokPerSec(
   _inputTokens = 0,
   outputTokens = 0,
   elapsedMs?: number,
-  _runStartInputTokens?: number,
-  runStartOutputTokens?: number,
 ): number | null {
-  // Guard against a baseline above the live total (snapshot ordering skew).
-  const tokens = runStartOutputTokens != null
-    ? Math.max(0, (outputTokens || 0) - runStartOutputTokens)
-    : (outputTokens || 0);
-  if (!tokens || !elapsedMs || elapsedMs <= 0) return null;
-  return tokens / (elapsedMs / 1000);
+  if (!outputTokens || !elapsedMs || elapsedMs <= 0) return null;
+  return (outputTokens || 0) / (elapsedMs / 1000);
 }
 
 // Quadratic-bezier midpoint smoothing for calm, non-jagged chart lines.
