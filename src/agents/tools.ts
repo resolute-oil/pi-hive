@@ -140,7 +140,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
   defineTool({
     name: "team_status",
     label: "Team Status",
-    description: "Return the current hive session, log path, active workers, per-agent state, and context-window fill so leads can decide whether to resume or use fresh=true.",
+    description: "Return the current hive session, log path, active workers, per-agent state, and context-window fill so leads can decide whether to resume a worker's session or trigger a clean restart from the operator surface.",
     parameters: Type.Object({}),
     async execute() {
       const rows = Array.from(state.runtimes.values()).map((runtime) => ({
@@ -184,18 +184,16 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
   defineTool({
     name: "delegate_agent",
     label: "Delegate Agent",
-    description: "Delegate a focused task to one configured hive agent and receive its answer. Use this for all substantive work. By default the agent RESUMES its prior session (it remembers earlier work — ideal for a review→fix loop); pass fresh=true to start it from a clean slate.",
+    description: "Delegate a focused task to one configured hive agent and receive its answer. Use this for all substantive work. The agent RESUMES its prior session by default (it remembers earlier work — ideal for a review→fix loop). To start a clean slate, dispatch the agent from the operator surface instead (e.g. the dashboard's respawn button) or call hive_reload_agent_config first if you only need to pick up new .md / hive-config.yaml edits.",
     parameters: Type.Object({
       agent: Type.String({ description: "Configured agent name (one of your delegation targets)." }),
       task: Type.String({ description: "Focused task for that agent. Include the exact question and expected output." }),
-      fresh: Type.Optional(Type.Boolean({ description: "Start the agent from a clean session, discarding its prior memory. Default false (resume). Use when the previous session is irrelevant or should not influence this task." })),
       isReadOnly: Type.Optional(Type.Boolean({ description: "Restrict delegation to direct reports only. Set false when the delegation is for a write-capable target you want to keep tree-bound (e.g. forcing operations-routed tasks to the operations lead rather than a coder). Default (omitted or true) preserves the type-based widening for read-only inspection delegations." })),
     }),
     async execute(_toolCallId: string, params: unknown, signal: AbortSignal | undefined, onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
-      const p = (params || {}) as { agent?: string; task?: string; fresh?: boolean; isReadOnly?: boolean };
+      const p = (params || {}) as { agent?: string; task?: string; isReadOnly?: boolean };
       const agent = String(p.agent || "").trim();
       const task = String(p.task || "").trim();
-      const fresh = p.fresh;
       const isReadOnly = p.isReadOnly;
       if (!agent || !task) {
         const available = agentRoster(state);
@@ -205,8 +203,8 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
           details: { ok: false, status: "error", reason: "missing parameters", missing, available },
         };
       }
-      onUpdate?.({ content: [{ type: "text", text: `Delegating to ${agent}${fresh ? " (fresh session)" : ""}${isReadOnly === false ? " (read-only restricted)" : ""}...` }], details: { agent, task, status: "running" } });
-      const result = await dispatchAgent(state, agent, task, ctx, Boolean(fresh), undefined, signal, isReadOnly);
+      onUpdate?.({ content: [{ type: "text", text: `Delegating to ${agent}${isReadOnly === false ? " (read-only restricted)" : ""}...` }], details: { agent, task, status: "running" } });
+      const result = await dispatchAgent(state, agent, task, ctx, undefined, signal, isReadOnly);
       // Fire-and-forget memory distillation on success. Non-blocking: the
       // worker's answer returns immediately; the distiller reads a snapshot, so
       // re-delegating the same agent never races it.
@@ -227,15 +225,16 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       const agent = a.agent || "?";
       const task = String(a.task || "");
       // Surface any flag the caller explicitly set, using `hasOwnProperty` so
-      // explicit `false` values still render. The defaults are `fresh: false`
-      // (resume) and `isReadOnly: true` (typed-specialist widening allowed),
-      // but rendering both shapes — `fresh=false`, `isReadOnly=false` — keeps
-      // the call line unambiguous and prevents the orchestrator from claiming
-      // a flag was passed when only the words "fresh config" appeared in the
-      // task body. The bracketed suffix is dim-styled so it stays secondary
-      // to the agent name on the same line.
+      // explicit `false` values still render. The default is
+      // `isReadOnly: true` (typed-specialist widening allowed), but rendering
+      // `isReadOnly=false` keeps the call line unambiguous and prevents the
+      // orchestrator from claiming a flag was passed when only the words
+      // "config reload" appeared in the task body. The bracketed suffix is
+      // dim-styled so it stays secondary to the agent name on the same line.
+      // The historical `delegate_agent` clean-session parameter is gone —
+      // use the operator surface (respawn / reload-config buttons) for
+      // that.
       const flagParts: string[] = [];
-      if (Object.prototype.hasOwnProperty.call(a, "fresh")) flagParts.push(`fresh=${a.fresh}`);
       if (Object.prototype.hasOwnProperty.call(a, "isReadOnly")) flagParts.push(`isReadOnly=${a.isReadOnly}`);
       const header = theme.fg("toolTitle", theme.bold("delegate_agent ")) +
         agentColored(agent, theme) +

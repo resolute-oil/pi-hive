@@ -158,8 +158,9 @@ const defaultInternals: DelegateAgentInternals = {
 // returns the opened session + restored ledger). Two plumbing concerns
 // handled here, both via composition with the pre-existing pure helpers:
 //   1. Pre-flight gate: resolve policy → restore ledger → check policy.
-//   2. Session open: fresh=true → SessionManager.create(); default →
-//      SessionManager.continueRecent() (per `04-refactor-plan.md` §2.4 / §2.9).
+//   2. Session open: always SessionManager.continueRecent() (per
+//      `04-refactor-plan.md` §2.4 / §2.9). T13.0 sunset the legacy `fresh`
+//      parameter that used to switch this to SessionManager.create().
 //   3. Hook install: budget event hooks subscribe to message_end /
 //      compaction_end / agent_settled for the new session's lifetime.
 //
@@ -210,18 +211,16 @@ export async function delegateAgent(
   state: HiveState,
   agentName: string,
   task: string,
-  opts: { fresh?: boolean } | undefined,
   ctx: ExtensionContext,
   options: DelegateAgentOptions = {},
 ): Promise<DelegateAgentResult> {
-  return delegateAgentWithInternals(state, agentName, task, opts, ctx, defaultInternals, options);
+  return delegateAgentWithInternals(state, agentName, task, ctx, defaultInternals, options);
 }
 
 export async function delegateAgentWithInternals(
   state: HiveState,
   agentName: string,
   task: string,
-  opts: { fresh?: boolean } | undefined,
   ctx: ExtensionContext,
   internals: DelegateAgentInternals,
   options: DelegateAgentOptions = {},
@@ -239,14 +238,12 @@ export async function delegateAgentWithInternals(
   // (the guard at dispatch.ts:196 enforces it before this is reached).
   const policy = effectiveInternals.resolveWorkerBudgetPolicy(state.config!, agentName);
 
-  // 2. Restore the ledger from the active branch. The SessionManager comes
-  //    from the caller's session context; production wires it from
-  //    ctx.sessionManager (or opens one alongside the session for fresh).
-  //    For the pre-flight gate we open the manager now so restore() can walk
-  //    the branch before the session is created.
-  const sessionManager = opts?.fresh
-    ? effectiveInternals.sessionManagerCreate(ctx.cwd)
-    : effectiveInternals.sessionManagerContinueRecent(ctx.cwd);
+  // 2. Restore the ledger from the active branch. Always resume the
+  //    worker's prior session (SessionManager.continueRecent) so the
+  //    conversation thread persists across delegations. The pre-flight
+  //    gate walks the resumed branch so the ledger reflects the worker's
+  //    lifetime cumulative at the time of the new dispatch.
+  const sessionManager = effectiveInternals.sessionManagerContinueRecent(ctx.cwd);
 
   // 2a. Depth-cap pre-flight (T2.3). Surfaced before BudgetLedger.restore so
   //     a depth violation fails fast without an async ledger walk; matches
@@ -264,10 +261,10 @@ export async function delegateAgentWithInternals(
     }
   }
 
-  // 3. Restore the ledger. The SessionManager we just opened is empty for a
-  //    fresh session (branch walks zero entries), so the ledger's cumulative
-  //    starts at zero and the cap check below can only block if the cap is 0
-  //    (intentional refuse in that case).
+  // 3. Restore the ledger. Walks the resumed branch above so the ledger's
+  //    cumulative reflects the worker's lifetime before this dispatch. The
+  //    cap check below can only block if the cap is already exhausted (or 0
+  //    for an intentional refuse).
   const ledger = await effectiveInternals.restoreLedger(
     sessionManager,
     agentName,
@@ -613,3 +610,81 @@ export function buildRequestSnapshotTool(o: { session: AgentSession; policy: Wor
 }
 
 // <<< region: agent-3D
+
+// >>> region: agent-3E (T13.0)
+// T13.0 — explicit config-reload operator command. Replaces the legacy
+// `fresh=true` parameter on `delegate_agent`, which used to call
+// `reloadAgentConfig` and archive the prior session in one step. After the
+// T13.0 sunset, the archive/reset half of that path is gone; the
+// config-reload half is preserved here as a standalone operator command so
+// the "edit the agent's .md and re-delegate" workflow keeps working. The
+// next `delegate_agent` call sees the new runtime.config (domain, tools,
+// model, governance, agentType, ...) and the next session-compaction /
+// re-derivation consumes the updated prompt.
+//
+// Like the other 11 operator commands, this writes a BudgetLedger snapshot
+// with marker "checkpoint" and kind "reload-config" so the dashboard can
+// audit when a reload happened (and which agent the operator touched).
+// Operator-only — never appears as a ToolDefinition in the agent's tool
+// allow-list (the cooperative tool registry stays restricted to
+// request_compaction / request_end_session / request_snapshot).
+export function hiveReloadAgentConfig(agent: string): { reloaded: boolean; agent: string; error?: string } {
+  // The state + ctx come from the dispatcher wiring (the F13 dashboard
+  // resolves them via the worker-handle registry). For the test seam, the
+  // module-level __reloadAgentConfig seam is exported and the production
+  // function below just forwards to the live implementation.
+  const impl = __reloadAgentConfigForTests ?? hiveReloadAgentConfigImpl;
+  return impl(agent);
+}
+import { reloadAgentConfig as reloadAgentConfigFn } from "../session";
+import { resolveRuntime as resolveRuntimeFn } from "../agent-lookup";
+import type { ExtensionContext as ExtensionContextType } from "@earendil-works/pi-coding-agent";
+import type { HiveState as HiveStateType } from "../../core/types";
+
+let __reloadAgentConfigForTests: ((agent: string) => { reloaded: boolean; agent: string; error?: string }) | undefined;
+export function __setReloadAgentConfigForTests(fn: typeof __reloadAgentConfigForTests): void {
+  __reloadAgentConfigForTests = fn;
+}
+export function __resetReloadAgentConfigForTests(): void {
+  __reloadAgentConfigForTests = undefined;
+}
+function hiveReloadAgentConfigImpl(agent: string): { reloaded: boolean; agent: string; error?: string } {
+  const state = __reloadAgentConfigState;
+  const ctx = __reloadAgentConfigCtx;
+  if (!state || !ctx) {
+    return { reloaded: false, agent, error: "no live state/ctx bound (test seam: use __setReloadAgentConfigForTests)" };
+  }
+  const runtime = resolveRuntimeFn(state, agent);
+  if (!runtime) {
+    return { reloaded: false, agent, error: `Unknown agent "${agent}"` };
+  }
+  const ok = reloadAgentConfigFn(state, ctx, runtime);
+  if (!ok) {
+    return { reloaded: false, agent, error: "reloadAgentConfig returned false (YAML parse error or agent removed)" };
+  }
+  // Write a checkpoint marker so the dashboard sees the reload event.
+  try {
+    const handle = workerHandles.get(agent);
+    if (handle) {
+      handle.ledger.snapshot(handle.session.getSessionStats(), handle.policy, "checkpoint", new AbortController().signal, "reload-config" as BudgetLedgerKind);
+    }
+  } catch { /* ledger write is best-effort; reload itself succeeded */ }
+  return { reloaded: true, agent };
+}
+
+// Production-side seam — the worker-extension entry point binds the live
+// state + ctx on every dispatch so the F13 dashboard (and the future RPC /
+// print / JSON surfaces) can invoke hiveReloadAgentConfig by agent name.
+// The seam is cleared on session shutdown so a stale binding cannot leak
+// into a future session.
+let __reloadAgentConfigState: HiveStateType | undefined;
+let __reloadAgentConfigCtx: ExtensionContextType | undefined;
+export function bindReloadAgentConfigState(state: HiveStateType, ctx: ExtensionContextType): void {
+  __reloadAgentConfigState = state;
+  __reloadAgentConfigCtx = ctx;
+}
+export function unbindReloadAgentConfigState(): void {
+  __reloadAgentConfigState = undefined;
+  __reloadAgentConfigCtx = undefined;
+}
+// <<< region: agent-3E

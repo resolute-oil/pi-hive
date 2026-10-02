@@ -24,7 +24,6 @@ export interface PostPromptInput {
   runtime: AgentRuntime;
   session: AgentSession;
   streamState: DispatchStreamState;
-  fresh: boolean;
   task: string;
   ctx: ExtensionContext;
   caller: string;
@@ -39,11 +38,12 @@ export interface PostPromptInput {
   getTimedOut: () => boolean;
   governanceTimeoutMs: number | undefined;
   tokenBudgetScope: "input_output" | "all";
-  // Captured by dispatch.ts at run start (after the fresh-reset block, before
-  // the prompt). Threaded through to emitDelegationEnd to compute the per-run
-  // delta as `current_lifetime - priorLifetime` (clamped nonneg). For a first
-  // run, priorLifetime is the runtime's initial state (zeros); for fresh=true,
-  // dispatch.ts zeroed the lifetime counters above so prior is also zeros.
+  // Captured by dispatch.ts at run start, before the prompt. Threaded
+  // through to emitDelegationEnd to compute the per-run delta as
+  // `current_lifetime - priorLifetime` (clamped nonneg). For a first run,
+  // priorLifetime is the runtime's initial state (zeros); for a respawn,
+  // the operator's respawnWorkerSession is the path that zeroed the
+  // counters so prior is also zeros.
   priorLifetime: {
     inputTokens: number;
     outputTokens: number;
@@ -76,7 +76,7 @@ interface SdkCounts {
 // the final result so dispatch.ts can return it to the orchestrator.
 export async function runPromptAndFinalize(input: PostPromptInput): Promise<PostPromptResult> {
   const {
-    state, runtime, session, streamState, fresh, task, ctx, caller, prompt,
+    state, runtime, session, streamState, task, ctx, caller, prompt,
     delegationDepth, sessionFileExisted, lifecycle, timeout, abortSignal,
     abortFromParent, getAbortedByParent, getTimedOut, governanceTimeoutMs,
     tokenBudgetScope, priorLifetime,
@@ -104,15 +104,16 @@ export async function runPromptAndFinalize(input: PostPromptInput): Promise<Post
     // currentChangeId() carries an already-scoped value into nesting.
     const scopedChangeId = currentChangeId() ?? state.activeChangeId;
     if (getAbortedByParent()) throw new Error("aborted");
-    // Fix #3: inject the assembled worker context on new/fresh session starts.
-    // fresh=true always starts clean (prior transcript archived above, if any).
-    // A first-ever session for this agent (no prior transcript file) also needs
-    // the full context so shared_context and the domain boundary reach the worker.
-    // Resumed sessions (fresh=false, existing transcript) receive the lean task
-    // only — pi-hive's native transcript persistence already carries the context
-    // forward, so re-injecting would duplicate it on every resumed delegation.
+    // Fix #3: inject the assembled worker context on new session starts.
+    // A first-ever session for this agent (no prior transcript file) needs
+    // the full context so shared_context and the domain boundary reach the
+    // worker. Resumed sessions (existing transcript) receive the lean task
+    // only — pi-hive's native transcript persistence already carries the
+    // context forward, so re-injecting would duplicate it on every resumed
+    // delegation. A clean-slate restart goes through the operator surface
+    // (respawnWorkerSession), which discards the transcript first.
     // Deliberate non-goal: distiller re-injection into resumed workers (P4).
-    const isNewSession = fresh || !sessionFileExisted;
+    const isNewSession = !sessionFileExisted;
     await runAtDelegationDepth(delegationDepth, () => runAsAgent(runtime.config.name, () => runWithChange(scopedChangeId, () => session.prompt(isNewSession ? prompt : task))));
     errorMessage = getAbortedByParent()
       ? (getTimedOut() ? `Worker timed out after ${governanceTimeoutMs}ms` : "aborted")

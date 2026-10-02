@@ -137,12 +137,12 @@ test("tool renderers remain bounded for partial, expanded, success, and error st
 });
 
 // delegate_agent's renderCall appends a flag suffix whenever the caller sets
-// fresh or isReadOnly, using `hasOwnProperty` so explicit `false` values still
-// render. The orchestrator has been observed claiming `fresh=true` was on the
-// wire while only writing "fresh config" into the task body; surfacing the
-// actual parameters in the call line closes that gap. Defaults stay invisible
-// so the common case (no flags) is unchanged.
-test("delegate_agent renderCall surfaces explicit fresh and isReadOnly flags", () => {
+// isReadOnly, using `hasOwnProperty` so explicit `false` values still render.
+// Defaults stay invisible so the common case (no flags) is unchanged. The
+// historical `fresh` parameter is gone (T13.0); callers that pass it on the
+// wire are silently dropped — the call line surfaces only what the tool
+// actually consumes.
+test("delegate_agent renderCall surfaces explicit isReadOnly flag (T13.0 fresh sunset)", () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-hive-tools-flags-"));
   const state = toolState(dir);
   const delegate = (buildHiveTools(state, "Orchestrator") as any[]).find((tool) => tool.name === "delegate_agent");
@@ -152,10 +152,13 @@ test("delegate_agent renderCall surfaces explicit fresh and isReadOnly flags", (
   assert.equal(noFlags.length, 2);
   assert.doesNotMatch(stripAnsi(noFlags[0]), /\[.*\]/);
 
-  // fresh=true only.
-  const freshOnly = delegate.renderCall({ agent: "Tiny", task: "inspect", fresh: true }, theme).render(120);
-  assert.equal(freshOnly.length, 2);
-  assert.match(stripAnsi(freshOnly[0]), /delegate_agent Tiny \[fresh=true\]/);
+  // T13.0 gate: the legacy `fresh` flag is no longer surfaced. A caller that
+  // still passes `fresh: true` on the wire sees the call line without a
+  // `[fresh=true]` suffix.
+  const freshIgnored = delegate.renderCall({ agent: "Tiny", task: "inspect", fresh: true }, theme).render(120);
+  assert.equal(freshIgnored.length, 2);
+  assert.doesNotMatch(stripAnsi(freshIgnored[0]), /fresh/);
+  assert.match(stripAnsi(freshIgnored[0]), /delegate_agent Tiny$/);
 
   // isReadOnly=false only — the non-default value should still render even
   // though it is falsy, because the caller explicitly chose it.
@@ -163,26 +166,14 @@ test("delegate_agent renderCall surfaces explicit fresh and isReadOnly flags", (
   assert.equal(readOnlyFalse.length, 2);
   assert.match(stripAnsi(readOnlyFalse[0]), /delegate_agent Tiny \[isReadOnly=false\]/);
 
-  // Both flags together.
+  // isReadOnly with the legacy fresh key (ignored) — only isReadOnly renders.
   const both = delegate.renderCall(
     { agent: "Tiny", task: "inspect", fresh: true, isReadOnly: false },
     theme,
   ).render(120);
   assert.equal(both.length, 2);
-  assert.match(stripAnsi(both[0]), /delegate_agent Tiny \[fresh=true, isReadOnly=false\]/);
-
-  // fresh=false (explicit, unusual) still surfaces — `hasOwnProperty` checks
-  // key presence, not truthiness, so a caller that explicitly passed
-  // `fresh: false` is not silently treated like the default.
-  const freshFalse = delegate.renderCall({ agent: "Tiny", task: "inspect", fresh: false }, theme).render(120);
-  assert.equal(freshFalse.length, 2);
-  assert.match(stripAnsi(freshFalse[0]), /delegate_agent Tiny \[fresh=false\]/);
-
-  // Flags-only call with no task still renders the header (regression guard:
-  // a real bug early in development short-circuited on missing task).
-  const flagsNoTask = delegate.renderCall({ agent: "Tiny", fresh: true }, theme).render(120);
-  assert.equal(flagsNoTask.length, 1);
-  assert.match(stripAnsi(flagsNoTask[0]), /delegate_agent Tiny \[fresh=true\]/);
+  assert.match(stripAnsi(both[0]), /delegate_agent Tiny \[isReadOnly=false\]/);
+  assert.doesNotMatch(stripAnsi(both[0]), /fresh/);
 });
 
 // Strip ANSI escape codes so assertions match against visible text only. The

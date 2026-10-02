@@ -1,7 +1,6 @@
 import { type AgentSession, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
-import { existsSync, readdirSync, renameSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { existsSync } from "node:fs";
 import { TYPE_SCOPED_TOOL_NAMES } from "../core/constants";
 import type { AgentRuntime, HiveState } from "../core/types";
 import {
@@ -10,7 +9,7 @@ import {
   agentSlug,
 } from "../core/utils";
 import { logRecord } from "./state";
-import { currentAgentName, currentChangeId, currentDelegationDepth, reloadAgentConfig } from "./session";
+import { currentAgentName, currentChangeId, currentDelegationDepth } from "./session";
 import { canDelegateTo } from "./domain";
 import { buildWorkerPrompt } from "./prompts";
 import { emitHiveEvent, runtimeSummary, writeHiveStateSnapshot } from "./observability";
@@ -25,7 +24,7 @@ import { acquireWorkerSlot, releaseWorkerSlot } from "./worker-queue";
 import { effectiveWorkerGovernance } from "./budget/policy";
 import { WorkerRunLifecycle } from "./worker-lifecycle";
 import { modelKey, resolveModel, type ResolvedModel } from "./model-resolution";
-import { delegateAgent as delegateAgentFn, BudgetExhaustedError, type DelegateAgentThinkingLevel, registerWorkerHandleForProduction, unregisterWorkerHandleForProduction } from "./budget/worker-tools";
+import { delegateAgent as delegateAgentFn, BudgetExhaustedError, type DelegateAgentThinkingLevel, registerWorkerHandleForProduction, unregisterWorkerHandleForProduction, bindReloadAgentConfigState } from "./budget/worker-tools";
 import { buildWorkerOnlyTools, populateWorkerOnlyBindings } from "./budget/worker-only-tools";
 import { wireDispatchSubscription, makeDispatchStreamState } from "./dispatch-subscribe";
 import { emitDelegationEnd } from "./dispatch-end";
@@ -44,7 +43,7 @@ export function publishRuntimeUpdate(state: HiveState) {
 function startElapsedTimer(state: HiveState, runtime: AgentRuntime): NodeJS.Timeout {
   return setInterval(() => {
     runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : runtime.elapsedMs;
-    // percent is null right after compaction until a fresh assistant response
+    // percent is null right after compaction until a new assistant response
     // provides usage data again — keep the last known value rather than
     // flashing to 0 during that transient window.
     const usage = runtime.session?.getContextUsage?.();
@@ -117,20 +116,18 @@ function emitDelegationStart(opts: {
   runtime: AgentRuntime;
   caller: string;
   task: string;
-  fresh: boolean;
   resolvedModelKey: string;
   model: string;
   tools: string;
   thinking: string;
 }): void {
-  const { state, runtime, caller, task, fresh, resolvedModelKey, model, tools, thinking } = opts;
+  const { state, runtime, caller, task, resolvedModelKey, model, tools, thinking } = opts;
   logRecord(state, { from: caller, to: runtime.config.name, type: "delegation", message: task });
   addHiveActivity(state, { kind: "delegation_start", parent: caller, agent: runtime.config.name, status: "running", text: task });
   emitHiveEvent(state, "delegation_start", {
     from: caller,
     to: runtime.config.name,
     task,
-    fresh,
     // Store the effective model key, not the raw config value (which may be
     // "inherit") or the full SDK object, so telemetry stays JSON/SQLite-safe.
     model: resolvedModelKey,
@@ -189,21 +186,6 @@ async function emitSetupFailure(opts: {
 // Coerce to a finite number or undefined. Unlike `Number(x) || undefined`, this
 // preserves a legitimate 0 (a real delayMs/tokensAfter of 0 is meaningful; only
 // NaN/absent should drop to undefined). Mirrors the Number.isFinite guards used
-// Move an agent's current session log aside to a numbered archive so a fresh run
-// can start clean without losing the prior run's transcript. "<slug>.jsonl"
-// becomes "<slug>.run-<N>.jsonl" with N the next free index. Returns silently if
-// there is nothing to archive.
-function archivePriorRun(sessionFile: string) {
-  const dir = dirname(sessionFile);
-  const base = basename(sessionFile, ".jsonl"); // e.g. "core-tester"
-  let existing: string[] = [];
-  try { existing = readdirSync(dir); } catch { /* dir may not exist */ }
-  const re = new RegExp(`^${base}\\.run-(\\d+)\\.jsonl$`);
-  let max = 0;
-  for (const f of existing) { const m = f.match(re); if (m) max = Math.max(max, Number(m[1])); }
-  const archive = join(dir, `${base}.run-${max + 1}.jsonl`);
-  renameSync(sessionFile, archive);
-}
 
 // Session factory seam (L1): defaults to the real createAgentSession, but a test
 // can inject a scripted AgentSession to drive dispatchAgent end-to-end without a
@@ -290,7 +272,7 @@ export function inferReviewVerdict(output: string): Exclude<AgentReviewVerdict, 
 }
 
 export async function dispatchAgent(
-  state: HiveState, agentName: string, task: string, ctx: ExtensionContext, fresh = false,
+  state: HiveState, agentName: string, task: string, ctx: ExtensionContext,
   createSession: CreateAgentSession = createAgentSession,
   abortSignal?: AbortSignal,
   isReadOnly?: boolean,
@@ -302,20 +284,13 @@ export async function dispatchAgent(
     const available = agentRoster(state);
     return { output: `Unknown agent "${agentName}". Available: ${available}`, exitCode: 1, elapsed: 0 };
   }
-  // fresh=true reloads the worker's config from YAML so edits to the agent's
-  // .md or hive-config.yaml since session_start take effect. Without this,
-  // runtime.config (domain, tools, model, governance, agentType, …) stays
-  // frozen at session_start and the "I edited the .md and re-delegated"
-  // workflow silently uses the old grant — see the dispatch.ts fresh archive
-  // block below for the conversation-continuity side of the same flag.
-  //
-  // Reload happens here, before the plan-mode / hive-mode / budget / prompt
-  // captures, so every guard and the worker's actual run see the fresh
-  // values. Best-effort: a YAML re-parse failure leaves the runtime as-is
-  // (and the frozen config is still valid; the user can restart the session).
-  if (fresh) {
-    reloadAgentConfig(state, ctx, runtime);
-  }
+  // Config reloads are an explicit operator action now (T13.0). The legacy
+  // boolean parameter (T13.0 sunset) used to call reloadAgentConfig() here
+  // AND archive the prior session; both paths are gone. The "edit the
+  // agent's .md and re-delegate" workflow is preserved by the new
+  // `hive_reload_agent_config` operator command, and a clean session
+  // restart is the operator's respawnWorkerSession button. delegate_agent
+  // always resumes now.
   // Pre-flight guards (plan/hive gating, OpenSpec change gate, delegation
   // permission, already-running guard). Returns a result tuple that the
   // caller short-circuits with, or undefined to fall through to the slot
@@ -379,35 +354,13 @@ export async function dispatchAgent(
   const model = modelFrom(ctx, runtime.config.model);
   const tools = normalizeWorkerTools(runtime.config.tools, state.config.settings.defaultTools);
   const thinking = runtime.config.thinking!;
-  // Fix #3: capture whether a prior transcript exists BEFORE the archive step.
-  // This determines whether this dispatch is a new session (no prior transcript)
-  // or a resume (existing transcript the SDK will replay on prompt()). The value
-  // is used below to decide which input to pass to session.prompt(): the full
-  // assembled worker context (new/fresh) or the lean task alone (resume).
+  // Fix #3: capture whether a prior transcript exists so this dispatch can
+  // decide whether to pass the assembled worker context (new session) or the
+  // lean task (resume). The legacy archive-and-reset block used to live
+  // here; the clean-slate workflow is now an explicit operator command
+  // (respawnWorkerSession) and no session is destroyed by a normal
+  // delegate_agent call.
   const sessionFileExisted = existsSync(runtime.sessionFile);
-  // fresh=true starts this agent's conversation clean. Rather than DELETE the
-  // prior session (which would lose the transcript of earlier runs while their
-  // token/cost still count), ARCHIVE it to a numbered run file so the dashboard
-  // can show every run. The live sessionFile always holds the current run.
-  //
-  // Archiving means end-of-run getSessionStats() covers ONLY the fresh session
-  // (the prior transcript is no longer attached), so runtime.* will be overwritten
-  // with just-this-run totals — but the run-start baselines below would still hold
-  // the prior lifetime aggregates, making `runOnly − priorLifetime` go negative and
-  // silently clamp to 0 (the fresh-archive under-count). Reset the lifetime
-  // counters to 0 here so the baselines captured below are 0 and the per-run delta
-  // equals the fresh session's real usage.
-  if (fresh && existsSync(runtime.sessionFile)) {
-    try {
-      archivePriorRun(runtime.sessionFile);
-      runtime.inputTokens = 0;
-      runtime.outputTokens = 0;
-      runtime.cacheReadTokens = 0;
-      runtime.cacheWriteTokens = 0;
-      runtime.reasoningTokens = 0;
-      runtime.costUsd = 0;
-    } catch { /* noop */ }
-  }
 
   // Resolve the model FIRST, before mutating any per-run state. This is the
   // J4/Decision-5 reorder (the session is the only authoritative source of
@@ -467,6 +420,12 @@ export async function dispatchAgent(
   // registers the tool_call handler before the session starts.
   const workerLoader = workerResourceLoader(state, ctx.cwd, runtime.config.name, skillPathsForGate);
   await workerLoader.reload();
+  // T13.0 — bind the live state + ctx to the reload-config operator command
+  // so the F13 dashboard's "reload config" button can resolve the runtime by
+  // agent name. The unbind happens on session shutdown (no session-scoped
+  // teardown here — the reload-config command is read-only against the
+  // runtime and the state stays bound for the life of the process).
+  bindReloadAgentConfigState(state, ctx);
 
   let delegateResult: Awaited<ReturnType<typeof delegateAgentFn>> | undefined;
   try {
@@ -474,7 +433,6 @@ export async function dispatchAgent(
       state,
       runtime.config.name,
       task,
-      { fresh },
       ctx,
       {
         depthFn: () => currentDelegationDepth(),
@@ -662,11 +620,11 @@ export async function dispatchAgent(
   } catch { /* capability probe is best-effort */ }
 
   emitDelegationStart({
-    state, runtime, caller, task, fresh, resolvedModelKey, model, tools, thinking,
+    state, runtime, caller, task, resolvedModelKey, model, tools, thinking,
   });
 
   // Tick elapsedMs + live context fill + dashboard snapshot every 1s so the
-  // dashboard's live view stays fresh for the duration of the worker run.
+  // dashboard's live view stays current for the duration of the worker run.
   // The helper itself is defined at the top of this module; .unref() so the
   // timer never holds the Node event loop open after the run ends.
   runtime.timer = startElapsedTimer(state, runtime);
@@ -693,14 +651,13 @@ export async function dispatchAgent(
   // intentional and matches the documented "no dispose (operator may
   // resume)" contract).
   //
-  // Capture the prior lifetime totals here, AFTER the fresh-reset block
-  // above (so a fresh=true re-run sees prior=0) and BEFORE the prompt
-  // runs (so the per-message reasoning accumulation that happens during
-  // the prompt is NOT included in prior). The §1.1 removal of
-  // `runStart*` from AgentRuntime moved this capture out of the runtime
-  // and into the dispatch flow; reasoning is the only counter not covered
-  // by SessionStats, so it must be captured pre-prompt to produce a
-  // correct per-run reasoning delta.
+  // Capture the prior lifetime totals BEFORE the prompt runs so the
+  // per-message reasoning accumulation that happens during the prompt is
+  // NOT included in prior. The §1.1 removal of `runStart*` from
+  // AgentRuntime moved this capture out of the runtime and into the
+  // dispatch flow; reasoning is the only counter not covered by
+  // SessionStats, so it must be captured pre-prompt to produce a correct
+  // per-run reasoning delta.
   const priorLifetime = {
     inputTokens: Number(runtime.inputTokens) || 0,
     outputTokens: Number(runtime.outputTokens) || 0,
@@ -715,7 +672,6 @@ export async function dispatchAgent(
       runtime,
       session,
       streamState,
-      fresh,
       task,
       ctx,
       caller,

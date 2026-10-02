@@ -42,9 +42,9 @@ export interface DelegationEndInput {
   // The runtime's lifetime totals captured BEFORE the SessionStats overwrite in
   // dispatch-lifecycle.ts. Used to compute the per-run delta in the v1 emission:
   // delta = current_lifetime - priorLifetime (clamped nonneg). For the first
-  // run, priorLifetime is the runtime's initial state (typically zeros); for a
-  // fresh=true re-run, dispatch.ts zeros the lifetime counters before this runs
-  // so priorLifetime is also zeros (W1.1 fix).
+  // run, priorLifetime is the runtime's initial state (typically zeros). For a
+  // respawn, the operator's respawnWorkerSession is the path that zeroed the
+  // counters so priorLifetime is also zeros (W1.1 fix).
   priorLifetime: {
     inputTokens: number;
     outputTokens: number;

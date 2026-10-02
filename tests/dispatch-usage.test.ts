@@ -145,7 +145,7 @@ test("dispatchAgent treats message_update.text as snapshot, not appended delta",
     dispose(): void { /* noop */ },
   } } as any)) as any;
 
-  const result = await dispatchAgent(state, "Builder", "review", ctx, false, create);
+  const result = await dispatchAgent(state, "Builder", "review", ctx, create);
 
   assert.equal(result.exitCode, 0);
   assert.equal(result.output, "- Please approve");
@@ -230,7 +230,7 @@ test("dispatchAgent setup failure releases the reserved slot and emits terminal 
     state: { errorMessage: undefined },
   } } as any)) as any;
 
-  const result = await dispatchAgent(state, "Builder", "fail during setup", ctx, false, create);
+  const result = await dispatchAgent(state, "Builder", "fail during setup", ctx, create);
 
   assert.equal(result.exitCode, 1);
   assert.match(result.output, /subscription setup failed/);
@@ -277,7 +277,7 @@ test("dispatchAgent propagates a parent/nested abort signal into the worker sess
     dispose(): void { /* noop */ },
   } } as any)) as any;
 
-  const resultPromise = dispatchAgent(state, "Builder", "build slowly", ctx, false, create, controller.signal);
+  const resultPromise = dispatchAgent(state, "Builder", "build slowly", ctx, create, controller.signal);
   await new Promise((resolve) => setImmediate(resolve));
   controller.abort();
   const result = await resultPromise;
@@ -317,7 +317,7 @@ test("dispatchAgent enforces optional timeout and nested delegation depth", asyn
   const keepAlive = setInterval(() => undefined, 1_000);
   let timed;
   try {
-    timed = await dispatchAgent(state, "Builder", "slow task", ctx, false, create);
+    timed = await dispatchAgent(state, "Builder", "slow task", ctx, create);
   } finally {
     clearInterval(keepAlive);
   }
@@ -326,7 +326,7 @@ test("dispatchAgent enforces optional timeout and nested delegation depth", asyn
   assert.equal(state.activeRuns, 0);
 
   worker.status = "idle";
-  const nested = await runAtDelegationDepth(1, () => dispatchAgent(state, "Builder", "too deep", ctx, false, create));
+  const nested = await runAtDelegationDepth(1, () => dispatchAgent(state, "Builder", "too deep", ctx, create));
   assert.equal(nested.exitCode, 1);
   assert.match(nested.output, /maximum delegation depth exhausted/i);
   assert.equal(worker.runCount, 1);
@@ -366,7 +366,7 @@ test("dispatchAgent totals equal getSessionStats exactly — no message_end/agen
   const stats = { input: 300, output: 70, cacheRead: 380, cacheWrite: 8, cost: 0.072 };
   const create: CreateAgentSession = (async () => ({ session: scriptedSession({ turns, stats }) })) as any;
 
-  const result = await dispatchAgent(state, "Builder", "build the thing", ctx, false, create);
+  const result = await dispatchAgent(state, "Builder", "build the thing", ctx, create);
   assert.equal(result.exitCode, 0);
 
   // Runtime totals equal the SDK aggregate EXACTLY — not the accumulated turn
@@ -405,13 +405,13 @@ test("delegation_end emits per-run deltas against the run-start baseline (Decisi
   // Run 1: lifetime stats after this run = 100/40/... The delegation_end delta
   // for run 1 equals the full lifetime (baseline was 0).
   const create1: CreateAgentSession = (async () => ({ session: scriptedSession({ turns: [{ input: 1, output: 1, cost: 0 }], stats: { input: 100, output: 40, cacheRead: 10, cacheWrite: 5, cost: 0.10 } }) })) as any;
-  await dispatchAgent(state, "Builder", "run one", ctx, false, create1);
+  await dispatchAgent(state, "Builder", "run one", ctx, create1);
   assert.equal(worker.inputTokens, 100); // runtime now holds lifetime totals
 
   // Run 2: lifetime stats grow to 260/95/... The delta must be run-2-only:
   // 160/55/15/5/0.15 — NOT the cumulative 260/95.
   const create2: CreateAgentSession = (async () => ({ session: scriptedSession({ turns: [{ input: 1, output: 1, cost: 0 }], stats: { input: 260, output: 95, cacheRead: 25, cacheWrite: 10, cost: 0.25 } }) })) as any;
-  await dispatchAgent(state, "Builder", "run two", ctx, false, create2);
+  await dispatchAgent(state, "Builder", "run two", ctx, create2);
 
   const ends = readEmittedEvents(obsLog).filter((e) => e.type === "delegation_end");
   assert.equal(ends.length, 2, "expected a delegation_end per run");
@@ -432,13 +432,13 @@ test("delegation_end emits per-run deltas against the run-start baseline (Decisi
   assert.equal(run2.runtime.inputTokens, 260);
 });
 
-// W1.1: a fresh=true re-run archives the prior session, so end-of-run
-// getSessionStats() covers ONLY the new session. Without resetting the runtime
-// lifetime counters at archive time, the run-start baselines still hold the prior
-// lifetime totals, so `runOnly − priorLifetime` goes negative and the nonneg clamp
-// silently zeroes the whole delta (the fresh-archive under-count). This test proves
-// the fresh run's delta equals its OWN usage, not ~0.
-test("fresh re-run resets lifetime counters so the delta is the fresh session's usage, not clamped ~0 (W1.1)", async () => {
+// W1.1 migration (T13.0): the dispatchAgent `fresh` parameter is gone. A
+// clean-slate restart is the operator's respawnWorkerSession (T5.3), which
+// zeroes the runtime counters AND disposes the prior session. This test now
+// drives a manual counter reset (the same effect respawnWorkerSession has
+// internally) and asserts the per-run delta is the new run's usage, not ~0
+// (the old fresh-archive under-count regression).
+test("counter reset (T13.0 fresh replacement) keeps the per-run delta equal to the run's own usage, not clamped ~0 (W1.1)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-hive-fresh-"));
   const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
   const obsLog = join(dir, "e.jsonl");
@@ -457,52 +457,57 @@ test("fresh re-run resets lifetime counters so the delta is the fresh session's 
   } as any;
   const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", modelId: "model" }) } } as any;
 
-  // Run 1 (not fresh): lifetime stats after this run = 500/200.
+  // Run 1: lifetime stats after this run = 500/200.
   const create1: CreateAgentSession = (async () => ({ session: scriptedSession({ turns: [{ input: 1, output: 1, cost: 0 }], stats: { input: 500, output: 200, cacheRead: 50, cacheWrite: 20, cost: 0.50 } }) })) as any;
-  await dispatchAgent(state, "Builder", "run one", ctx, false, create1);
+  await dispatchAgent(state, "Builder", "run one", ctx, create1);
   assert.equal(worker.inputTokens, 500);
-  // The scripted session doesn't persist a transcript, so materialize the prior
-  // session file to model the real fresh=true precondition (a prior run exists to
-  // archive). This is what triggers the archive+counter-reset path on run 2.
+
+  // The scripted session doesn't persist a transcript, so materialize a prior
+  // session file to model the real pre-respawn state (a prior run exists).
   writeFileSync(worker.sessionFile, "{}\n");
 
-  // Run 2 with fresh=true: the prior builder.jsonl is archived, so this run's
-  // getSessionStats reports ONLY the fresh session (80/30 — smaller than run 1's
-  // lifetime). Pre-fix, delta = 80−500 → clamped to 0. Post-fix, baselines are 0,
-  // so delta = 80/30 exactly.
+  // RespawnWorkerSession (T5.3) zeroes the runtime lifetime counters and
+  // disposes the prior session. We simulate the counter-zero half here
+  // because this test focuses on the per-run delta math; respawn's full
+  // integration is asserted separately in tests/budget-eol.test.ts.
+  worker.inputTokens = 0;
+  worker.outputTokens = 0;
+  worker.cacheReadTokens = 0;
+  worker.cacheWriteTokens = 0;
+  worker.reasoningTokens = 0;
+  worker.costUsd = 0;
+
+  // Run 2: priorLifetime is 0 (counters reset above), so this run's lifetime
+  // equals the per-run delta exactly. Pre-W1.1 the baseline held the prior
+  // lifetime, so delta = 80−500 → clamped to 0.
   const create2: CreateAgentSession = (async () => ({ session: scriptedSession({ turns: [{ input: 1, output: 1, cost: 0 }], stats: { input: 80, output: 30, cacheRead: 5, cacheWrite: 2, cost: 0.08 } }) })) as any;
-  await dispatchAgent(state, "Builder", "run two fresh", ctx, true, create2);
+  await dispatchAgent(state, "Builder", "run two", ctx, create2);
 
   const ends = readEmittedEvents(obsLog).filter((e) => e.type === "delegation_end");
   assert.equal(ends.length, 2, "expected a delegation_end per run");
   const run2 = ends[1].payload;
-  // v1: payload.lifetime is the session-cumulative snapshot, AND payload.delta is
-  // the per-run contribution (current_lifetime - priorLifetime). The fresh run's
-  // counters are zeroed at archive time (dispatch.ts:388-396), so priorLifetime
-  // for the fresh run is 0 across the board — delta equals lifetime.
   assert.equal(run2.lifetime.inputTokens, 80);
   assert.equal(run2.lifetime.outputTokens, 30);
   assert.equal(run2.lifetime.cacheReadTokens, 5);
   assert.equal(run2.lifetime.cacheWriteTokens, 2);
   assert.ok(Math.abs(run2.lifetime.costUsd - 0.08) < 1e-9, `run2 cost lifetime ${run2.lifetime.costUsd} ≈ 0.08`);
-  // Fresh run: priorLifetime is 0 (counters reset at archive), so delta == lifetime.
+  // After a counter reset, priorLifetime is 0 across the board, so delta == lifetime.
   assert.equal(run2.delta.inputTokens, 80);
   assert.equal(run2.delta.outputTokens, 30);
   assert.equal(run2.delta.cacheReadTokens, 5);
   assert.equal(run2.delta.cacheWriteTokens, 2);
   assert.ok(Math.abs(run2.delta.costUsd - 0.08) < 1e-9, `run2 delta cost ${run2.delta.costUsd} ≈ 0.08`);
-  // Runtime now holds the fresh session's lifetime totals (overwritten by stats).
   assert.equal(worker.inputTokens, 80);
 });
 
-// R3-1.1: the fresh-delta fix must survive a runtime-counter restore. A mode
-// switch / reloadTeam rebuilds runtimes and calls restoreRuntimeCounters, which
-// reseeds lifetime totals from the delegation_end log. The OLD peak/Math.max
-// restore would pick the pre-fresh row (500) over the post-fresh row (80),
-// resurrecting the stale baseline so the NEXT run's delta clamps to ~0 — the exact
-// bug W1.1 fixed. This test drives run → fresh run → restore → run and asserts the
-// third delta is run-3-only, proving last-row-wins restoration.
-test("fresh-delta survives a mode-switch runtime restore — third run's delta is not resurrected to ~0 (R3-1.1)", async () => {
+// R3-1.1 migration (T13.0): the dispatch path no longer zeros counters. A
+// mode switch / reloadTeam rebuilds runtimes and calls restoreRuntimeCounters,
+// which reseeds lifetime totals from the delegation_end log. The OLD
+// peak/Math.max restore would resurrect a stale baseline so the NEXT run's
+// delta clamps to ~0. This test now drives run → counter reset (the
+// respawnWorkerSession effect) → restore → run and asserts the third delta
+// is run-3-only, proving last-row-wins restoration.
+test("last-row-wins restore survives a counter reset (T13.0 fresh replacement) — third run's delta is not resurrected to ~0 (R3-1.1)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-hive-restore-"));
   const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
   const obsLog = join(dir, "e.jsonl");
@@ -521,15 +526,16 @@ test("fresh-delta survives a mode-switch runtime restore — third run's delta i
   } as any;
   const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", modelId: "model" }) } } as any;
 
-  // Run 1 (non-fresh): lifetime 500. Writes builder.jsonl so run 2's fresh path fires.
+  // Run 1: lifetime 500. Writes builder.jsonl so a reset path can fire.
   const create1: CreateAgentSession = (async () => ({ session: scriptedSession({ turns: [{ input: 1, output: 1, cost: 0 }], stats: { input: 500, output: 200, cacheRead: 50, cacheWrite: 20, cost: 0.50 } }) })) as any;
-  await dispatchAgent(state, "Builder", "run one", ctx, false, create1);
+  await dispatchAgent(state, "Builder", "run one", ctx, create1);
   writeFileSync(worker.sessionFile, "{}\n");
 
-  // Run 2 (fresh): archives, resets counters, lifetime now 80. The delegation_end
-  // runtime snapshot for run 2 records 80 — SMALLER than run 1's 500.
+  // Counter reset (respawnWorkerSession effect).
+  worker.inputTokens = 0; worker.outputTokens = 0; worker.cacheReadTokens = 0;
+  worker.cacheWriteTokens = 0; worker.reasoningTokens = 0; worker.costUsd = 0;
   const create2: CreateAgentSession = (async () => ({ session: scriptedSession({ turns: [{ input: 1, output: 1, cost: 0 }], stats: { input: 80, output: 30, cacheRead: 5, cacheWrite: 2, cost: 0.08 } }) })) as any;
-  await dispatchAgent(state, "Builder", "run two fresh", ctx, true, create2);
+  await dispatchAgent(state, "Builder", "run two", ctx, create2);
   assert.equal(worker.inputTokens, 80);
 
   // Simulate a mode switch / reloadTeam: rebuild the runtime with zeroed counters
@@ -538,14 +544,14 @@ test("fresh-delta survives a mode-switch runtime restore — third run's delta i
   worker.inputTokens = 0; worker.outputTokens = 0; worker.cacheReadTokens = 0;
   worker.cacheWriteTokens = 0; worker.costUsd = 0; worker.runCount = 0; worker.toolCount = 0;
   restoreRuntimeCounters(state);
-  assert.equal(worker.inputTokens, 80, "restore must pick the latest (post-fresh) row, not the peak");
+  assert.equal(worker.inputTokens, 80, "restore must pick the latest (post-reset) row, not the peak");
   assert.equal(worker.runCount, 2, "runCount stays monotonic across the restore");
 
-  // Run 3 (non-fresh): the fresh session continues, lifetime grows 80 → 130. With a
+  // Run 3: the resumed session continues, lifetime grows 80 → 130. With a
   // correct baseline of 80, the delta is run-3-only (50). With the resurrected 500
   // baseline it would clamp to 0.
   const create3: CreateAgentSession = (async () => ({ session: scriptedSession({ turns: [{ input: 1, output: 1, cost: 0 }], stats: { input: 130, output: 55, cacheRead: 9, cacheWrite: 4, cost: 0.13 } }) })) as any;
-  await dispatchAgent(state, "Builder", "run three", ctx, false, create3);
+  await dispatchAgent(state, "Builder", "run three", ctx, create3);
 
   const ends = readEmittedEvents(obsLog).filter((e) => e.type === "delegation_end");
   assert.equal(ends.length, 3, "expected a delegation_end per run");
@@ -591,7 +597,7 @@ test("dispatchAgent carries reasoning tokens through the delta + summary (Phase 
     turns: [{ input: 10, output: 5, reasoning: 30, cost: 0.01 }, { input: 10, output: 5, reasoning: 20, cost: 0.01 }],
     stats: { input: 20, output: 10, cacheRead: 0, cacheWrite: 0, cost: 0.02 },
   }) })) as any;
-  await dispatchAgent(state, "Builder", "think hard", ctx, false, create);
+  await dispatchAgent(state, "Builder", "think hard", ctx, create);
 
   // Accumulated on the runtime and preserved past the getSessionStats overwrite.
   assert.equal(worker.reasoningTokens, 50);
@@ -633,7 +639,7 @@ test("finite-0 reasoning from SessionStats does not wipe accumulated reasoning (
     turns: [{ input: 10, output: 5, reasoning: 25, cost: 0.01 }, { input: 10, output: 5, reasoning: 15, cost: 0.01 }],
     stats: { input: 20, output: 10, cacheRead: 0, cacheWrite: 0, cost: 0.02, reasoning: 0 },
   }) })) as any;
-  await dispatchAgent(state, "Builder", "think then stats-zero", ctx, false, create);
+  await dispatchAgent(state, "Builder", "think then stats-zero", ctx, create);
 
   // The finite-0 from stats must NOT clobber the 40 accumulated from message_end.
   assert.equal(worker.reasoningTokens, 40);
@@ -669,7 +675,7 @@ test("finite-0 reasoning is trusted when nothing was accumulated (R3-3.1)", asyn
     turns: [{ input: 10, output: 5, cost: 0.01 }],
     stats: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: 0.01, reasoning: 0 },
   }) })) as any;
-  await dispatchAgent(state, "Builder", "no reasoning", ctx, false, create);
+  await dispatchAgent(state, "Builder", "no reasoning", ctx, create);
 
   assert.equal(worker.reasoningTokens, 0);
 });
@@ -706,7 +712,7 @@ test("first-run delegation_start carries thinkingLevels + effective model (J4/M8
 
   // runCount starts at 0 → this is the agent's FIRST run.
   assert.equal(worker.runCount, 0);
-  await dispatchAgent(state, "Builder", "build the thing", ctx, false, create);
+  await dispatchAgent(state, "Builder", "build the thing", ctx, create);
 
   const events = readEmittedEvents(obsLog);
   const starts = events.filter((e) => e.type === "delegation_start");
@@ -763,7 +769,7 @@ test("new session (no prior transcript) receives assembled worker context — sh
   const { session, getPromptArg } = capturePromptSession();
   const create: CreateAgentSession = (async () => ({ session })) as any;
 
-  await dispatchAgent(state, "Builder", "the-lean-task", ctx, false, create);
+  await dispatchAgent(state, "Builder", "the-lean-task", ctx, create);
 
   const received = getPromptArg();
   // The assembled prompt carries the hive operating context header — absent from
@@ -799,7 +805,7 @@ test("resumed session (fresh=false, existing transcript) receives only the lean 
   const { session, getPromptArg } = capturePromptSession();
   const create: CreateAgentSession = (async () => ({ session })) as any;
 
-  await dispatchAgent(state, "Builder", "the-lean-task", ctx, false, create);
+  await dispatchAgent(state, "Builder", "the-lean-task", ctx, create);
 
   const received = getPromptArg();
   // Resume path: only the lean task must reach session.prompt(). The transcript
