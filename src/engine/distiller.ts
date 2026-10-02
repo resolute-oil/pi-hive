@@ -28,7 +28,7 @@ export async function runDistillerProcess(state: HiveState, ctx: ExtensionContex
   const resolvedModel = resolveModel(ctx, model);
   if (!resolvedModel) return "";
   // Asymmetry with the dispatcher: this distiller deliberately bypasses
-  // `delegateAgent`'s typed `DelegateAgentOrchestrator.model:
+  // `delegateAgent`'s typed `DelegateAgentOptions.model:
   // DelegateAgentModel<unknown>` seam because the distiller has none of the
   // things that seam exists to enforce. It is a one-shot scratch session
   // (no persistent session file, `SessionManager.inMemory(ctx.cwd)` below),
