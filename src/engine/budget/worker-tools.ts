@@ -342,6 +342,40 @@ function lookupWorkerHandle(a: string) { return workerHandles.get(a); }
 // sync with active sessions.
 export const __registerHandle = registerWorkerHandle;
 export const __unregisterHandle = unregisterWorkerHandle;
+
+// Production-side seam — Wave 3.5 wiring. The dispatcher imports these
+// to register a handle right after `delegateAgent` returns
+// `kind: "ready"`, and to unregister when the worker finishes its normal
+// run (after runPromptAndFinalize returns). The test seams
+// __registerHandle / __unregisterHandle remain for the budget-eol test
+// suite; production code uses the unprefixed names so the intent is
+// obvious from the call (test code uses the underscored aliases to make
+// the "this is a test seed" signal explicit at the call site).
+//
+// Wave 3.5 hard constraint: region markers in the file-local region
+// blocks (3B / 3C / 3D) stay byte-identical, so we cannot move the
+// internal `registerWorkerHandle` / `unregisterWorkerHandle` /
+// `lookupWorkerHandle` / `WorkerHandle` definitions out of region 3B.
+// Instead we re-export them here (same module, just different names) and
+// expose the WorkerHandle shape so production callers get a typed handle
+// without reaching into the test-only `__`-prefixed names.
+//
+// The internal `WorkerHandle` interface (line 331 in region 3B) and the
+// internal `registerWorkerHandle` / `unregisterWorkerHandle` functions
+// (lines 333-334 in region 3B) are file-local and bound by name; we
+// cannot re-export them under the same identifier without renaming the
+// internals. The wrappers below delegate to the existing test seams, so
+// both surface and test seam point at the same Map entry.
+export type WorkerHandleShape = { agent: string; session: AgentSession; controller: AbortController; sessionManager: SessionManager; ledger: BudgetLedger; policy: WorkerBudgetPolicy; };
+export function registerWorkerHandleForProduction(h: WorkerHandleShape): WorkerHandleShape | undefined {
+  return __registerHandle(h as unknown as Parameters<typeof __registerHandle>[0]);
+}
+export function unregisterWorkerHandleForProduction(a: string): WorkerHandleShape | undefined {
+  return __unregisterHandle(a) as unknown as WorkerHandleShape | undefined;
+}
+export function lookupWorkerHandleForProduction(a: string): WorkerHandleShape | undefined {
+  return lookupWorkerHandle(a) as unknown as WorkerHandleShape | undefined;
+}
 function notImpl(a: string) { return new Error(`not implemented: no worker handle for '${a}'`); }
 // T5.1 endWorkerSession — session.abort() + ledger kind:"end". No dispose (operator may resume). forceEndWorkerSession is the middle-ground for the case where the operator wants disposal too.
 export async function endWorkerSession(agent: string, _reason: string, signal: AbortSignal): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
