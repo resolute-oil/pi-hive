@@ -147,7 +147,7 @@ const defaultDelegateAgentInternals: DelegateAgentInternals = defaultInternals;
 // worker's errorMessage. The `__partialSession` Error-property
 // side-channel is gone.
 export type DelegateAgentResult =
-  | { kind: "ready"; session: AgentSession; sessionId: string; ledger: BudgetLedger; controller: AbortController; sessionManager: SessionManager }
+  | { kind: "ready"; session: AgentSession; sessionId: string; ledger: BudgetLedger; controller: AbortController; sessionManager: SessionManager; policy: WorkerBudgetPolicy }
   | { kind: "partial"; session: AgentSession; controller: AbortController; sessionManager: SessionManager; error: unknown };
 
 // Production wiring the dispatcher uses. The `orchestrator` parameter
@@ -321,6 +321,7 @@ export async function delegateAgentWithInternals(
     ledger,
     controller,
     sessionManager,
+    policy,
   };
 }
 

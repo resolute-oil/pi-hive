@@ -32,6 +32,7 @@ import { effectiveWorkerGovernance } from "./budget/remaining";
 import { WorkerRunLifecycle } from "./worker-lifecycle";
 import { modelKey, resolveModel, type ResolvedModel } from "./model-resolution";
 import { delegateAgent as delegateAgentFn, BudgetExhaustedError, type DelegateAgentThinkingLevel } from "./budget/worker-tools";
+import { buildWorkerOnlyTools, populateWorkerOnlyBindings } from "./budget/worker-only-tools";
 import { installBudgetEventHooks } from "./budget/events";
 import { wireDispatchSubscription, makeDispatchStreamState } from "./dispatch-subscribe";
 import { emitDelegationEnd } from "./dispatch-end";
@@ -456,7 +457,18 @@ export async function dispatchAgent(
   // internals so the 565-test AgentSession factory keeps working.
   const toolNamesForGate = tools.split(",").map((t) => t.trim()).filter(Boolean);
   const hiveToolsForGate = buildHiveTools(state, runtime.config.name).filter((t) => toolNamesForGate.includes(t.name) || TYPE_SCOPED_TOOL_NAMES.has(t.name));
-  const allToolNamesForGate = dispatchToolNames(toolNamesForGate, hiveToolsForGate);
+
+  // Wave 3.5 wiring (Gap 1, Gap 2): build the per-worker-only tool set
+  // (summarize_progress + 3 cooperative tools) and union their names
+  // into the `tools` array passed to the session. The SDK silently drops
+  // a customTool whose name is missing from `tools`, so the union is
+  // mandatory. The wrappers use deferred bindings — the SDK's
+  // session.customTools list is fixed at creation time, so we register
+  // wrappers that close over a binding object populated AFTER
+  // delegateAgent returns `kind: "ready"`. The full rationale lives in
+  // src/engine/budget/worker-only-tools.ts.
+  const { tools: workerOnlyTools, bindings: workerOnlyBindings } = buildWorkerOnlyTools(state, runtime.config.name);
+  const allToolNamesForGate = dispatchToolNames(toolNamesForGate, [...hiveToolsForGate, ...workerOnlyTools]);
   const skillPathsForGate = resolveWorkerSkillPaths(ctx.cwd, runtime.config.skills as unknown[]);
   const sessionManager = SessionManager.open(runtime.sessionFile);
   // createAgentSession only calls reload() when it creates its own resource
@@ -486,7 +498,7 @@ export async function dispatchAgent(
         // accepts the union-typed string.
         thinkingLevel: thinking as DelegateAgentThinkingLevel | undefined,
         tools: allToolNamesForGate,
-        customTools: hiveToolsForGate,
+        customTools: [...hiveToolsForGate, ...workerOnlyTools],
         resourceLoader: workerLoader,
         // Production-side seam: the dispatcher's createSession is what every
         // test in tests/dispatch-usage.test.ts injects. delegateAgent routes
@@ -565,6 +577,21 @@ export async function dispatchAgent(
     await lifecycle.close(true);
     return await emitSetupFailure({ state, runtime, caller, task, ctx, errorMessage });
   }
+
+  // Wave 3.5 wiring (Gap 1, Gap 2): populate the deferred bindings now
+  // that delegateAgent settled `kind: "ready"` and the session + ledger
+  // + policy are available. The four ToolDefinitions registered as part of
+  // customTools read from these on execute(). We populate before the
+  // `runtime.status = "running"` mutation so any error here fails with
+  // `runtime.status = "error"` (defensive parity with the partial-session
+  // branch above — a binding-mutation throw is not expected but the
+  // shape is symmetric).
+  populateWorkerOnlyBindings(
+    workerOnlyBindings,
+    delegateResult.session,
+    delegateResult.ledger,
+    delegateResult.policy,
+  );
 
   const resolvedModelKey = modelKey(resolvedModel, model);
 
