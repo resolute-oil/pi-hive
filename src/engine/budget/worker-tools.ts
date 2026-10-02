@@ -1,22 +1,59 @@
-// Wave 0 contract stub — Slice 5 + 6: 11 operator commands + 3 cooperative tools
+// Budget operator + cooperative tool surface (Wave 3 implementation).
 //
-// Operator commands (slice 5) are NOT agent-callable; they are invoked from the
-// operator surface (TUI, RPC, dashboard) per the refactor plan §2.8. Each
-// command writes a ledger snapshot with marker "checkpoint" and a unique
-// `kind` value (end / compact / respawn / pause / snapshot / restore / resume
-// / compact-aborted / force-kill / force-end / tear-down-all). Wave 1 will
-// implement them on top of session.abort()/compact()/dispose() and
-// SessionManager.create()/continueRecent().
+// This module is the operator + cooperative tool entry point for the budget
+// refactor. It exposes:
 //
-// Cooperative tools (slice 6) ARE agent-callable: a worker can call them to
-// suggest end-of-life actions. They are routed through the same ledger write
-// path with a `cooperative-*` kind prefix so the dashboard can distinguish
-// agent-initiated vs operator-initiated shutdowns.
+//   - delegateAgent(state, agentName, task, opts, ctx, orchestrator)
+//     The F2 budget-aware delegation spine. Resolves a WorkerBudgetPolicy from
+//     the active config, restores the BudgetLedger from the active session
+//     manager, runs checkBudgetPolicy, opens a Pi AgentSession through the
+//     dispatcher-supplied createSession seam, and installs the budget event
+//     hooks. Returns a discriminated `DelegateAgentResult` (kind: "ready" |
+//     "partial") so the dispatcher can clean up sessions whose hooks failed
+//     to attach. See §2.4 + §2.9 of the master plan.
 //
-// Region markers (per `04-refactor-plan.md` §11.5): Wave 3's four parallel
-// agents (3A, 3B, 3C, 3D) each fill in the functions inside their region.
-// 3A does not edit this file (it touches F3+F4 elsewhere); 3B / 3C / 3D own
-// the three regions below. The markers are pure comments — no runtime cost.
+//   - 11 operator commands (region 3B: endWorkerSession, compactWorkerSession,
+//     pauseWorkerSession, resumeWorkerSession, abortWorkerCompaction,
+//     forceKillWorkerSession, forceEndWorkerSession, tearDownAllWorkers;
+//     region 3C: respawnWorkerSession, snapshotWorkerSession,
+//     restoreWorkerSession). Operator commands are NOT agent-callable — they
+//     are invoked from the operator surface (TUI, RPC, dashboard) per §2.8.
+//     Each writes a BudgetLedger snapshot with marker "checkpoint" and a
+//     unique `kind` value (end / compact / respawn / pause / snapshot /
+//     restore / resume / compact-aborted / force-kill / force-end /
+//     tear-down-all). 3 of the 11 (forceKill / forceEnd / tearDownAll) are
+//     operator-only escape hatches — they never appear as ToolDefinition
+//     objects in the agent's tool allow-list.
+//
+//   - 3 cooperative tools (region 3D: buildRequestCompactionTool,
+//     buildRequestEndSessionTool, buildRequestSnapshotTool). Cooperative
+//     tools ARE agent-callable: a worker calls them to suggest end-of-life
+//     actions. They are routed through the same ledger write path with a
+//     `cooperative-*` kind prefix so the dashboard can distinguish
+//     agent-initiated vs operator-initiated shutdowns. A module-level
+//     cooperativeToolRegistry Set tracks which factories have been called;
+//     `__cooperativeToolRegistry` / `__resetCooperativeToolRegistryForTests`
+//     expose it as a test seam so the cooperative-eol test asserts only
+//     the three cooperative names ever appear.
+//
+// Region markers (per `04-refactor-plan.md` §11.5): Wave 3's parallel agents
+// 3B / 3C / 3D own the three regions below. 3A does not edit this file (it
+// touches F3+F4 elsewhere — the non-budget subscribe handler in
+// dispatch-subscribe.ts). The markers are pure comments — no runtime cost.
+// Wave 3.5 added the production-side workerHandle registry
+// (registerWorkerHandleForProduction / unregisterWorkerHandleForProduction /
+// lookupWorkerHandleForProduction) so dispatch.ts can register a handle
+// immediately after delegateAgent returns kind:"ready" and unregister it
+// after the worker run finishes; the file-local __registerHandle /
+// __unregisterHandle names remain as the test-only seam.
+//
+// delegateAgentWithInternals is the test seam: tests inject stubs for
+// resolveWorkerBudgetPolicy / restoreLedger / checkBudgetPolicy /
+// installBudgetEventHooks / sessionManagerCreate / sessionManagerContinueRecent
+// / createSession. The production entry `delegateAgent` calls it with the
+// default internals and forwards the orchestrator's createSession through
+// the options seam so a single call site can override it without rebuilding
+// the entire internals object.
 
 import type { AgentSession, ExtensionContext, SessionManager, SessionStats, ToolDefinition, ResourceLoader, CreateAgentSessionOptions } from "@earendil-works/pi-coding-agent";
 import { SessionManager as SessionManagerClass, createAgentSession } from "@earendil-works/pi-coding-agent";
