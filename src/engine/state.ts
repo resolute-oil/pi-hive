@@ -21,7 +21,6 @@ export function createState(pi: ExtensionAPI): HiveState {
     activeRuns: 0,
     workerQueue: [],
     nextQueueId: 0,
-    budgetWarnings: new Set(),
     mode: "normal",
     normalToolNames: [],
     sddStatus: null,

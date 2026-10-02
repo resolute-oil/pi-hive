@@ -345,7 +345,6 @@ export interface HiveState {
   // FIFO waiters created only when maxParallel and queueSize are configured.
   workerQueue?: Array<{ id: number; resolve: () => void; reject: (error: Error) => void; signal?: AbortSignal; abort?: () => void }>;
   nextQueueId?: number;
-  budgetWarnings?: Set<string>;
   // The current session mode. Normal = plain Pi; plan = planning team; hive =
   // execution team. (Was `teamMode`; renamed for the three-mode model.)
   mode: HiveMode;
