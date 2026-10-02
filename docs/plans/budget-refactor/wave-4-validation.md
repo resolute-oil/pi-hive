@@ -48,25 +48,25 @@ Two parallel agents. Tasks per agent:
 
 | Task | Description |
 |---|---|
-| [ ] T7.1 | Abort-then-`getSessionStats()` race (Bug 3 symptom class); 100 consecutive runs, no flake |
-| [ ] T7.2 | Parallel delegation updates; **augmented per G-09 to assert team totals consistency** |
-| [ ] T7.3 | Mid-run compaction racing with `message_end` |
-| [ ] T7.4 | `session_start` racing with in-flight `CustomEntry` write |
-| [ ] T7.5 | `/reload` mid-budget (F8's regression test authored here for sequencing) |
-| [ ] T7.6 | `agent_settled` after abort |
-| [ ] T7.7 | Bug 3 end-to-end regression: fresh=true delegation → budget at 99% → manual abort at 0% → `restore` ledger → assert `remaining.tokens` reflects actual cumulative spend. **Per P10 review:** also assert `getSessionStats().tokens.total` matches the expected value AFTER `restoreWorkerSession` — restored sessions must not have wrong totals from non-filtered `stopReason === 'aborted'` messages |
-| [ ] T7.8 | **NEW per P4 review:** 2 integration tests using real SDK timing (abort-then-`getSessionStats()` race; parallel delegation updates against a real `SessionManager`). 100-run stability gate does NOT apply (real SDK timing is inherently non-deterministic); assert behavior within bounded timing windows |
+| [x] T7.1 | Abort-then-`getSessionStats()` race (Bug 3 symptom class); 100 consecutive runs, no flake |
+| [x] T7.2 | Parallel delegation updates; **augmented per G-09 to assert team totals consistency** |
+| [x] T7.3 | Mid-run compaction racing with `message_end` |
+| [x] T7.4 | `session_start` racing with in-flight `CustomEntry` write |
+| [x] T7.5 | `/reload` mid-budget (F8's regression test authored here for sequencing) |
+| [x] T7.6 | `agent_settled` after abort |
+| [x] T7.7 | Bug 3 end-to-end regression: fresh=true delegation → budget at 99% → manual abort at 0% → `restore` ledger → assert `remaining.tokens` reflects actual cumulative spend. **Per P10 review:** also assert `getSessionStats().tokens.total` matches the expected value AFTER `restoreWorkerSession` — restored sessions must not have wrong totals from non-filtered `stopReason === 'aborted'` messages |
+| [x] T7.8 | **NEW per P4 review:** 2 integration tests using real SDK timing (abort-then-`getSessionStats()` race; parallel delegation updates against a real `SessionManager`). 100-run stability gate does NOT apply (real SDK timing is inherently non-deterministic); assert behavior within bounded timing windows |
 
 **Agent 4B (F8 reload):**
 
 | Task | Description |
 |---|---|
-| [ ] T8.1 | `/reload` re-derives ledger from `getBranch()` (T7.5 covers the regression) |
-| [ ] T8.2 | Pre-reload `BudgetExhaustedError` blocks post-reload dispatch |
-| [ ] T8.3 | Paused session resumes correctly after `/reload` |
-| [ ] T8.4 | Audit `src/engine/budget/` for closure-captured state; remove any that survived |
-| [ ] T8.5 | `/tree` re-derives ledger from new branch (G-11); navigate via `SessionManager.branch(branchFromId)`; assert `BudgetLedger.restore` reads the new branch's `CustomEntry`s |
-| [ ] T8.6 | `/fork` creates a ledger-fresh branch (G-11); fork via `SessionManager.forkFrom`; assert the new session has an empty ledger and a fresh budget |
+| [x] T8.1 | `/reload` re-derives ledger from `getBranch()` (T7.5 covers the regression) |
+| [x] T8.2 | Pre-reload `BudgetExhaustedError` blocks post-reload dispatch |
+| [x] T8.3 | Paused session resumes correctly after `/reload` |
+| [x] T8.4 | Audit `src/engine/budget/` for closure-captured state; remove any that survived |
+| [x] T8.5 | `/tree` re-derives ledger from new branch (G-11); navigate via `SessionManager.branch(branchFromId)`; assert `BudgetLedger.restore` reads the new branch's `CustomEntry`s |
+| [x] T8.6 | `/fork` creates a ledger-fresh branch (G-11); fork via `SessionManager.forkFrom`; assert the new session has an empty ledger and a fresh budget |
 
 For full task prose, the implementing agent reads `04-refactor-plan.md` §5 F7 and §5 F8 directly.
 
