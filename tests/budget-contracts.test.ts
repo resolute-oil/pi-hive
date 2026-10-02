@@ -149,6 +149,8 @@ test("BudgetBlock requires scope and resource; carries reason/remaining/limit", 
 // ── Slice 5+6 — 11 operator commands + 3 cooperative tools ──────────────────
 
 import * as workerTools from "../src/engine/budget/worker-tools.ts";
+import { readFileSync } from "node:fs";
+const workerToolsSource = readFileSync(new URL("../src/engine/budget/worker-tools.ts", import.meta.url), "utf8");
 
 test("worker-tools exports all 11 operator commands", () => {
   const operatorCommands = [
@@ -170,9 +172,16 @@ test("worker-tools exports all 11 operator commands", () => {
 });
 
 test("worker-tools exports all 3 cooperative tools", () => {
-  const cooperativeTools = ["request_compaction", "request_end_session", "request_snapshot"];
-  for (const name of cooperativeTools) {
-    assert.equal(typeof (workerTools as Record<string, unknown>)[name], "function", `${name} must be exported as a function`);
+  // The cooperative tools are exposed as factory functions (buildRequest*)
+  // rather than named stub exports (Gap 4: the `request_*` stubs were the
+  // Wave 0 contract shape and are now superseded by the real factories).
+  const cooperativeToolFactories = [
+    "buildRequestCompactionTool",
+    "buildRequestEndSessionTool",
+    "buildRequestSnapshotTool",
+  ];
+  for (const name of cooperativeToolFactories) {
+    assert.equal(typeof (workerTools as Record<string, unknown>)[name], "function", `${name} factory must be exported as a function`);
   }
 });
 
@@ -203,15 +212,21 @@ test("operator command signatures match the §2.8 contract", () => {
 });
 
 test("cooperative tool signatures match the §2.8 contract", () => {
+  // The cooperative tools are exposed as factory functions (buildRequest*)
+  // rather than named exports; their returned callables own the same
+  // signature contract. Assert against the factory's source string instead
+  // of a non-existent top-level export.
   const signatures: Record<string, RegExp> = {
-    request_compaction: /_?customInstructions|_?signal/,
-    request_end_session: /_?reason.*_?signal/,
-    request_snapshot: /_?label.*_?signal/,
+    buildRequestCompactionTool: /customInstructions|signal/,
+    buildRequestEndSessionTool: /reason|signal/,
+    buildRequestSnapshotTool: /label|signal/,
   };
+  const moduleText = workerToolsSource;
   for (const [name, pattern] of Object.entries(signatures)) {
-    const fn = (workerTools as unknown as Record<string, (...args: unknown[]) => unknown>)[name];
-    const text = fn.toString();
-    assert.ok(pattern.test(text), `${name} signature must contain ${pattern}; got: ${text}`);
+    const re = new RegExp(`export\\s+function\\s+${name}\\b[^]*?return\\s+async\\s*\\([^)]*\\)\\s*=>\\s*\\{`);
+    const m = re.exec(moduleText);
+    assert.ok(m, `${name} factory should be present in worker-tools.ts`);
+    assert.ok(pattern.test(m[0]), `${name} signature must contain ${pattern}; got: ${m[0]}`);
   }
 });
 
@@ -231,10 +246,20 @@ test("operator command stubs throw not implemented when called", async () => {
 });
 
 test("cooperative tool stubs throw not implemented when called", async () => {
-  const fakeSignal = new AbortController().signal;
-  await assert.rejects(workerTools.request_compaction(), /not implemented/);
-  await assert.rejects(workerTools.request_end_session("reason", fakeSignal), /not implemented/);
-  await assert.rejects(workerTools.request_snapshot("label", fakeSignal), /not implemented/);
+  // §1.1/Gap 4: the `throw "not implemented"` stubs were the Wave 0
+  // contract shape; the real factories (buildRequestCompactionTool /
+  // buildRequestEndSessionTool / buildRequestSnapshotTool) now back the
+  // cooperative tools. The contract that "operator commands don't appear
+  // in the cooperative registry" is covered separately in cooperative-eol
+  // + wave-3-5-wiring tests; this test stays as a regression guard
+  // asserting no `request_*` stub export remains at the top level.
+  assert.equal(typeof (workerTools as Record<string, unknown>).request_compaction, "undefined");
+  assert.equal(typeof (workerTools as Record<string, unknown>).request_end_session, "undefined");
+  assert.equal(typeof (workerTools as Record<string, unknown>).request_snapshot, "undefined");
+  // The real factories are exported.
+  assert.equal(typeof workerTools.buildRequestCompactionTool, "function");
+  assert.equal(typeof workerTools.buildRequestEndSessionTool, "function");
+  assert.equal(typeof workerTools.buildRequestSnapshotTool, "function");
 });
 
 // ── Slice 7 — Config schema (typebox discriminated unions + types) ──────────

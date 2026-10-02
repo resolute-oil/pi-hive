@@ -33,6 +33,11 @@ export interface DelegationEndInput {
   exitCode: number;
   streamState: DispatchStreamState;
   sdkCounts: { toolCalls?: number; toolResults?: number; userMessages?: number; assistantMessages?: number } | undefined;
+  // Resolved at dispatch time and threaded through for downstream consumers
+  // that still need to inspect the scope. The per-run delta path that
+  // consumed this scope was removed by §1.1 (per-run baselines gone;
+  // lifetime totals from getSessionStats are the single source of truth),
+  // so emitDelegationEnd does not read it.
   tokenBudgetScope: "input_output" | "all";
 }
 
@@ -40,7 +45,7 @@ export interface DelegationEndInput {
 // dispatch.ts used to carry (preserved verbatim so the 537-test behavior
 // gate continues to pass).
 export async function emitDelegationEnd(input: DelegationEndInput): Promise<void> {
-  const { state, runtime, caller, task, ctx, output, errorMessage, exitCode, streamState, sdkCounts, tokenBudgetScope } = input;
+  const { state, runtime, caller, task, ctx, output, errorMessage, exitCode, streamState, sdkCounts, tokenBudgetScope: _tokenBudgetScope } = input;
 
   // The shared log keeps a bounded copy of the result for the dashboard.
   const completionMessage = truncateMiddle(output, DELEGATION_EVENT_MESSAGE_LIMIT);
