@@ -285,10 +285,11 @@ dashboard-dev:
 # QUALITY
 # =============================================================================
 
-# Run the Node test suite.
+# Run the Node test suite. Pass extra args after `--` to run one path, e.g.
+# `just test -- tests/budget-races.test.ts`.
 [group('quality')]
-test:
-  node --import tsx --import ./tests/register-ts-loader.mjs --test tests/*.test.ts
+test *ARGS:
+  node --import tsx --import ./tests/register-ts-loader.mjs --test tests/*.test.ts {{ARGS}}
 
 # Exercise Bun-independent utility and state modules on every supported Node.
 # Pi itself requires Node 22+, so the Node 20 lane intentionally excludes tests
@@ -354,6 +355,15 @@ verify-packed-install:
 [group('quality')]
 verify: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db dashboard-verify review-vendor-verify verify-package verify-budgets verify-licenses
   @printf "{{GREEN}}All verification gates passed.{{NC}}\n"
+
+# 100-consecutive-run stability gate for race-condition tests (plan §5 F7).
+# Runs `tests/budget-races.test.ts` 100 times; fails on any non-zero exit.
+# Excludes `tests/budget-races-integration.test.ts` (T7.8 is real-SDK and
+# non-deterministic; brief excepts it from the 100-run gate per
+# `wave-4-validation.md` line 99).
+[group('quality')]
+race-stability:
+  ./scripts/race-stability-check.sh
 
 # Run all local release/CI gates, including packaging dry-run.
 [group('quality')]
