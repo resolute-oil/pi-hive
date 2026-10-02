@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "vitest";
 import { EventRing } from "./event-ring";
 import { applyHistoryToRuntime, buildHistoryBySession, historyTotals } from "./history";
-import { buildEventStatus } from "./status";
+import { buildEventStatus, buildInterventionBySession } from "./status";
 import { buildAgents, flattenTopology } from "./topology";
 import { sessionStore, sessionUpdatedAt } from "./identity";
 import type { AgentRuntime, HiveEvent } from "../types";
@@ -116,5 +116,42 @@ describe("topology and identity state", () => {
     sessionUpdatedAt.set("s1", 123);
     expect(sessionStore.get("s1")).toBe(session);
     expect(sessionUpdatedAt.get("s1")).toBe(123);
+  });
+
+  // T13.2 — buildInterventionBySession reads the `interventionAvailable`
+  // field off every `budget_warning` event and maps it per session_id.
+  // Engine emits `true` under the default strategy, `false` under compact.
+  test("buildInterventionBySession stamps the most recent budget_warning flag per session", () => {
+    const events: HiveEvent[] = [
+      // First warning for s1: default strategy (intervention available).
+      event("w1", 1, "s1", "budget_warning", { scope: "worker", resource: "tokens", remaining: 1000, cap: 5000, interventionAvailable: true }),
+      // First warning for s2: compact strategy (no manual intervention).
+      event("w2", 2, "s2", "budget_warning", { scope: "worker", resource: "tokens", remaining: 500, cap: 5000, interventionAvailable: false }),
+      // Second warning for s1: still default — latest wins, value unchanged.
+      event("w3", 3, "s1", "budget_warning", { scope: "worker", resource: "tokens", remaining: 200, cap: 5000, interventionAvailable: true }),
+      // Non-worker warning (e.g. team-level) — ignored at the session_id key.
+      event("w4", 4, "s3", "budget_warning", { scope: "team", resource: "tokens", interventionAvailable: true }),
+    ];
+    const out = buildInterventionBySession(events);
+    expect(out.get("s1")).toBe(true);
+    expect(out.get("s2")).toBe(false);
+    // s3 emitted a non-worker warning — the per-session entry is still
+    // stamped from the event itself; the dashboard gates on the row's
+    // interventionAvailable value, not on event-level scope filtering.
+    expect(out.get("s3")).toBe(true);
+    expect(out.size).toBe(3);
+  });
+
+  test("buildInterventionBySession ignores events without a boolean flag", () => {
+    const events: HiveEvent[] = [
+      event("x1", 1, "s1", "budget_warning", { scope: "worker", resource: "tokens" }),
+      event("x2", 2, "s2", "budget_warning", { scope: "worker", resource: "tokens", interventionAvailable: "yes" /* wrong type */ }),
+      event("x3", 3, "s3", "budget_warning", { scope: "worker", resource: "tokens", interventionAvailable: true }),
+    ];
+    const out = buildInterventionBySession(events);
+    expect(out.has("s1")).toBe(false);
+    expect(out.has("s2")).toBe(false);
+    expect(out.get("s3")).toBe(true);
+    expect(out.size).toBe(1);
   });
 });

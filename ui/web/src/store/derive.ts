@@ -1,6 +1,6 @@
 import type { ProjectGroup, SessionView } from "../types";
 import { buildHistoryBySession } from "./history";
-import { buildEventStatus } from "./status";
+import { buildEventStatus, buildInterventionBySession } from "./status";
 import { sessionUpdatedAt } from "./identity";
 import { computeAllEvents, computeFleetStats, computeSessions } from "./sessions";
 import { computeScopedAgents, setHistoryBySession } from "./scoped-agents";
@@ -34,10 +34,11 @@ export function recomputeHeavy() {
   const history = buildHistoryBySession(allEvents);
   setHistoryBySession(history);
   const eventStatus = buildEventStatus(allEvents);
+  const interventionBySession = buildInterventionBySession(allEvents);
   const sessions = computeSessions(allEvents, s.snapshots, eventStatus, s.sessionSummaries);
   const sessionsById = new Map<string, SessionView>();
   for (const sess of sessions) sessionsById.set(sess.session_id, sess);
-  store.setState({ allEvents, eventStatus, sessions, sessionsById });
+  store.setState({ allEvents, eventStatus, interventionBySession, sessions, sessionsById });
   // heavy inputs feed the scoped + live tiers
   recomputeLive();
   recomputeScoped();

@@ -59,6 +59,7 @@ function buildAgentRow(
   order: number,
   rootName: string | undefined,
   statusOf: (sessionId: string, name: string, snapStatus?: string) => string,
+  intervention: Map<string, boolean>,
 ): ScopeAgent {
   const key = normalizeName(name);
   const sessHist = getHistoryBySession().get(sess.session_id);
@@ -96,6 +97,11 @@ function buildAgentRow(
     stages: copyStringArray(node?.stages),
     consultWhen: node?.consultWhen,
     responsibilities: node?.responsibilities,
+    // T13.2 — stamp the per-session intervention flag from the heavy-tier
+    // reducer. Undefined when the worker has not yet emitted a
+    // `budget_warning` event (operator commands are enabled by default in
+    // that case, per `OperatorCommands.tsx`).
+    interventionAvailable: intervention.get(sess.session_id),
   };
 }
 
@@ -104,6 +110,7 @@ export function computeScopedAgents(scopedSessions: SessionView[]): ScopeAgent[]
   let order = 0;
   const gs = store.getState();
   const st = gs.eventStatus;
+  const intervention = gs.interventionBySession;
   const now = gs.now || Date.now();
   // W1.2: the overlay marks running/waiting but only clears on delegation_end, so a
   // dead session's overlay pins an agent active forever. Demote overlay entries for
@@ -122,7 +129,7 @@ export function computeScopedAgents(scopedSessions: SessionView[]): ScopeAgent[]
       if (!node || !key || seen.has(key)) return;
       seen.add(key);
       const rt = sess.agents.get(node.name);
-      out.push(buildAgentRow(sess, node.name, rt, node, depth, order++, rootName, statusOf));
+      out.push(buildAgentRow(sess, node.name, rt, node, depth, order++, rootName, statusOf, intervention));
       for (const c of node.children || []) walk(c, depth + 1);
     };
     if (topo?.orchestrator) walk(topo.orchestrator, 0);
@@ -135,7 +142,7 @@ export function computeScopedAgents(scopedSessions: SessionView[]): ScopeAgent[]
       const key = normalizeName(rt.name);
       if (!key || seen.has(key)) continue;
       seen.add(key);
-      out.push(buildAgentRow(sess, rt.name, rt, undefined, 0, order++, rootName, statusOf));
+      out.push(buildAgentRow(sess, rt.name, rt, undefined, 0, order++, rootName, statusOf, intervention));
     }
   }
   return out;
