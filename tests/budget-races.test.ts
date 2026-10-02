@@ -29,7 +29,7 @@ import { checkBudgetPolicy, teamUsage, workerConsumedTokens } from "../src/engin
 import {
   buildBudgetToolCallHandler,
   installBudgetEventHooks,
-  _resetBudgetContextsForTests,
+  __resetBudgetContextsForTests,
 } from "../src/engine/budget/events.ts";
 import type { BudgetLedgerEntry, WorkerBudgetPolicy } from "../src/core/types.ts";
 
@@ -209,7 +209,7 @@ function makeRecordingLedger(sm: SessionManager, agentName: string, initialCumul
 // AND the live `getSessionStats()` agrees with the ledger.
 
 test("T7.1: abort-then-`getSessionStats()` race — restored ledger cumulative equals last written value (Bug 3 symptom)", async () => {
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
   const sm = SessionManager.inMemory("/tmp");
   const policy = capPolicy(1000);
 
@@ -301,7 +301,7 @@ test("T7.1: abort-then-`getSessionStats()` race — restored ledger cumulative e
 // equals the sum of each worker's latest cumulative — order-independent.
 
 test("T7.2: parallel delegation updates — team totals match sum of per-worker latest cumulative (G-09)", async () => {
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
   const sm = SessionManager.inMemory("/tmp");
   const policy: WorkerBudgetPolicy = {
     worker: {},
@@ -392,7 +392,7 @@ test("T7.2: parallel delegation updates — team totals match sum of per-worker 
 // does not perturb the ledger cumulative.
 
 test("T7.3: mid-run compaction racing with `message_end` — savings persist independently, ledger cumulative is unaffected", async () => {
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
   const { session, sm } = makeScriptedSession({
     initialCumulative: { tokens: 0, costUsd: 0, runs: 1 },
   });
@@ -495,7 +495,7 @@ test("T7.3: mid-run compaction racing with `message_end` — savings persist ind
 // every CustomEntry written before the restore is in the restore's view.
 
 test("T7.4: `session_start` racing with in-flight CustomEntry write — restore sees every CustomEntry written before it", async () => {
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
   const sm = SessionManager.inMemory("/tmp");
 
   // Write 10 ledger CustomEntries (no await between write and read).
@@ -556,7 +556,7 @@ test("T7.4: `session_start` racing with in-flight CustomEntry write — restore 
 // write, marker='checkpoint'.
 
 test("T7.6: agent_settled after abort — exactly one checkpoint write (marker='checkpoint'), no double snapshot", async () => {
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
   const { session, sm } = makeScriptedSession({
     initialCumulative: { tokens: 0, costUsd: 0, runs: 1 },
   });
@@ -637,7 +637,7 @@ test("T7.6: agent_settled after abort — exactly one checkpoint write (marker='
 // and its `getSessionStats()` reflects the inherited state.
 
 test("T7.7: Bug 3 end-to-end regression — fresh=true delegation → budget at 99% → manual abort → restore: remaining.tokens reflects actual cumulative (15134)", async () => {
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
 
   // The exact value from `docs/reviews/28-09-2026-budget-review/raw-evidence/bug-history.md`
   // line 66: "tokens=15134 used".

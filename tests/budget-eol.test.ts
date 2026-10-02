@@ -43,7 +43,7 @@ import type {
   CreateAgentSessionOptions,
 } from "@earendil-works/pi-coding-agent";
 import { BudgetLedger } from "../src/engine/budget/ledger.ts";
-import { _resetBudgetContextsForTests } from "../src/engine/budget/events.ts";
+import { __resetBudgetContextsForTests } from "../src/engine/budget/events.ts";
 import type { BudgetLedgerEntry, BudgetLedgerKind } from "../src/core/types.ts";
 import type { WorkerBudgetPolicy } from "../src/core/types.ts";
 
@@ -1376,7 +1376,7 @@ function defaultStats(): SessionStats {
 // ─────────────────────────────────────────────────────────────────────────
 
 test("T7.5: /reload mid-budget — budget display reflects pre-reload state (F8 regression authored here)", async () => {
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-reload-mid-budget-"));
   const sessionDir = join(cwd, "sessions");
 

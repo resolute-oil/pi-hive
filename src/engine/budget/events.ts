@@ -81,7 +81,7 @@ export function getBudgetContextForAgent(agentName: string): BudgetContext | und
 
 // For tests only — wipes the registry between cases. Not exported in the
 // production API; tests import it directly to keep cases hermetic.
-export function _resetBudgetContextsForTests(): void {
+export function __resetBudgetContextsForTests(): void {
   budgetContextsByAgent.clear();
 }
 
