@@ -702,7 +702,7 @@ export async function dispatchAgent(
   // module stays under the ≤600 LOC refactor target. Budget paths (warning at
   // 20%, abort at 0%, recordCompaction) live in installBudgetEventHooks and
   // are installed separately (T2.1).
-  const unsubscribe = wireDispatchSubscription(state, runtime, session, streamState, governance, runController);
+  const unsubscribe = wireDispatchSubscription(state, runtime, session, streamState, runController);
   lifecycle.attachSubscription(unsubscribe);
 
 

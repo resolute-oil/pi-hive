@@ -12,6 +12,7 @@
 
 import type { AgentSession, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetLedger } from "./ledger";
+import { isLedgerEntry } from "./ledger";
 import type { BudgetBlock, BudgetLedgerEntry, IncludeKeys, WorkerBudgetPolicy } from "../../core/types";
 
 const LEDGER_CUSTOM_TYPE = "pi-hive-budget-ledger";
@@ -154,14 +155,6 @@ export function teamUsage(branch: SessionEntry[]): { tokens: number; costUsd: nu
     runs += cumulative.runs;
   }
   return { tokens, costUsd, runs };
-}
-
-// Type guard for ledger CustomEntries. Same predicate as in ledger.ts (kept
-// here so policy.ts doesn't import from the ledger class — it only consumes
-// the branch shape). TS I2 — replaces the BudgetLedgerEntryLike structural
-// alias that lost its type guarantee.
-function isLedgerEntry(entry: SessionEntry): entry is SessionEntry & { data: BudgetLedgerEntry["data"] } {
-  return entry.type === "custom" && (entry as unknown as { customType?: string }).customType === LEDGER_CUSTOM_TYPE;
 }
 
 // Pure ratio: how much of a cap remains. Used for the warning/exhausted

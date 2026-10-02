@@ -32,7 +32,7 @@ import {
   buildBudgetToolCallHandler,
   getBudgetContextForAgent,
   installBudgetEventHooks,
-  _resetBudgetContextsForTests,
+  __resetBudgetContextsForTests,
 } from "../src/engine/budget/events.ts";
 
 // ── Test fixtures ─────────────────────────────────────────────────────────
@@ -610,7 +610,7 @@ test("strategies.onApproachingLimit.threshold drives the warning emit (custom th
 // ── Wave 3 fixup I2: budget context registered BEFORE session.subscribe ──
 
 test("Wave 3 fixup I2: installBudgetEventHooks registers the budget context BEFORE calling session.subscribe (no leak window for the first event)", () => {
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
   // Recorder that captures whether the budget context is observable at
   // the moment session.subscribe is called. If the implementation ever
   // regresses and calls subscribe() before budgetContextsByAgent.set(),
@@ -637,7 +637,7 @@ test("Wave 3 fixup I2: installBudgetEventHooks registers the budget context BEFO
   );
 
   assert.equal(contextPresentAtSubscribe, true, "budget context is observable at session.subscribe() call time");
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
 });
 
 // ── T3.1 hard gate: throttle works (≤200 writes per 1000 message_end) ───
@@ -701,7 +701,7 @@ test("F3 T3.1 hard gate: throttle holds writes ≤200 across 1000 message_end ev
   );
 
   // Cleanup the budget-context registry so other tests are hermetic.
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
 });
 
 // ── T3.1 hard gate: always-write on threshold crossings ────────────────
@@ -758,7 +758,7 @@ test("F3 T3.1 hard gate: crossing both 20% and 0% in the same run writes both ma
 
   // Restore and reset registry.
   (session as any).getSessionStats = original;
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
 });
 
 // ── T3.2 hard gate: warning emitted exactly once across 100 message_end ─
@@ -790,7 +790,7 @@ test("F3 T3.2 hard gate: warning emitted exactly once per worker across 100 mess
 
   const warnings = appendedMessages.filter((m) => m.customType === "budget_warning");
   assert.equal(warnings.length, 1, "exactly 1 warning across 100 message_end events (dedup by 'worker:tokens')");
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
 });
 
 // ── T3.2 hard gate: worker SEES warning in next prompt context ─────────
@@ -837,13 +837,13 @@ test("F3 T3.2 hard gate: worker SEES the warning in next prompt context (CustomM
   const branch = sm.getBranch();
   const customMsgEntries = branch.filter((e: any) => e.type === "custom_message" && (e as any).customType === "budget_warning");
   assert.equal(customMsgEntries.length, 1, "budget_warning CustomMessageEntry preserved in branch");
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
 });
 
 // ── T3.4 G-01: tool_call blocks bash when tokens exhausted ─────────────
 
 test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks bash when workerTokensRemaining ≤ 0", async () => {
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
   let captured: Listener | undefined;
   let tokens = 100;
   const session = {
@@ -866,13 +866,13 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks bash when workerTokensRema
   assert.equal(result!.block, true);
   assert.match(result!.reason!, /tokens 100\/100/);
   assert.equal(result!.terminate, false, "tool_call block sets terminate=false; controller.abort handles termination");
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
 });
 
 // ── T3.4 G-01: tool_call blocks edit when tokens exhausted ─────────────
 
 test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks edit when workerTokensRemaining ≤ 0", async () => {
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
   let captured: Listener | undefined;
   const session = {
     subscribe(listener: Listener) {
@@ -888,13 +888,13 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks edit when workerTokensRema
   const result = await buildBudgetToolCallHandler("tester")({ toolName: "edit", input: { path: "x" } }, {} as any);
   assert.ok(result, "block result returned for edit when exhausted");
   assert.equal(result!.block, true);
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
 });
 
 // ── T3.4 G-01: tool_call blocks write when tokens exhausted ────────────
 
 test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks write when workerTokensRemaining ≤ 0", async () => {
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
   let captured: Listener | undefined;
   const session = {
     subscribe(listener: Listener) {
@@ -910,13 +910,13 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks write when workerTokensRem
   const result = await buildBudgetToolCallHandler("tester")({ toolName: "write", input: { path: "x", content: "y" } }, {} as any);
   assert.ok(result, "block result returned for write when exhausted");
   assert.equal(result!.block, true);
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
 });
 
 // ── T3.4 G-01: tool_call blocks read when tokens exhausted ─────────────
 
 test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks read when workerTokensRemaining ≤ 0", async () => {
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
   let captured: Listener | undefined;
   const session = {
     subscribe(listener: Listener) {
@@ -932,13 +932,13 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks read when workerTokensRema
   const result = await buildBudgetToolCallHandler("tester")({ toolName: "read", input: { path: "x" } }, {} as any);
   assert.ok(result, "block result returned for read when exhausted");
   assert.equal(result!.block, true);
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
 });
 
 // ── T3.4 G-01: tool_call blocks when workerCostUsdRemaining ≤ 0 ───────
 
 test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks bash when workerCostUsdRemaining ≤ 0 (cost dimension)", async () => {
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
   let captured: Listener | undefined;
   const session = {
     subscribe(listener: Listener) {
@@ -956,13 +956,13 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks bash when workerCostUsdRem
   assert.ok(result, "block result returned for bash when cost exhausted (tokens OK)");
   assert.equal(result!.block, true);
   assert.match(result!.reason!, /cost/);
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
 });
 
 // ── T3.4 G-01: tool_call fast-path — controller.signal.aborted → no-op
 
 test("F3 T3.4 G-01: buildBudgetToolCallHandler is a no-op when controller.signal.aborted (fast-path)", async () => {
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
   let captured: Listener | undefined;
   const session = {
     subscribe(listener: Listener) {
@@ -982,13 +982,13 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler is a no-op when controller.signal
   // its termination path rather than racing with a block result.
   const result = await buildBudgetToolCallHandler("tester")({ toolName: "bash", input: { command: "ls" } }, {} as any);
   assert.equal(result, undefined, "fast-path: aborted controller → undefined (allow abort to terminate)");
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
 });
 
 // ── T3.4 G-01: tool_call does NOT block tools not in the brief's list ─
 
 test("F3 T3.4 G-01: buildBudgetToolCallHandler does NOT block grep/find/ls/custom tools when tokens exhausted", async () => {
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
   let captured: Listener | undefined;
   const session = {
     subscribe(listener: Listener) {
@@ -1006,7 +1006,7 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler does NOT block grep/find/ls/custo
     const result = await handler({ toolName, input: {} }, {} as any);
     assert.equal(result, undefined, `${toolName} NOT in block list — must pass through`);
   }
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
 });
 
 // ── T3.5 G-17: warning × summarize_progress ordering pinned ────────────
@@ -1021,7 +1021,7 @@ test("F3 T3.5 G-17: warning CustomMessageEntry lands BEFORE summarize_progress p
   // ordering (the warning at index N, the progress note at index
   // N+1). Strategy must be 'compact' for the progress note to fire
   // (per summarize-progress.ts:147 — compact-mode branch).
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
   const callOrder: string[] = [];
   let captured: Listener | undefined;
   const session = {
@@ -1084,7 +1084,7 @@ test("F3 T3.5 G-17: warning CustomMessageEntry lands BEFORE summarize_progress p
   assert.ok(warningIdx >= 0, "budget_warning present in callOrder");
   assert.ok(progressIdx >= 0, "progress_note present in callOrder");
   assert.ok(warningIdx < progressIdx, `warning must precede progress note (warning=${warningIdx}, progress=${progressIdx})`);
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
 });
 
 // ── T3.6 G-02: abort-then-agent_settled ordering pinned ────────────────
@@ -1096,7 +1096,7 @@ test("F3 T3.6 G-02: budget_exhausted CustomEntry ID is strictly less than budget
   // agent_settled final snapshot at events.ts:140-143). The test
   // uses SessionManager.inMemory + a real BudgetLedger so both
   // writes hit the real SessionManager and receive real IDs.
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
   let captured: Listener | undefined;
   const session = {
     subscribe(listener: Listener) {
@@ -1149,7 +1149,7 @@ test("F3 T3.6 G-02: budget_exhausted CustomEntry ID is strictly less than budget
     exhaustedIdx < checkpointIdx,
     `exhausted branch position (${exhaustedIdx}) must be strictly less than checkpoint branch position (${checkpointIdx})`,
   );
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
 });
 
 // ── T4.2 verify-clean: agent_end does NOT trigger budget finalization ──
@@ -1163,7 +1163,7 @@ test("F4 T4.2 verify-clean: agent_end without agent_settled does NOT write a fin
   // (NOT agent_end) — so firing agent_end without a follow-up
   // agent_settled writes ZERO ledger snapshots. Verify by firing
   // agent_end alone and asserting no CustomEntry was appended.
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
   let captured: Listener | undefined;
   const appendedEntries: Array<{ customType: string; data?: any }> = [];
   const session = {
@@ -1198,7 +1198,7 @@ test("F4 T4.2 verify-clean: agent_end without agent_settled does NOT write a fin
   // file already pins the ledger.snapshot call shape; here we only
   // assert that agent_end did not write a CustomEntry.
   assert.equal(checkpoints.length, 0, "agent_end's text-fallback path never appends a budget_checkpoint entry");
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
 });
 
 // ── Wave 3 fixup Issue 3: agent_end + agent_settled → exactly one final snapshot (T4.1) ──
@@ -1211,7 +1211,7 @@ test("F4 T4.2 verify-clean: agent_end without agent_settled does NOT write a fin
 // final snapshot and NOT agent_end — so the snapshot count for the
 // pair of events is exactly 1.
 test("Wave 3 fixup Issue 3 / T4.1: agent_end followed by agent_settled yields exactly one final budget_checkpoint snapshot", () => {
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
   let captured: Listener | undefined;
   const appendedEntries: Array<{ customType: string; data?: any }> = [];
   const session = {
@@ -1277,5 +1277,5 @@ test("Wave 3 fixup Issue 3 / T4.1: agent_end followed by agent_settled yields ex
   const ledgersAfterAgentSettled = appendedEntries.filter((e) => e.customType === "pi-hive-budget-ledger");
   assert.equal(ledgersAfterAgentSettled.length, 1, "exactly one budget-ledger entry written across the agent_end → agent_settled sequence");
   assert.equal(ledgersAfterAgentSettled[0].data.marker, "checkpoint", "the written entry's marker is 'checkpoint'");
-  _resetBudgetContextsForTests();
+  __resetBudgetContextsForTests();
 });
