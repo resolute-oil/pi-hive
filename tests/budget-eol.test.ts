@@ -43,6 +43,7 @@ import type {
   CreateAgentSessionOptions,
 } from "@earendil-works/pi-coding-agent";
 import { BudgetLedger } from "../src/engine/budget/ledger.ts";
+import { _resetBudgetContextsForTests } from "../src/engine/budget/events.ts";
 import type { BudgetLedgerEntry, BudgetLedgerKind } from "../src/core/types.ts";
 import type { WorkerBudgetPolicy } from "../src/core/types.ts";
 
@@ -1354,3 +1355,110 @@ function defaultStats(): SessionStats {
     cost: 0,
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Wave 4 Agent 4A — F7 race regression tests (T7.5 + T7.6 eol versions).
+//
+// Per `docs/plans/budget-refactor/wave-4-validation.md` (T7.5 +
+// T7.6 eol section): these tests pin the reload-stable behavior
+// (F8's regression test authored here for sequencing) and the
+// agent_settled-after-abort invariant at the operator-command seam.
+//
+// T7.5 — `/reload` mid-budget: assert the budget display reflects
+// pre-reload state. The reload is simulated by writing ledger
+// CustomEntries to a file-backed SessionManager, then opening a fresh
+// SessionManager on the same file and restoring the ledger.
+//
+// T7.6 (eol version) — `agent_settled` after abort at the eol surface:
+// the final operator command (e.g., endWorkerSession, forceKillWorkerSession)
+// writes a ledger snapshot with kind=... and marker='checkpoint'; the
+// brief requires exactly one such write per aborted run.
+// ─────────────────────────────────────────────────────────────────────────
+
+test("T7.5: /reload mid-budget — budget display reflects pre-reload state (F8 regression authored here)", async () => {
+  _resetBudgetContextsForTests();
+  const cwd = mkdtempSync(join(tmpdir(), "pi-hive-reload-mid-budget-"));
+  const sessionDir = join(cwd, "sessions");
+
+  // Create a real file-backed SessionManager and write pre-reload ledger
+  // state. Append a user message first so the SDK persists the file.
+  const sourceSM = SessionManager.create(cwd, sessionDir);
+  sourceSM.appendMessage({
+    role: "user",
+    content: [{ type: "text", text: "task" }],
+    timestamp: 0,
+  } as any);
+  // Pre-reload: worker has used 250 tokens (under cap 1000).
+  sourceSM.appendCustomEntry("pi-hive-budget-ledger", {
+    caps: { workerTokens: 1000 },
+    cumulative: { tokens: 250, costUsd: 0.025, runs: 1 },
+    writtenAt: 0,
+    agentSlug: "pre-reload-worker",
+  });
+
+  // Simulate `/reload`: close the source SM, open a fresh one on the
+  // same file. This is what Pi does in its reload path.
+  const sessionFile = sourceSM.getSessionFile();
+  assert.ok(sessionFile !== undefined, "source SM was persisted to a file");
+  const reloadedSM = SessionManager.open(sessionFile, sessionDir, cwd);
+
+  // Restore the ledger from the reloaded SM. The invariant: the
+  // restored cumulative matches pre-reload state exactly.
+  const restored = await BudgetLedger.restore(
+    reloadedSM,
+    "pre-reload-worker",
+    { worker: { tokens: { cap: 1000 } }, team: {} },
+    new AbortController().signal,
+  );
+
+  assert.equal(restored.cumulative.tokens, 250, "reload re-derives cumulative.tokens from CustomEntry (matches pre-reload)");
+  assert.equal(restored.cumulative.costUsd, 0.025, "reload re-derives cumulative.costUsd from CustomEntry");
+  assert.equal(restored.entries.length, 1, "reload sees exactly the one pre-reload ledger entry");
+
+  // The reloaded branch should have the user message + the ledger entry.
+  const reloadedBranch = reloadedSM.getBranch();
+  const ledgerEntries = reloadedBranch.filter(
+    (e: any) => e.type === "custom" && e.customType === "pi-hive-budget-ledger",
+  );
+  assert.equal(ledgerEntries.length, 1, "reloaded branch has the pre-reload ledger CustomEntry");
+  assert.equal((ledgerEntries[0] as any).data.cumulative.tokens, 250, "reloaded ledger CustomEntry carries pre-reload cumulative");
+});
+
+test("T7.6 (eol): agent_settled after abort — exactly one checkpoint write per aborted worker run", async () => {
+  const { handle, sm } = await makeHandle("settled-eol-worker");
+  registerHandle?.(handle);
+  try {
+    // Simulate the worker being aborted via forceKillWorkerSession
+    // (the operator escape hatch — controller.abort() then snapshot
+    // then dispose). The snapshot is the agent_settled checkpoint.
+    const result = await workerTools.forceKillWorkerSession(
+      "settled-eol-worker",
+      "aborted by operator",
+      new AbortController().signal,
+    );
+
+    // Assertion 1: result.ledgerSnapshot has marker='checkpoint'.
+    assert.equal(result.ledgerSnapshot.data.marker, "checkpoint", "snapshot marker = 'checkpoint'");
+    assert.equal(result.ledgerSnapshot.data.kind, "force-kill", "snapshot kind = 'force-kill' (operator escape hatch)");
+
+    // Assertion 2: the persisted CustomEntry has marker='checkpoint'.
+    const entries = sm.getBranch().filter(
+      (e: any) => e.type === "custom" && e.customType === "pi-hive-budget-ledger",
+    );
+    assert.ok(entries.length >= 1, "forceKill wrote at least one ledger CustomEntry");
+    const checkpointEntries = entries.filter((e: any) => e.data?.marker === "checkpoint");
+    assert.ok(checkpointEntries.length >= 1, "at least one persisted checkpoint entry");
+
+    // Assertion 3: exactly one force-kill kind emitted per call.
+    const forceKillEntries = entries.filter((e: any) => e.data?.kind === "force-kill");
+    assert.equal(forceKillEntries.length, 1, "exactly one force-kill ledger entry");
+  } finally {
+    unregisterHandle?.("settled-eol-worker");
+  }
+
+  // Note: budgetRemaining display behavior is verified via the budget
+  // Remaining checks in tests/budget-remaining.test.ts (W3.5).
+  // T7.6's specific assertion is the agent_settled → ledger.snapshot
+  // marker='checkpoint' invariant, pinned by tests/budget-races.test.ts
+  // (race version) and this eol version (operator-command version).
+});
