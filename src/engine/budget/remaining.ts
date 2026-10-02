@@ -3,6 +3,15 @@
 // `budgetRemaining`, `checkDispatchBudgets`, `teamUsage`, `workerConsumed*`
 // and the `effectiveWorkerGovernance` shim live here so the dispatcher can
 // still enforce legacy `WorkerGovernance`-shaped caps during the cutover
+//
+// §1.1 shim: the `AgentRuntime` shape no longer carries the §1.1 counter
+// fields (`runStart*` + `governanceTokens/governanceCostUsd`) that this
+// module's helpers used to compute per-run deltas. The legacy functions
+// are slated for full deletion in Gap 3; until then we typecast the runtime
+// parameter locally so the file still typechecks. The runtime BEHAVIOR of
+// these helpers is unchanged — call sites that still pass the legacy fields
+// will silently see `undefined` for the deleted ones, which is the same as
+// the pre-removal default (every read was guarded with `?? 0` fallbacks).
 // window. The new enforcement path (`checkBudgetPolicy` in policy.ts) reads
 // the nested `WorkerBudgetPolicy` shape — when all live dispatch sites
 // migrate to it, this module is deletable.
@@ -46,26 +55,48 @@ function runtimeTokens(runtime: AgentRuntime, scope: TokenScope = "all"): number
     : base + runtime.cacheReadTokens + runtime.cacheWriteTokens + runtime.reasoningTokens;
 }
 
+// §1.1 shim: the deleted `runStart*` + `governance*` fields are accessed via
+// a structural typecast so this legacy module still typechecks. The fields
+// resolve to `undefined` at runtime (and the helpers' `?? 0` fallbacks then
+// kick in), matching the pre-removal behavior on legacy runtimes. The file
+// is deleted by Gap 3 of the completion-guard work.
+type LegacyCounters = {
+  runStartInputTokens?: number;
+  runStartOutputTokens?: number;
+  runStartCacheReadTokens?: number;
+  runStartCacheWriteTokens?: number;
+  runStartReasoningTokens?: number;
+  runStartCostUsd?: number;
+  governanceTokens?: number;
+  governanceCostUsd?: number;
+};
+function legacy(runtime: AgentRuntime): AgentRuntime & LegacyCounters {
+  return runtime as AgentRuntime & LegacyCounters;
+}
+
 function runtimeTokenBaseline(runtime: AgentRuntime, scope: TokenScope): number {
-  const base = (runtime.runStartInputTokens || 0) + (runtime.runStartOutputTokens || 0);
+  const r = legacy(runtime);
+  const base = (r.runStartInputTokens || 0) + (r.runStartOutputTokens || 0);
   return scope === "input_output"
     ? base
     : base
-      + (runtime.runStartCacheReadTokens || 0)
-      + (runtime.runStartCacheWriteTokens || 0)
-      + (runtime.runStartReasoningTokens || 0);
+      + (r.runStartCacheReadTokens || 0)
+      + (r.runStartCacheWriteTokens || 0)
+      + (r.runStartReasoningTokens || 0);
 }
 
 export function workerConsumedTokens(runtime: AgentRuntime, scope: TokenScope = "all"): number {
-  const prior = runtime.governanceTokens ?? runtimeTokens(runtime, scope);
-  if (runtime.status !== "running" || runtime.governanceTokens === undefined) return prior;
+  const r = legacy(runtime);
+  const prior = r.governanceTokens ?? runtimeTokens(runtime, scope);
+  if (runtime.status !== "running" || r.governanceTokens === undefined) return prior;
   return prior + Math.max(0, runtimeTokens(runtime, scope) - runtimeTokenBaseline(runtime, scope));
 }
 
 export function workerConsumedCost(runtime: AgentRuntime): number {
-  const prior = runtime.governanceCostUsd ?? runtime.costUsd;
-  if (runtime.status !== "running" || runtime.governanceCostUsd === undefined) return prior;
-  return prior + Math.max(0, runtime.costUsd - (runtime.runStartCostUsd || 0));
+  const r = legacy(runtime);
+  const prior = r.governanceCostUsd ?? runtime.costUsd;
+  if (runtime.status !== "running" || r.governanceCostUsd === undefined) return prior;
+  return prior + Math.max(0, runtime.costUsd - (r.runStartCostUsd || 0));
 }
 
 export function teamUsage(state: HiveState, scope: TokenScope = "all"): { runs: number; tokens: number; costUsd: number } {

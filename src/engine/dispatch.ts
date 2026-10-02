@@ -344,6 +344,12 @@ export async function dispatchAgent(
         : "Delegation cancelled while waiting for a worker slot.";
     return { output: reason, exitCode: 1, elapsed: 0 };
   }
+  // Resolved at dispatch time and threaded through runPromptAndFinalize +
+  // emitDelegationEnd. The per-run delta path that consumed this scope was
+  // removed by §1.1 (per-run baselines gone; lifetime totals from
+  // getSessionStats are the single source of truth), but the seam is kept
+  // so downstream callers (and the F2 test seam) can still inspect it.
+  const tokenBudgetScope = effectiveWorkerGovernance(state, runtime).tokenBudgetScope ?? "all";
   // A queued request can become stale while waiting: another request may have
   // started the same worker or consumed its remaining budget.
   if ((runtime.status as AgentRuntime["status"]) === "running") {
@@ -367,15 +373,6 @@ export async function dispatchAgent(
   // is used below to decide which input to pass to session.prompt(): the full
   // assembled worker context (new/fresh) or the lean task alone (resume).
   const sessionFileExisted = existsSync(runtime.sessionFile);
-  // Governance accounting is monotonic even when fresh=true archives the SDK
-  // transcript and resets its session-lifetime counters. The budget tracks
-  // either input+output only or the full token total, depending on the
-  // configured scope; default "all" preserves the legacy behavior.
-  const tokenBudgetScope = effectiveWorkerGovernance(state, runtime).tokenBudgetScope ?? "all";
-  runtime.governanceTokens ??= tokenBudgetScope === "input_output"
-    ? runtime.inputTokens + runtime.outputTokens
-    : runtime.inputTokens + runtime.outputTokens + runtime.cacheReadTokens + runtime.cacheWriteTokens + runtime.reasoningTokens;
-  runtime.governanceCostUsd ??= runtime.costUsd;
   // fresh=true starts this agent's conversation clean. Rather than DELETE the
   // prior session (which would lose the transcript of earlier runs while their
   // token/cost still count), ARCHIVE it to a numbered run file so the dashboard
@@ -624,17 +621,6 @@ export async function dispatchAgent(
   // The placeholder lifecycle's session/unsubscribe state carries forward
   // (we re-attach below) so setup-failure handling keeps working.
   lifecycle = new WorkerRunLifecycle(state, runtime, runController.signal);
-  // TOK/S baselines (J8/Decision 4): lifetime token counts at run start so the UI
-  // divides the *per-run output* delta by *per-run* elapsedMs — not lifetime
-  // tokens by per-run elapsed.
-  runtime.runStartInputTokens = runtime.inputTokens;
-  runtime.runStartOutputTokens = runtime.outputTokens;
-  // Full baselines so delegation_end can emit per-run deltas for every token
-  // dimension + cost (Decision 1), not just the two TOK/S needs.
-  runtime.runStartCacheReadTokens = runtime.cacheReadTokens;
-  runtime.runStartCacheWriteTokens = runtime.cacheWriteTokens;
-  runtime.runStartReasoningTokens = runtime.reasoningTokens;
-  runtime.runStartCostUsd = runtime.costUsd;
 
   const streamState = makeDispatchStreamState();
   // delegateAgent has already opened the session and installed the budget
