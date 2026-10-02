@@ -109,7 +109,6 @@ test("delegateAgent throws BudgetExhaustedError when checkBudgetPolicy returns a
         state,
         "coder",
         "do the thing",
-        undefined,
         ctx,
         {
           resolveWorkerBudgetPolicy: (() => {
@@ -156,9 +155,10 @@ test("delegateAgent throws BudgetExhaustedError when checkBudgetPolicy returns a
   assert.equal(installHooksCalled, false, "installBudgetEventHooks NOT called when blocked");
 });
 
-// ── Test 2: fresh=true calls SessionManager.create() ──────────────────────
+// ── Test 2: delegateAgent always calls SessionManager.continueRecent() ────
+// (T13.0 sunset of the `fresh` parameter — delegate_agent always resumes now.)
 
-test("delegateAgent calls SessionManager.create() when opts.fresh === true", async () => {
+test("delegateAgent always calls SessionManager.continueRecent() (T13.0 sunset of fresh parameter)", async () => {
   const state = makeStateWithAgent("coder");
   const ctx = makeCtx();
   const sm = makeFakeSessionManager();
@@ -172,7 +172,6 @@ test("delegateAgent calls SessionManager.create() when opts.fresh === true", asy
     state,
     "coder",
     "task",
-    { fresh: true },
     ctx,
     {
       resolveWorkerBudgetPolicy: (() => noCapPolicy) as never,
@@ -194,14 +193,15 @@ test("delegateAgent calls SessionManager.create() when opts.fresh === true", asy
     },
   );
 
-  assert.equal(createCalled, true, "SessionManager.create() called");
-  assert.equal(continueRecentCalled, false, "SessionManager.continueRecent() NOT called for fresh=true");
+  assert.equal(createCalled, false, "SessionManager.create() NOT called (no fresh path)");
+  assert.equal(continueRecentCalled, true, "SessionManager.continueRecent() always called");
   assert.equal(result.kind === "ready" ? result.sessionId : "", "fake-session-id");
 });
 
-// ── Test 3: fresh=false (default) calls SessionManager.continueRecent() ───
+// ── Test 3: a second call to delegateAgent also calls continueRecent ─────
+// (regression guard: nothing in the resume path switched back to create.)
 
-test("delegateAgent calls SessionManager.continueRecent() when opts.fresh === false or undefined", async () => {
+test("delegateAgent calls SessionManager.continueRecent() on every dispatch (no fresh path)", async () => {
   const state = makeStateWithAgent("coder");
   const ctx = makeCtx();
   const sm = makeFakeSessionManager();
@@ -211,12 +211,11 @@ test("delegateAgent calls SessionManager.continueRecent() when opts.fresh === fa
   let createCalled = false;
   let continueRecentCalled = false;
 
-  // First pass: explicit fresh: false.
+  // First pass.
   await delegateAgentWithInternals(
     state,
     "coder",
     "task",
-    { fresh: false },
     ctx,
     {
       resolveWorkerBudgetPolicy: (() => noCapPolicy) as never,
@@ -237,19 +236,18 @@ test("delegateAgent calls SessionManager.continueRecent() when opts.fresh === fa
       }) as never,
     },
   );
-  assert.equal(continueRecentCalled, true, "continueRecent called for fresh:false");
-  assert.equal(createCalled, false, "create NOT called for fresh:false");
+  assert.equal(continueRecentCalled, true, "continueRecent called for first dispatch");
+  assert.equal(createCalled, false, "create NOT called for first dispatch");
 
   // Reset counters.
   createCalled = false;
   continueRecentCalled = false;
 
-  // Second pass: opts is undefined entirely.
+  // Second pass.
   await delegateAgentWithInternals(
     state,
     "coder",
     "task",
-    undefined,
     ctx,
     {
       resolveWorkerBudgetPolicy: (() => noCapPolicy) as never,
@@ -270,8 +268,8 @@ test("delegateAgent calls SessionManager.continueRecent() when opts.fresh === fa
       }) as never,
     },
   );
-  assert.equal(continueRecentCalled, true, "continueRecent called when opts is undefined (default behavior)");
-  assert.equal(createCalled, false, "create NOT called when opts is undefined");
+  assert.equal(continueRecentCalled, true, "continueRecent called for second dispatch");
+  assert.equal(createCalled, false, "create NOT called for second dispatch");
 });
 
 // ── Test 4: installBudgetEventHooks is called after session is opened ────
@@ -290,7 +288,6 @@ test("delegateAgent calls installBudgetEventHooks(session, ledger, policy, contr
     state,
     "coder",
     "task",
-    { fresh: false },
     ctx,
     {
       resolveWorkerBudgetPolicy: ((cfg: unknown) => { order.push("resolvePolicy"); return noCapPolicy; }) as never,
@@ -335,7 +332,6 @@ test("delegateAgent returns { sessionId, session, ledger, controller }", async (
     state,
     "coder",
     "task",
-    { fresh: false },
     ctx,
     {
       resolveWorkerBudgetPolicy: (() => noCapPolicy) as never,
@@ -393,7 +389,6 @@ test("delegateAgent's controller.signal is honored by appendCustomEntry calls in
     state,
     "coder",
     "task",
-    { fresh: false },
     ctx,
     {
       resolveWorkerBudgetPolicy: (() => noCapPolicy) as never,
@@ -438,7 +433,6 @@ test("T2.3: depth at policy.worker.depth.cap + 1 throws BudgetExhaustedError wit
         state,
         "coder",
         "task",
-        { fresh: false },
         ctx,
         {
           resolveWorkerBudgetPolicy: (() => ({ worker: { depth: { cap: 2 } }, team: {} })) as never,
@@ -481,7 +475,6 @@ test("T2.3: depth at policy.worker.depth.cap - 1 succeeds (no throw)", async () 
     state,
     "coder",
     "task",
-    { fresh: false },
     ctx,
     {
       resolveWorkerBudgetPolicy: (() => ({ worker: { depth: { cap: 2 } }, team: {} })) as never,
@@ -528,22 +521,22 @@ test("T2.3: depth count is re-read via depthFn on every call (post-reload depth 
 
   // First delegation: depth=0, +1 → 1 (under cap=2). OK.
   depthNow = 0;
-  await delegateAgentWithInternals(state, "coder", "task", { fresh: false }, ctx, noop, { depthFn });
+  await delegateAgentWithInternals(state, "coder", "task", ctx, noop, { depthFn });
 
   // Second delegation: depth=1, +1 → 2 (== cap). OK (cap means strict >).
   depthNow = 1;
-  await delegateAgentWithInternals(state, "coder", "task", { fresh: false }, ctx, noop, { depthFn });
+  await delegateAgentWithInternals(state, "coder", "task", ctx, noop, { depthFn });
 
   // Third delegation: depth=2, +1 → 3 (> cap). Throws.
   depthNow = 2;
   await assert.rejects(
-    () => delegateAgentWithInternals(state, "coder", "task", { fresh: false }, ctx, noop, { depthFn }),
+    () => delegateAgentWithInternals(state, "coder", "task", ctx, noop, { depthFn }),
     (err: unknown) => err instanceof BudgetExhaustedError && (err as BudgetExhaustedError).resource === "depth",
   );
 
   // After /reload, depthNow resets to 0 — first post-reload delegation OK again.
   depthNow = 0;
-  const postReload = await delegateAgentWithInternals(state, "coder", "task", { fresh: false }, ctx, noop, { depthFn });
+  const postReload = await delegateAgentWithInternals(state, "coder", "task", ctx, noop, { depthFn });
   assert.equal(postReload.kind === "ready" ? postReload.sessionId : "", "fake-session-id", "post-reload delegation succeeds when depth resets");
 });
 
@@ -561,7 +554,7 @@ test("SessionManager.create().toAgentSession() and continueRecent().toAgentSessi
   const toAgentSession = () => { toAgentCalls += 1; return session; };
 
   const resultFresh = await delegateAgentWithInternals(
-    state, "coder", "task", { fresh: true }, ctx,
+    state, "coder", "task", ctx,
     {
       resolveWorkerBudgetPolicy: (() => noCapPolicy) as never,
       restoreLedger: (async () => ledger) as never,
@@ -574,7 +567,7 @@ test("SessionManager.create().toAgentSession() and continueRecent().toAgentSessi
   assert.ok(resultFresh.session, "fresh path yields a session");
 
   const resultResume = await delegateAgentWithInternals(
-    state, "coder", "task", { fresh: false }, ctx,
+    state, "coder", "task", ctx,
     {
       resolveWorkerBudgetPolicy: (() => noCapPolicy) as never,
       restoreLedger: (async () => ledger) as never,
@@ -603,7 +596,7 @@ test("BudgetExhaustedError propagates through dispatchAgent's caller (no silent 
   let caught: unknown;
   try {
     await delegateAgentWithInternals(
-      state, "coder", "task", { fresh: false }, ctx,
+      state, "coder", "task", ctx,
       {
         resolveWorkerBudgetPolicy: (() => noCapPolicy) as never,
         restoreLedger: (async () => ledger) as never,

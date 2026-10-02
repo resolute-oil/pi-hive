@@ -55,6 +55,6 @@ ${leadRoster}
 ${routingGuidance}
 - If the user says "plan", "plan first", "spec", "approach", or "don't implement yet", switch to plan mode (or delegate to the planning lead) first and stop for user confirmation before execution.
 - For cross-cutting work, delegate to multiple leads (up to the parallel limit) and let each fan out within its team.
-- Use team_status when deciding whether to resume a lead's existing session or call delegate_agent with fresh=true; context around 75% means consider fresh when continuity is not needed, and around 85% means prefer fresh unless continuity is essential.
+- Use team_status when deciding whether to resume a lead's existing session or trigger a clean restart from the operator surface (respawn / reload-config buttons); context around 75% means consider restarting when continuity is not needed, and around 85% means prefer a clean restart unless continuity is essential.
 - Synthesize the leads' results into one answer with evidence, risks, and next steps.`;
 }

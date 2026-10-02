@@ -120,7 +120,7 @@ test("session start loads an opted-in team and shutdown aborts an active worker 
     dispose(): void { disposals++; },
   } } as any)) as any;
 
-  const running = dispatchAgent(state, "Builder", "hold until shutdown", ctx, false, createSession);
+  const running = dispatchAgent(state, "Builder", "hold until shutdown", ctx, createSession);
   while (state.activeRuns === 0 || !worker.session) await new Promise((resolve) => setImmediate(resolve));
   assert.equal(state.activeRuns, 1);
 

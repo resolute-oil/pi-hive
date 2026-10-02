@@ -471,7 +471,8 @@ export type BudgetLedgerKind =
   | "tear-down-all"
   | "cooperative-compact"
   | "cooperative-end"
-  | "cooperative-snapshot";
+  | "cooperative-snapshot"
+  | "reload-config";
 
 export interface BudgetLedgerEntry {
   type: "custom";

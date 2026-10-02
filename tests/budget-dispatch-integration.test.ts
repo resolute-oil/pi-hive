@@ -99,7 +99,7 @@ test("dispatchAgent routes its budget pre-flight through delegateAgent (throws B
   const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", modelId: "model" }) } } as any;
   const create: CreateAgentSession = (async () => ({ session: scriptedSession() })) as any;
 
-  const result = await dispatchAgent(state, "Builder", "do work", ctx, false, create);
+  const result = await dispatchAgent(state, "Builder", "do work", ctx, create);
   assert.equal(result.exitCode, 1, "budget block exits with code 1");
   assert.match(result.output, /Worker maximum delegation depth exhausted/i, "message format from delegateAgent's BudgetExhaustedError (not legacy 'Builder maximum delegation depth exhausted')");
   assert.equal(worker.runCount, 0, "budget-block does NOT increment runCount");
@@ -121,7 +121,7 @@ test("dispatchAgent depth-cap pre-flight uses currentDelegationDepth() and throw
   // Simulate nesting at depth=1 (the first call inside runAtDelegationDepth(1)).
   // delegateAgent computes depth+1 = 2 > cap=1 → BudgetExhaustedError.
   const { runAtDelegationDepth } = await import("../src/engine/session.ts");
-  const result = await runAtDelegationDepth(1, () => dispatchAgent(state, "Builder", "too deep", ctx, false, create));
+  const result = await runAtDelegationDepth(1, () => dispatchAgent(state, "Builder", "too deep", ctx, create));
   assert.equal(result.exitCode, 1);
   assert.match(result.output, /Worker maximum delegation depth exhausted/i, "new-path message format");
 });
@@ -152,7 +152,7 @@ test("dispatchAgent installs budget event hooks on the session (delegated, not i
     dispose(): void { /* noop */ },
   } as any })) as any;
 
-  await dispatchAgent(state, "Builder", "do work", ctx, false, create);
+  await dispatchAgent(state, "Builder", "do work", ctx, create);
   // 1 subscriber from installBudgetEventHooks (via delegateAgent) + 1 from
   // wireDispatchSubscription (the streaming/telemetry handler). Pre-fixup
   // the count would be 1 (only the dispatch-subscribe handler).
@@ -186,7 +186,7 @@ test("dispatchAgent assigns runtime.timer before session.prompt() runs (regressi
     },
   } as any })) as any;
 
-  await dispatchAgent(state, "Builder", "do work", ctx, false, create);
+  await dispatchAgent(state, "Builder", "do work", ctx, create);
   assert.ok(timerDuringRun, "runtime.timer must be assigned before session.prompt() runs (slim lost the call site at dispatch.ts:650)");
   assert.equal(timerDuringRun!.constructor.name, "Timeout", "setInterval returns a Node Timeout object");
 });

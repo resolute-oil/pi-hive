@@ -475,7 +475,7 @@ test("Wave 3.5 Gap 3: dispatchAgent registers a handle while the worker is runni
   unregisterWorkerHandleForProduction("Wave3-5-prod-builder");
   assert.equal(lookupWorkerHandleForProduction("Wave3-5-prod-builder"), undefined, "Map empty before dispatch");
 
-  const result = await dispatchAgent(state, "Wave3-5-prod-builder", "do the thing", ctx, false, create);
+  const result = await dispatchAgent(state, "Wave3-5-prod-builder", "do the thing", ctx, create);
   assert.equal(result.exitCode, 0, "dispatchAgent completes successfully");
   assert.ok(observedDuringPrompt, "Map is populated DURING the worker run (handle registered between ready and unregister)");
   assert.equal((observedDuringPrompt as { agent?: string } | undefined)?.agent, "Wave3-5-prod-builder");
