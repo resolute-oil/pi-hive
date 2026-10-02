@@ -74,7 +74,7 @@ export function wireDispatchSubscription(
   runtime: AgentRuntime,
   session: { subscribe(listener: (event: AgentSessionEvent) => void): () => void },
   streamState: DispatchStreamState,
-  runController: AbortController,
+  _runController: AbortController,
 ): () => void {
   const {
     chunks: _chunks,

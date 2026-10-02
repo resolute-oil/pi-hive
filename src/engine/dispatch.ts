@@ -1,19 +1,13 @@
 import { type AgentSession, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import { existsSync, readdirSync, renameSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { TYPE_SCOPED_TOOL_NAMES } from "../core/constants";
 import type { AgentRuntime, HiveState } from "../core/types";
 import {
-  boundedDiagnostics,
   modelFrom,
   normalizeWorkerTools,
-  safeJson,
   agentSlug,
-  textFromMessage,
-  textOfResult,
-  truncateMiddle,
-  extractUsage,
 } from "../core/utils";
 import { logRecord } from "./state";
 import { currentAgentName, currentChangeId, currentDelegationDepth, reloadAgentConfig } from "./session";
@@ -33,15 +27,9 @@ import { WorkerRunLifecycle } from "./worker-lifecycle";
 import { modelKey, resolveModel, type ResolvedModel } from "./model-resolution";
 import { delegateAgent as delegateAgentFn, BudgetExhaustedError, type DelegateAgentThinkingLevel, registerWorkerHandleForProduction, unregisterWorkerHandleForProduction } from "./budget/worker-tools";
 import { buildWorkerOnlyTools, populateWorkerOnlyBindings } from "./budget/worker-only-tools";
-import { installBudgetEventHooks } from "./budget/events";
 import { wireDispatchSubscription, makeDispatchStreamState } from "./dispatch-subscribe";
 import { emitDelegationEnd } from "./dispatch-end";
 import { runPromptAndFinalize } from "./dispatch-lifecycle";
-
-// Dashboard activity should show reviewer/worker conclusions without confusing
-// middle elision in normal cases. Keep a high hard cap to avoid unbounded shared
-// telemetry rows if an agent accidentally returns a huge dump.
-const DELEGATION_EVENT_MESSAGE_LIMIT = 64_000;
 
 export function publishRuntimeUpdate(state: HiveState) {
   state.onRuntimeUpdate?.(state);
@@ -189,14 +177,6 @@ async function emitSetupFailure(opts: {
 // Coerce to a finite number or undefined. Unlike `Number(x) || undefined`, this
 // preserves a legitimate 0 (a real delayMs/tokensAfter of 0 is meaningful; only
 // NaN/absent should drop to undefined). Mirrors the Number.isFinite guards used
-// on the SessionStats overwrite below. Guards null/undefined FIRST (R3-2.5) so an
-// absent field stays undefined rather than coercing to Number(null) === 0.
-function finiteOrUndef(x: unknown): number | undefined {
-  if (x == null) return undefined;
-  const n = Number(x);
-  return Number.isFinite(n) ? n : undefined;
-}
-
 // Move an agent's current session log aside to a numbered archive so a fresh run
 // can start clean without losing the prior run's transcript. "<slug>.jsonl"
 // becomes "<slug>.run-<N>.jsonl" with N the next free index. Returns silently if
@@ -339,7 +319,6 @@ export async function dispatchAgent(
   // the function.
   let errorMessage: string | undefined;
   let abortedByParent = false;
-  let sdkCounts: { toolCalls?: number; toolResults?: number; userMessages?: number; assistantMessages?: number } | undefined;
   // Budget pre-flight (Wave 2 fixup): delegateAgent now owns the budget gate
   // (resolveWorkerBudgetPolicy → BudgetLedger.restore → checkBudgetPolicy),
   // the depth-cap (T2.3), and the installBudgetEventHooks wiring. The
@@ -470,7 +449,6 @@ export async function dispatchAgent(
   const { tools: workerOnlyTools, bindings: workerOnlyBindings } = buildWorkerOnlyTools(state, runtime.config.name);
   const allToolNamesForGate = dispatchToolNames(toolNamesForGate, [...hiveToolsForGate, ...workerOnlyTools]);
   const skillPathsForGate = resolveWorkerSkillPaths(ctx.cwd, runtime.config.skills as unknown[]);
-  const sessionManager = SessionManager.open(runtime.sessionFile);
   // createAgentSession only calls reload() when it creates its own resource
   // loader (sdk.js). When a loader is supplied by the caller, the SDK skips
   // reload, leaving extensionsResult empty (constructor default). Without
