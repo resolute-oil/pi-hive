@@ -258,9 +258,18 @@ export function wireDispatchSubscription(
         break;
       }
       // No-op cases: budget events (warning / exhausted) are handled by
-      // installBudgetEventHooks (T2.1) and reach the dashboard via their own
-      // session manager appends. lifecycle / model / agent_settled are
-      // handled in dispatch.ts and dispatch-end.ts respectively.
+      // installBudgetEventHooks (T2.1) and reach the dashboard via
+      // `emitHiveEvent(state, "budget_warning" | "budget_exhausted", ...)`
+      // (Wave 7 F13 production-wiring fix). The prior comment said "via
+      // their own session manager appends" but the dashboard server
+      // only ingests the parent's telemetry log via
+      // `addSource(telemetry_log)` (runtime.ts:114) — the worker's
+      // session.jsonl is never subscribed. The pre-fix code wrote the
+      // warnings to the worker's session.jsonl via
+      // `sessionManager.appendCustomMessageEntry`, and they silently
+      // failed to reach the dashboard; the F1-F13 audit caught this.
+      // lifecycle / model / agent_settled are handled in dispatch.ts
+      // and dispatch-end.ts respectively.
       case "agent_start":
       case "turn_start":
       case "turn_end":

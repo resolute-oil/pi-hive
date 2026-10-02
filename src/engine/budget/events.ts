@@ -30,7 +30,8 @@
 
 import type { AgentSession, AgentSessionEvent, ExtensionToolContext, SessionStats, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import type { BudgetLedger } from "./ledger";
-import type { WorkerBudgetPolicy } from "../../core/types";
+import type { HiveState, WorkerBudgetPolicy } from "../../core/types";
+import { emitHiveEvent } from "../observability";
 
 // Read threshold + action from the policy's optional Strategies block (per
 // §2.13 C5 v2 wiring). Falls back to the legacy defaults (0.20 warning,
@@ -177,16 +178,49 @@ export function buildBudgetToolCallHandler(agentName: string) {
 // Install the budget event hooks on a session. Returns an unsubscribe function.
 // `controller` carries the AbortSignal that mid-run aborts (and the warning
 // emit checks) read; aborting it is what fast-cancels the run.
+//
+// `state` (optional) is the parent HiveState. When supplied, every
+// `budget_warning` and `budget_exhausted` emit ALSO writes a
+// HiveTelemetryEvent of the matching type to the parent's
+// observabilityLog (via `emitHiveEvent`). The dashboard server only
+// ingests the parent's telemetry log (`addSource(telemetry_log)` in
+// `src/observability/server/runtime.ts:114`); the per-worker
+// `sessionManager.appendCustomMessageEntry` path that previously
+// surfaced warnings reached the dashboard in the F1-F13 design but
+// the audit caught that the dashboard never subscribed to worker
+// session.jsonl files. This emit is the production wiring that makes
+// the F13 "interventionAvailable" flag and the dashboard's rescue-
+// button enable/disable observable end-to-end.
+//
+// `actor` (optional) is the agent's display name. Used as the
+// `actor` field on the emitted HiveTelemetryEvent. Defaults to
+// `ledger.agentName` when omitted.
+//
+// When `state` is undefined (e.g., unit tests that want to keep the
+// handler hermetic and observe only the per-worker `appendCustom*`
+// calls), the emit is skipped — the per-worker custom entries are
+// still produced, so the test surface is unchanged.
 export function installBudgetEventHooks(
   session: AgentSession,
   ledger: BudgetLedger,
   policy: WorkerBudgetPolicy,
   controller: AbortController,
+  state?: HiveState,
+  actor?: string,
 ): () => void {
   const { warningThreshold, onExhaustionAction, interventionAvailable } = resolveStrategies(policy);
   const warnedKeys = new Set<string>();
   // session.sessionManager is the canonical SDK seam (agent-session.d.ts:170).
   const sessionManager = session.sessionManager;
+  // The worker's sessionId is what the dashboard reducer keys the
+  // `interventionBySession` map by (`buildInterventionBySession` at
+  // ui/web/src/store/status.ts:11). The parent's `state.session.sessionId`
+  // is what `emitHiveEvent` writes to the event's `session_id` field,
+  // so we thread the worker's id through the payload — the reducer is
+  // expected to look at `payload.session_id` (with a fallback to
+  // `e.session_id` for legacy rows that pre-date F13-fixes).
+  const workerSessionId = session.sessionId;
+  const emitActor = actor ?? ledger.agentName;
 
   // T3.4 (G-01) — register this worker's budget context for the tool_call
   // handler. Keyed by the ledger's agent slug (read once at install time)
@@ -218,12 +252,20 @@ export function installBudgetEventHooks(
           if (!warnedKeys.has(warningKey)) {
             warnedKeys.add(warningKey);
             const pct = (100 * (1 - ratio)).toFixed(0);
+            const warningDetails = { scope: "worker", resource: "tokens", remaining, cap: workerTokensCap, interventionAvailable, session_id: workerSessionId };
             sessionManager.appendCustomMessageEntry(
               "budget_warning",
               `Worker tokens at ${pct}% of cap. Wrap up your work; call summarize_progress({ notes: "..." }) to record completion intent.`,
               true,
-              { scope: "worker", resource: "tokens", remaining, cap: workerTokensCap, interventionAvailable },
+              warningDetails,
             );
+            // F13 production wiring (Wave 7 fixup): the dashboard server
+            // only ingests the parent's telemetry log, so we MUST also
+            // emit a HiveTelemetryEvent of the same type for the
+            // dashboard reducer to see. The reducer keys the
+            // interventionBySession map by `session_id` (the worker's
+            // session id, threaded through the payload).
+            if (state) emitHiveEvent(state, "budget_warning", warningDetails, emitActor);
           }
         }
       }
@@ -236,25 +278,18 @@ export function installBudgetEventHooks(
         const remaining = Math.max(0, workerTokensCap - cumulative.tokens);
         if (remaining <= 0 && onExhaustionAction !== "none") {
           if (onExhaustionAction !== "compact") {
-            sessionManager.appendCustomEntry("budget_exhausted", {
-              scope: "worker",
-              resource: "tokens",
-              remaining,
-              cap: workerTokensCap,
-            });
+            const exhaustedDetails = { scope: "worker", resource: "tokens", remaining, cap: workerTokensCap, session_id: workerSessionId };
+            sessionManager.appendCustomEntry("budget_exhausted", exhaustedDetails);
+            if (state) emitHiveEvent(state, "budget_exhausted", exhaustedDetails, emitActor);
             if (!controller.signal.aborted) controller.abort(new Error("Worker token budget exhausted"));
           } else {
             // "compact" strategy: log the exhausted marker but do not abort
             // so the cooperative tools can run. (The cooperative-compact call
             // is in T5.10; we surface the marker first so the dashboard sees
             // the threshold crossing even when the strategy is "compact".)
-            sessionManager.appendCustomEntry("budget_exhausted", {
-              scope: "worker",
-              resource: "tokens",
-              remaining,
-              cap: workerTokensCap,
-              action: "compact",
-            });
+            const exhaustedDetails = { scope: "worker", resource: "tokens", remaining, cap: workerTokensCap, action: "compact", session_id: workerSessionId };
+            sessionManager.appendCustomEntry("budget_exhausted", exhaustedDetails);
+            if (state) emitHiveEvent(state, "budget_exhausted", exhaustedDetails, emitActor);
           }
         }
       }
