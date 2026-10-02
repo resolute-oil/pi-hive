@@ -22,7 +22,7 @@ import { agentRoster, resolveRuntime } from "./agent-lookup";
 import { addHiveActivity } from "../ui/tui/activity";
 import { resolveConfiguredPath } from "../core/safe-path";
 import { acquireWorkerSlot, releaseWorkerSlot } from "./worker-queue";
-import { effectiveWorkerGovernance } from "./budget/remaining";
+import { effectiveWorkerGovernance } from "./budget/policy";
 import { WorkerRunLifecycle } from "./worker-lifecycle";
 import { modelKey, resolveModel, type ResolvedModel } from "./model-resolution";
 import { delegateAgent as delegateAgentFn, BudgetExhaustedError, type DelegateAgentThinkingLevel, registerWorkerHandleForProduction, unregisterWorkerHandleForProduction } from "./budget/worker-tools";

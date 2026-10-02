@@ -8,7 +8,7 @@ import type { HiveMode, HiveState } from "../../core/types";
 import { activateTeamRuntimes } from "../../engine/session";
 import { startHiveTelemetrySession } from "../../engine/observability";
 import { recordQuestion } from "../../engine/questions";
-import { budgetRemaining } from "../../engine/budget/remaining";
+import { budgetRemaining } from "../../engine/budget/policy";
 import { updateHiveActivityWidget } from "./activity";
 
 // Surface a delegated planner's promoted clarifying question to the human. With
