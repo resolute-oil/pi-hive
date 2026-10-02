@@ -3,6 +3,7 @@ title: F13 — Dashboard intervention UI (REQUIRED per C2 walkthrough)
 type: refactor
 wave: f13
 date: 2026-09-29
+last_updated: 2026-10-02 (T13.0 added; T13.2 engine edit clarified per F13 spec audit)
 status: ready-for-implementation
 ---
 
@@ -30,8 +31,9 @@ The dashboard exposes 11 buttons for EOL commands (now including `forceEndWorker
 
 **In scope:**
 
+- **T13.0 — Sunset the legacy `fresh` parameter from `delegate_agent` and `dispatchAgent`.** The `fresh=true` flag promised a clean session but only reset `runtime.*` token counters; it never reset the agent's context window (SDK `AgentSession` conversation history, mental model distiller output, `BudgetLedger` state). The F13 operator commands (`respawnWorkerSession` in particular) are the proper replacement. This is **LLM-tool cleanup, not dashboard work**, but is required for F13 to ship a coherent operator surface — `delegate_agent` currently has a misleading parameter that the F13 commands supersede. Files: `src/agents/tools.ts` (drop parameter schema + execute body handling + renderCall flag), `src/engine/dispatch.ts` (drop `fresh` from `dispatchAgent` signature, drop the `if (fresh) { reloadAgentConfig(...) }` block at lines 305-339, drop the `if (fresh && existsSync(runtime.sessionFile))` archive + counter-reset block at lines 388-413, drop `fresh` from the options object at line 477), plus any test files asserting on `fresh`. **The "config reload on `fresh`" behavior must move to an explicit operator command (e.g. `hive_reload_agent_config`) added in T13.0 — otherwise the "edit `.md` and re-delegate" workflow silently breaks.** Commit prefix: `chore(refactor): sunset legacy fresh parameter from delegate_agent (T13.0)`.
 - T13.1 — Add TUI/RPC buttons for the **11** EOL commands (end / compact / respawn / pause / snapshot / restore / **resume / abort-compaction / force-kill / force-end / tear-down-all**). The 11 = 6 base commands (end / compact / respawn / pause / snapshot / restore) + 2 resume/shape variants (resume, abort-compaction) + 3 escape-hatch variants (force-kill, force-end, tear-down-all). Per C2 review 2026-09-29, F13 is in-scope for this refactor (no longer "separate PR"). Files: `ui/web/src/**`
-- T13.2 — Surface the `interventionAvailable` flag on `budget_warning` events so the dashboard can decide which operator commands to expose. Files: same. **STATUS: T13.2 is not yet implemented in production at the time of this brief refresh (2026-09-30) — the production engine emits `budget_warning` events without the flag. Flagged here so F13 dispatch picks it up as T13.2 work, not as a hidden blocker.**
+- T13.2 — Surface the `interventionAvailable` flag on `budget_warning` events so the dashboard can decide which operator commands to expose. Files: **`src/engine/budget/events.ts:200-208` (engine: add `interventionAvailable: boolean` to the emit payload, computed from `resolveStrategies(policy).warningStrategy === "default"`) + `ui/web/src/**` (dashboard: read the flag, conditionally render intervention buttons).** Brief previously said "Files: same" — that was wrong; the change is half engine + half dashboard. **STATUS: T13.2 is not yet implemented in production at the time of this brief refresh (2026-10-02) — the production engine emits `budget_warning` events without the flag. Both halves of T13.2 are required.**
 - T13.3 — Verify mode-independence — the dashboard works in TUI, RPC, print, JSON modes. Files: same
 
 **Out of scope:**
@@ -43,19 +45,31 @@ The dashboard exposes 11 buttons for EOL commands (now including `forceEndWorker
 
 ## Tasks
 
-Single sub-agent (or, optionally, parallel with Wave 3 if the engine contract is stable enough; recommended after Wave 3 ships so the engine can serve real responses). Tasks must complete in order (T13.1 → T13.2 → T13.3).
+Single sub-agent (or, optionally, parallel with Wave 3 if the engine contract is stable enough; recommended after Wave 3 ships so the engine can serve real responses). Tasks must complete in order (**T13.0 → T13.1 → T13.2 → T13.3**). T13.0 lands first to give F13 a clean operator-tool surface; the `delegate_agent` tool should not carry a misleading `fresh` parameter into the wave that introduces its proper replacements.
 
 | Task | Description |
 |---|---|
+| [ ] T13.0 | Sunset `fresh` parameter from `delegate_agent` + `dispatchAgent`. Add explicit `hive_reload_agent_config` operator command to preserve config-reload-on-edit workflow. Update tests that asserted on `fresh`. Gate: `just typecheck && just test` clean; `grep -rn "fresh" src/agents/tools.ts src/engine/dispatch.ts` returns 0 hits in production code (test fixture comments may remain); TUI rendering of `delegate_agent` calls no longer shows the `[fresh=...]` suffix |
 | [ ] T13.1 | Add TUI/RPC buttons for the 11 EOL commands. Gate: `just dashboard-build` clean; visual review |
-| [ ] T13.2 | Surface `interventionAvailable` flag on `budget_warning` events. **Production wiring pending — see In-scope note.** Gate: visible in dashboard |
+| [ ] T13.2 | Surface `interventionAvailable` flag on `budget_warning` events (engine + dashboard halves). Gate: visible in dashboard; engine test asserts the flag is present on `default` strategy and absent on `compact` strategy |
 | [ ] T13.3 | Verify mode-independence — TUI, RPC, print, JSON modes all work. Gate: smoke test in all 4 modes |
 
 For full task prose and gates, the implementing agent reads `04-refactor-plan.md` §5 F13 directly.
 
 ## Files touched
 
-**Modified (in `ui/web/src/**`):**
+**Modified (in `src/agents/tools.ts` and `src/engine/dispatch.ts`) — T13.0:**
+
+- Drop `fresh` parameter from `delegate_agent` tool schema (`src/agents/tools.ts:185-201`)
+- Drop `fresh` handling in execute body, onUpdate, and renderCall (`src/agents/tools.ts:209-247`)
+- Drop `fresh` from `dispatchAgent` signature (`src/engine/dispatch.ts:292-294`)
+- Drop the `if (fresh) { reloadAgentConfig(...) }` block (`src/engine/dispatch.ts:305-339`)
+- Drop the `if (fresh && existsSync(runtime.sessionFile))` archive + counter-reset block (`src/engine/dispatch.ts:388-413`)
+- Drop `fresh` from the options object at line 477, 665, 718
+- Add explicit `hive_reload_agent_config` operator command (or equivalent mechanism) to preserve the "edit `.md` and re-delegate" workflow
+- Update `tests/*.test.ts` files that asserted on `fresh: true` — the brief's prior handler may have used `fresh` to test session isolation; the equivalent guarantee in T13.0+ comes from `respawnWorkerSession` + a real `BudgetLedger` reset, so tests may need to migrate
+
+**Modified (in `ui/web/src/**`) — T13.1, T13.2, T13.3:**
 
 - TUI button components (per active worker)
 - RPC command handlers (one per EOL command)
@@ -63,6 +77,12 @@ For full task prose and gates, the implementing agent reads `04-refactor-plan.md
 - Dashboard store / state management
 - Component tests (`ui/web/src/**/*.test.ts`)
 - Any other dashboard source files needed to wire the buttons end-to-end
+
+**Modified (in `src/engine/budget/events.ts`) — T13.2 engine half:**
+
+- Add `interventionAvailable: boolean` to the `budget_warning` emit payload at `src/engine/budget/events.ts:200-208`
+- Compute from `resolveStrategies(policy).warningStrategy` (or equivalent strategy predicate — verify with implementing agent against `src/engine/budget/strategy.ts:193`)
+- Engine test asserting presence on `default` strategy and absence on `compact` strategy
 
 **Per AGENTS.md §Pi package rules:**
 
@@ -104,12 +124,19 @@ Per `04-refactor-plan.md` §5 F13 guard:
 - **Mode-independence smoke test (T13.3).** Per AGENTS.md: extensions must be mode-independent. Verify each of the 11 EOL commands works in TUI, RPC, print, and JSON modes. Per `04-refactor-plan.md` §5 F13 gate: "smoke test in all 4 modes."
 - **Component test coverage.** Dashboard components typically have their own test suite (49+ tests per the plan). New buttons may need new component tests; coordinate with the existing test infrastructure.
 - **Bundle size.** Adding 11 buttons may increase the dashboard bundle size. Verify `just dashboard-build` output stays within budget.
-- **Stale-process trap.** Wave F13 touches `ui/web/src/**` only — no server restart needed (dashboard is its own process).
+- **Stale-process trap.** Wave F13 touches `ui/web/src/**` only — no server restart needed (dashboard is its own process). T13.0 touches `src/engine/dispatch.ts` and `src/agents/tools.ts` — server restart required per AGENTS.md (`PID=$(lsof -nP -iTCP:43191 -sTCP:LISTEN -t) && kill "$PID"; just pi-dev`).
 - **Worktree SDK mismatch.** Per `tmp/HANDOFF-pickup.md` §2: APP_ROOT pins SDK 0.80.7 vs worktree's 0.99.1. The dashboard worktree may need its own `just install` for both `ui/web` deps AND the SDK.
+- **T13.0 config-reload path.** The current `if (fresh) { reloadAgentConfig(...) }` block at `src/engine/dispatch.ts:305-339` is the only place in the codebase that reloads a worker's config from YAML on demand. After T13.0 removes it, no path will reload config — meaning the "edit the agent's `.md` and re-delegate" workflow silently breaks unless T13.0 adds an explicit `hive_reload_agent_config` (or equivalent) operator command. This is required, not optional.
+- **T13.0 test migration.** Tests that asserted on `fresh: true` to verify session isolation need to migrate to asserting on `respawnWorkerSession` or `restoreWorkerSession` semantics, since `fresh` is no longer the way to express "give this worker a clean slate."
 
 ## Test delta
 
-+? tests (depends on component test coverage for the 11 buttons). The plan's overall completion guard says "49+ dashboard tests passing (no change expected unless F13 is in scope)" — but F13 IS in scope, so net dashboard test count likely increases.
+- T13.0: net test count change depends on how many tests asserted on `fresh`. Estimate -2 to -6 tests; new total ~666 (down from 670). Plus +1 to +3 tests for the new `hive_reload_agent_config` command. Net target: ~665-668.
+- T13.1: +? tests (component coverage for the 11 buttons)
+- T13.2: +1 to +2 engine tests (assert flag present on `default` strategy, absent on `compact` strategy) + dashboard tests
+- T13.3: 0 (smoke test only)
+
+The plan's overall completion guard says "49+ dashboard tests passing (no change expected unless F13 is in scope)" — but F13 IS in scope, so net dashboard test count likely increases.
 
 ## Notes
 
@@ -118,8 +145,9 @@ Per `04-refactor-plan.md` §5 F13 guard:
 - **Force-kill and tear-down-all are operator-only** (per `04-refactor-plan.md` §2.2 note). They appear in the dashboard but are NOT exposed as agent-callable tools. The dashboard is the operator surface; cooperative tools are the agent surface.
 - **Intervention-available flag** (per G-30 / `04-refactor-plan.md` §6.2 `interventionAvailable` decision). The dashboard reads the flag to decide which commands to expose per active worker. Implementation is in T13.2. The flag is a single boolean per warning; per-command exposure is computed client-side from the flag + the worker's runtime state.
 - **Per-agent commit prefix** (per `04-refactor-plan.md` §11.12):
+  - T13.0: `chore(refactor): sunset legacy fresh parameter from delegate_agent (T13.0)`
   - T13.1: `feat(dashboard): add 11-button intervention UI (F13, now required)`
-  - T13.2: `feat(dashboard): surface interventionAvailable flag on budget_warning`
+  - T13.2: `feat(engine): add interventionAvailable flag to budget_warning emit (F13 engine half)` + `feat(dashboard): read interventionAvailable flag and conditionally render buttons (F13 dashboard half)`
   - T13.3: `test(dashboard): verify mode-independence for 11-button UI`
 - **LOCAL-ONLY.** Per-phase branch stays local; no `git push`, no PR. The dashboard is local-only until the future session performs repo cleanup on `origin`.
 
