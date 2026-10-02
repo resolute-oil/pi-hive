@@ -286,6 +286,85 @@ test("message_end emits budget_warning when remaining ≤ 20% (default threshold
   assert.equal(details.remaining, 200 - 160, "remaining is the gap between cap and cumulative, not the cumulative itself");
 });
 
+// ── Test 4b: interventionAvailable is present on default strategy (T13.2) ─
+
+test("budget_warning carries interventionAvailable=true on the default strategy (T13.2)", () => {
+  const { ledger: localLedger } = makeLedger();
+  let captured: Listener | undefined;
+  const directSession = {
+    subscribe(listener: Listener) {
+      captured = listener;
+      return () => { captured = undefined; };
+    },
+    getSessionStats: () => ({ sessionFile: undefined, sessionId: "x", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2, tokens: { input: 160, output: 0, cacheRead: 0, cacheWrite: 0, total: 160 }, cost: 0.01 }),
+    sessionManager: {
+      appendCustomMessageEntry: () => "",
+      appendCustomEntry: () => "",
+    },
+  } as unknown as AgentSession;
+  const msgs: Array<{ details?: unknown }> = [];
+  directSession.sessionManager.appendCustomMessageEntry = ((_ct: string, _c: string, _d: boolean, details?: unknown) => {
+    msgs.push({ details });
+    return "msg-id";
+  }) as never;
+
+  // Default strategy: no strategies block → onExhaustionAction defaults to
+  // "abort" → interventionAvailable must be true.
+  installBudgetEventHooks(
+    directSession,
+    localLedger,
+    { worker: { tokens: { cap: 200 } }, team: {} },
+    new AbortController(),
+  );
+  captured!({ type: "message_end", message: { usage: {} as any, role: "assistant" } } as any);
+
+  assert.equal(msgs.length, 1);
+  const details = msgs[0].details as { interventionAvailable?: boolean };
+  assert.equal(details.interventionAvailable, true, "interventionAvailable=true under the default (abort) strategy");
+});
+
+// ── Test 4c: interventionAvailable is absent on the compact strategy (T13.2) ─
+
+test("budget_warning carries interventionAvailable=false on the compact strategy (T13.2)", () => {
+  const { ledger: localLedger } = makeLedger();
+  let captured: Listener | undefined;
+  const directSession = {
+    subscribe(listener: Listener) {
+      captured = listener;
+      return () => { captured = undefined; };
+    },
+    getSessionStats: () => ({ sessionFile: undefined, sessionId: "x", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2, tokens: { input: 160, output: 0, cacheRead: 0, cacheWrite: 0, total: 160 }, cost: 0.01 }),
+    sessionManager: {
+      appendCustomMessageEntry: () => "",
+      appendCustomEntry: () => "",
+    },
+  } as unknown as AgentSession;
+  const msgs: Array<{ details?: unknown }> = [];
+  directSession.sessionManager.appendCustomMessageEntry = ((_ct: string, _c: string, _d: boolean, details?: unknown) => {
+    msgs.push({ details });
+    return "msg-id";
+  }) as never;
+
+  // Compact strategy: onExhaustion.action === "compact" → interventionAvailable=false.
+  // The system will auto-compact on exhaustion, so the F13 dashboard should NOT
+  // surface operator intervention buttons (they would conflict with the auto-recovery).
+  installBudgetEventHooks(
+    directSession,
+    localLedger,
+    {
+      worker: { tokens: { cap: 200 } },
+      team: {},
+      strategies: { onApproachingLimit: { action: "wrap-up", threshold: 0.2, hint: "" }, onExhaustion: { action: "compact" }, summary: { maxTokens: 200 } },
+    },
+    new AbortController(),
+  );
+  captured!({ type: "message_end", message: { usage: {} as any, role: "assistant" } } as any);
+
+  assert.equal(msgs.length, 1);
+  const details = msgs[0].details as { interventionAvailable?: boolean };
+  assert.equal(details.interventionAvailable, false, "interventionAvailable=false under the compact strategy (system auto-compacts)");
+});
+
 // ── Test 5: warning is idempotent (no second emit) ────────────────────────
 
 test("message_end does NOT emit a second budget_warning when already warned (idempotent)", () => {
