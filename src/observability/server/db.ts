@@ -1744,3 +1744,55 @@ export function setProjectOverride(projectId: string, canonicalRoot: string | un
 export function clearProjectOverride(projectId: string) {
   deleteProjectOverrideStmt.run({ $project_id: projectId });
 }
+
+// ── F13 operator-command pickup queue (T13.1) ───────────────────────────────
+// The dashboard server and the parent pi are different processes; the
+// dashboard's 11-button UI needs a way to ask the parent pi to run one
+// of the operator commands (`endWorkerSession`, `forceKillWorkerSession`,
+// etc. — see `src/engine/budget/worker-tools.ts`). The parent pi polls a
+// sidecar JSONL file at the project's sessions dir; each row is a
+// { agent, command, requestedAt, id } tuple the consumer drains.
+//
+// The file is append-only and lives next to the session log so a
+// `pruneTelemetry` (B6) can clear stale rows by age if needed. The
+// `operator-command-pickup.jsonl` name is reserved for the parent-pi
+// pickup loop (T13.3 follow-up).
+const OPERATOR_COMMAND_QUEUE: string = (() => {
+  // Place the file in the same dir as the session log so the parent pi can
+  // resolve it from the project cwd at startup.
+  return path.join(path.dirname(DB_PATH), "operator-command-pickup.jsonl");
+})();
+export interface OperatorCommandRequest {
+  id: string;
+  agent: string;
+  command: string;
+  requestedAt: string;
+}
+export function writeOperatorCommandRequest(input: { agent: string; command: string; requestedAt: string }): { ok: boolean; error?: string; requestedAt: string } {
+  try {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const row: OperatorCommandRequest = { id, ...input };
+    fs.mkdirSync(path.dirname(OPERATOR_COMMAND_QUEUE), { recursive: true, mode: 0o700 });
+    fs.appendFileSync(OPERATOR_COMMAND_QUEUE, JSON.stringify(row) + "\n", { mode: 0o600 });
+    return { ok: true, requestedAt: input.requestedAt };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "operator-command queue write failed", requestedAt: input.requestedAt };
+  }
+}
+export function readOperatorCommandRequests(): OperatorCommandRequest[] {
+  try {
+    if (!fs.existsSync(OPERATOR_COMMAND_QUEUE)) return [];
+    const text = fs.readFileSync(OPERATOR_COMMAND_QUEUE, "utf8");
+    const out: OperatorCommandRequest[] = [];
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      try { out.push(JSON.parse(line) as OperatorCommandRequest); } catch { /* skip malformed */ }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+export function clearOperatorCommandRequests(): void {
+  try { fs.unlinkSync(OPERATOR_COMMAND_QUEUE); } catch { /* best-effort */ }
+}

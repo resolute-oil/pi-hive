@@ -32,7 +32,7 @@ import {
 import { listPlans, planDetail, planFile } from "./plan-routes";
 import { resolveProjectCwd } from "./plan-bridge";
 import { handlePlanReview, isAuthorizedPlanReviewMutation } from "./review-wiring";
-import { clearProjectOverride, listProjectOverrides, setProjectOverride } from "./db";
+import { clearProjectOverride, listProjectOverrides, setProjectOverride, writeOperatorCommandRequest } from "./db";
 import { OpenSpecCommandError } from "../../engine/openspec";
 import type {
   DashboardBootstrap,
@@ -141,6 +141,35 @@ export function createDashboardHttpHandler(options: DashboardHttpHandlerOptions 
         const savedLabel = label.slice(0, 120);
         setProjectOverride(projectId, project.project_root, savedLabel, new Date().toISOString());
         return json({ ok: true, projectId, label: savedLabel });
+      }
+      // POST /operator-command { agent, command } — F13 (T13.1). Queues an
+      // operator-command request for the parent pi to pick up. The dashboard
+      // server is a process boundary away from the parent pi (the extension
+      // runs in the user's pi session, the dashboard server is a separate
+      // Bun process), so the request is recorded in a sidecar JSONL file the
+      // parent pi watches via `pickupOperatorCommandRequests()` (added in
+      // T13.3). The endpoint validates the command against the 11-command
+      // allow-list; out-of-set commands are rejected before they reach disk.
+      if (url.pathname === "/operator-command") {
+        let body: any = {};
+        try { body = await req.json(); } catch { return json({ error: "invalid json body" }, 400); }
+        const agent = String(body.agent || "").trim();
+        const command = String(body.command || "").trim();
+        if (!agent) return json({ error: "agent required" }, 400);
+        // 11-command allow-list, per F13 brief. force-kill / force-end /
+        // tear-down-all are operator-only (not in the cooperative tool
+        // registry); all 11 surface on the dashboard.
+        const ALLOWED = new Set(["end", "compact", "respawn", "pause", "snapshot", "restore", "resume", "abort-compaction", "force-kill", "force-end", "tear-down-all"]);
+        if (!ALLOWED.has(command)) return json({ error: `unknown command "${command}"` }, 400);
+        // 0..120 chars for the agent name; matches the existing identifier
+        // hygiene (e.g. project-overrides uses the same cap on its label).
+        if (agent.length > 120) return json({ error: "agent name too long" }, 400);
+        // Record the request on disk. The parent pi polls this file (or the
+        // dashboard's SSE broadcast can also fire-and-forward it once the
+        // command_pickup wiring lands in T13.3 follow-up).
+        const pickup = writeOperatorCommandRequest({ agent, command, requestedAt: new Date().toISOString() });
+        if (!pickup.ok) return json({ error: pickup.error || "failed to queue request" }, 500);
+        return json({ ok: true, agent, command, requestedAt: pickup.requestedAt });
       }
       return json({ error: "not found" }, 404);
     }

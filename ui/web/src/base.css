@@ -711,3 +711,13 @@
 }
 @media (max-width: 1000px) { .plans-layout { grid-template-columns: 1fr !important; } }
 @media (max-width: 900px) { .review-box { grid-template-columns: 1fr !important; } .review-actions { justify-content: flex-end !important; } }
+
+/* F13 (T13.1) operator-command button strip. Renders the 11 EOL commands
+   as a compact row of small inline buttons; escape hatches carry a
+   .oc-btn-danger modifier so the --crit color is visually distinct. */
+.oc-btn { @apply inline-flex items-center justify-center px-1.5 py-[1px] text-[10.5px] rounded-[5px] border border-line bg-surface text-ink cursor-pointer leading-tight font-mono; }
+.oc-btn:hover { @apply bg-well; }
+.oc-btn:disabled { @apply opacity-50 cursor-not-allowed; }
+.oc-btn-danger { @apply border-crit text-crit; }
+.oc-btn-danger:hover { @apply bg-crit text-surface; }
+.op-cell { @apply py-1 align-top min-w-[260px]; }

@@ -4,6 +4,7 @@ import type { ScopeAgent } from "../store";
 import type { ModelInfo } from "../api";
 import { viewAgent } from "../store/raw";
 import { fmtCost, fmtNum, shortModel } from "../lib/format";
+import OperatorCommands from "../components/OperatorCommands";
 
 // Phase 6.5: model-capability tooltip — context window + cost per Mtok, from the
 // /models capability record. costRates are USD/token; ×1e6 gives USD per Mtok.
@@ -197,6 +198,7 @@ export default function Agents(props: { search: string }) {
             <th className="num">Tokens</th><th className="num">Cost</th><th className="num">Runs</th><th className="num">Tools</th><th>Remaining</th>
             <th className="num" title="Average per-turn latency of the main session, over turn events in the loaded window. In multi-session scopes each turn is attributed to every session's main row (turn events carry no session key), so the average is an approximation across sessions.">Turn</th>
             {!collapsed && <th className="num">Context</th>}
+            <th title="F13 (T13.1) operator intervention buttons: end / compact / respawn / pause / snapshot / restore / resume / abort-compaction / force-kill / force-end / tear-down-all">Operator</th>
           </tr>
         </thead>
         <tbody>
@@ -218,6 +220,7 @@ export default function Agents(props: { search: string }) {
               <td className="muted-cell mono">{remainingBudget(r)}</td>
               <td className="num">{turnLatency.has(r.name) ? fmtMs(turnLatency.get(r.name)!) : "—"}</td>
               {!collapsed && <td className="num" title={contextTitle(r)}>{r.contextPct != null ? `${Math.round(r.contextPct)}%` : "—"}</td>}
+              <td className="op-cell"><OperatorCommands agent={r} /></td>
             </tr>
           ))}
         </tbody>
