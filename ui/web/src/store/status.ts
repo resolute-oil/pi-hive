@@ -16,6 +16,17 @@ export type AgentStatusBySession = Map<string, Map<string, string>>;
 // `src/engine/budget/events.ts:221`), and one SDK AgentSession corresponds to
 // exactly one worker — so per-session = per-worker for this surface.
 //
+// Wave 7 F13 production-wiring fix: the F1-F13 design wrote the
+// per-worker `appendCustomMessageEntry` to the worker's session.jsonl
+// but the dashboard server only ingests the parent's telemetry log
+// (via `addSource(telemetry_log)` at runtime.ts:114). The Wave 7 fix
+// also emits a `HiveTelemetryEvent` of type `budget_warning` to the
+// parent's observability log, carrying the worker's session id in
+// `payload.session_id` so the reducer can key per-worker (each
+// worker has its own AgentSession). The reducer prefers
+// `payload.session_id` (the worker) and falls back to `e.session_id`
+// (the parent) so legacy / synthetic events still key correctly.
+//
 // Sessions whose workers have not yet emitted a `budget_warning` are absent
 // from this map (the dashboard falls back to "intervention available" —
 // all buttons enabled — which matches the brief's gate).
@@ -26,11 +37,19 @@ export function buildInterventionBySession(events: HiveEvent[]): InterventionByS
     if (e.type !== "budget_warning") continue;
     const flag = e.payload?.interventionAvailable;
     if (typeof flag !== "boolean") continue;
+    // Wave 7 F13 fix: prefer the worker's session id (payload.session_id)
+    // over the parent's (e.session_id). The parent's session id is
+    // stamped onto every event by `emitHiveEvent`, but multiple workers
+    // can share a parent — they each need their own map entry so the
+    // per-worker row in the UI can read its own flag.
+    const workerSessionId = typeof e.payload?.session_id === "string" && e.payload.session_id
+      ? e.payload.session_id
+      : e.session_id;
     // Latest event wins — strategies are static for the lifetime of the worker
     // policy, so the first and last warning carry the same value, but using
     // "latest" keeps the reducer monotonic in the face of any future
     // mid-session policy swap (e.g. a tool re-arming the strategy).
-    out.set(e.session_id, flag);
+    out.set(workerSessionId, flag);
   }
   return out;
 }

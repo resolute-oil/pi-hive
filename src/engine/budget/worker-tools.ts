@@ -114,7 +114,7 @@ export interface DelegateAgentInternals {
   resolveWorkerBudgetPolicy: typeof resolveWorkerBudgetPolicyFn;
   restoreLedger: typeof BudgetLedgerClass.restore;
   checkBudgetPolicy: typeof checkBudgetPolicyFn;
-  installBudgetEventHooks: typeof installBudgetEventHooksFn;
+  installBudgetEventHooks: (session: AgentSession, ledger: BudgetLedger, policy: WorkerBudgetPolicy, controller: AbortController, state?: HiveState, actor?: string) => () => void;
   sessionManagerCreate: (cwd: string) => SessionManager;
   sessionManagerContinueRecent: (cwd: string) => SessionManager;
   // Production-side seam: when supplied, delegateAgent uses it to create the
@@ -313,7 +313,17 @@ export async function delegateAgentWithInternals(
   // as the worker's errorMessage — preserving the original behavior while
   // removing the Error-property side-channel that TS I16 flagged.
   try {
-    effectiveInternals.installBudgetEventHooks(session, ledger, policy, controller);
+    // F13 production wiring (Wave 7 fixup): thread the parent state
+    // and the worker's display name through to installBudgetEventHooks
+    // so it can emit `budget_warning` / `budget_exhausted` to the
+    // parent's observability log. Without this, the dashboard never
+    // sees the interventionAvailable flag and all rescue buttons stay
+    // enabled (the F1-F13 audit caught this). The worker's sessionId
+    // is read inside the handler off `session.sessionId` so the
+    // reducer's `session_id` key matches the worker's session (not
+    // the parent's, which is what `emitHiveEvent` would otherwise
+    // stamp onto the event).
+    effectiveInternals.installBudgetEventHooks(session, ledger, policy, controller, state, agentName);
   } catch (setupError) {
     return {
       kind: "partial",
@@ -410,7 +420,16 @@ export async function pauseWorkerSession(agent: string, _reason: string, signal:
 // T5.8 resumeWorkerSession — re-attach hooks on existing session + ledger kind:"resume" (G-04). The SDK has no resume primitive; pause does not tear down listeners, so resume just re-installs and writes the snapshot.
 export async function resumeWorkerSession(agent: string, signal: AbortSignal): Promise<{ sessionId: string; ledgerSnapshot: BudgetLedgerEntry }> {
   const h = lookupWorkerHandle(agent); if (!h) throw notImpl(agent);
-  installBudgetEventHooksFn(h.session, h.ledger, h.policy, h.controller);
+  // Wave 7 F13 production wiring: resume re-attaches the budget event
+  // hooks so the handler is live for the next message_end. The
+  // `__reloadAgentConfigState` / `__reloadAgentConfigCtx` bindings
+  // carry the parent state + ctx; when present, the budget warning /
+  // exhausted emits will reach the parent's observability log. When
+  // the binding is absent (legacy code paths / direct SDK use), the
+  // emit is skipped (matches `installBudgetEventHooks`'s undefined-
+  // state contract).
+  const resumeState = __reloadAgentConfigState;
+  installBudgetEventHooksFn(h.session, h.ledger, h.policy, h.controller, resumeState, h.agent);
   const s = h.ledger.snapshot(h.session.getSessionStats(), h.policy, "checkpoint", signal, "resume");
   return { sessionId: h.session.sessionId, ledgerSnapshot: s };
 }
@@ -545,7 +564,16 @@ export async function restoreWorkerSession(agent: string | WorkerContext, snapsh
   const createAgentSessionFn = ctx.internals?.createAgentSessionFn ?? createAgentSession;
   const { session: newSession } = await createAgentSessionFn({ cwd: ctx.cwd, sessionManager: branchedSM });
   const controller = new AbortController();
-  installBudgetEventHooksFn(newSession, restoredLedger, ctx.policy, controller);
+  // Wave 7 F13 production wiring: thread the parent state through
+  // restore so the new session's budget handler can emit
+  // `budget_warning` / `budget_exhausted` to the parent's
+  // observability log. `ctx.cwd` is the worker's cwd; the parent
+  // state is sourced from the __reloadAgentConfigState binding (the
+  // F13 dashboard command path uses the same binding to resolve
+  // state). When the binding is absent, the emit is skipped (matches
+  // `installBudgetEventHooks`'s undefined-state contract).
+  const restoreState = __reloadAgentConfigState;
+  installBudgetEventHooksFn(newSession, restoredLedger, ctx.policy, controller, restoreState, ctx.agent);
   return { sessionId: newSession.sessionId, session: newSession, sessionManager: branchedSM, controller, ledgerSnapshot: writeKindLedgerEntry(branchedSM, ctx.agent, ctx.policy, newSession.getSessionStats(), restoredLedger.cumulative.runs, "restore") };
 }
 // <<< region: agent-3C

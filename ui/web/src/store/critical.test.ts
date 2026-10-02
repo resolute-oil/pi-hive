@@ -154,4 +154,30 @@ describe("topology and identity state", () => {
     expect(out.get("s3")).toBe(true);
     expect(out.size).toBe(1);
   });
+
+  // Wave 7 F13 production wiring: the engine emits a HiveTelemetryEvent
+  // of type "budget_warning" to the PARENT's observability log (so the
+  // dashboard can see it), but the worker's session id is threaded
+  // through the payload (multiple workers can share a parent session
+  // and they need distinct map entries). The reducer must prefer
+  // payload.session_id (the worker) over e.session_id (the parent).
+  test("buildInterventionBySession prefers payload.session_id (worker) over e.session_id (parent) for the F13 production emit", () => {
+    // Two distinct workers running in the same parent session (parent_sess).
+    // Each worker has its own SDK AgentSession (worker_a, worker_b). The
+    // engine emits a budget_warning with session_id=parent_sess and
+    // payload.session_id=worker_a / worker_b respectively.
+    const events: HiveEvent[] = [
+      event("a1", 1, "parent_sess", "budget_warning", { scope: "worker", resource: "tokens", remaining: 200, cap: 1000, interventionAvailable: true, session_id: "worker_a" }),
+      event("a2", 2, "parent_sess", "budget_warning", { scope: "worker", resource: "tokens", remaining: 200, cap: 1000, interventionAvailable: false, session_id: "worker_b" }),
+    ];
+    const out = buildInterventionBySession(events);
+    // Without the Wave 7 fix, both events would collide on key=parent_sess
+    // and only the last value (false) would be visible — worker_a's
+    // rescue buttons would be wrongly disabled. With the fix, each
+    // worker gets its own map entry.
+    expect(out.get("worker_a")).toBe(true);
+    expect(out.get("worker_b")).toBe(false);
+    expect(out.has("parent_sess"), "parent session_id is NOT used as the key when payload.session_id is present").toBe(false);
+    expect(out.size).toBe(2);
+  });
 });
