@@ -98,7 +98,7 @@ For full task prose, the implementing agent reads `04-refactor-plan.md` §5 F7 a
 
 **Wave 4 gate (per `04-refactor-plan.md` §11.10):**
 
-- All race tests pass 100 consecutive runs (verified by `for i in {1..100}; do just test -- tests/budget-races.test.ts || exit 1; done`)
+- All race tests pass 100 consecutive runs (verified by `./scripts/race-stability-check.sh`, or `just race-stability`; runs `tests/budget-races.test.ts` 100× and fails on any non-zero exit)
 - All reload tests pass in isolation
 - **T7.8 real-SDK integration tests** pass within bounded timing windows (NOT 100-consecutive-run; document the timing window)
 - Each race test exercises a SPECIFIC bug class the prior review identified (cross-reference to `01-current-state-analysis.md` Issues 1-9 documented inline as test comments)
