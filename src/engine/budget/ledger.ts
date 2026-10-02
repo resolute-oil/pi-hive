@@ -46,7 +46,11 @@ export interface RecordEventOptions {
   forceWrite?: boolean;
 }
 
-function isLedgerEntry(entry: SessionEntry): entry is SessionEntry & { data: BudgetLedgerEntry["data"] } {
+// Exported so policy.ts (which only consumes the branch shape) can share
+// the same predicate without re-implementing the customType check. The
+// entry is the SDK's generic SessionEntry; the predicate narrows it to
+// the documented BudgetLedgerEntry shape.
+export function isLedgerEntry(entry: SessionEntry): entry is SessionEntry & { data: BudgetLedgerEntry["data"] } {
   return entry.type === "custom" && (entry as unknown as { customType?: string }).customType === LEDGER_CUSTOM_TYPE;
 }
 
@@ -222,33 +226,13 @@ export class BudgetLedger {
   // pre-Wave-3 contract that the F5 layer is the only producer of the typed
   // kind values. Returns the persisted BudgetLedgerEntry so callers
   // (operator commands) can hand the snapshot back to the operator surface.
-  // S1: options-object overload. The `(stats, policy, marker, signal, kind?)`
-  // positional signature is kept (callers migrate at their pace); the new
-  // `(stats, policy, opts: { marker, signal, kind? })` overload reads more
-  // clearly at the operator-command call sites and is preferred for new
-  // code. Both overloads share a single internal helper to avoid drift.
   snapshot(
     stats: SessionStats,
     _policy: WorkerBudgetPolicy,
     marker: "warning" | "exhausted" | "checkpoint",
     signal: AbortSignal,
-    kind?: BudgetLedgerKind,
-  ): BudgetLedgerEntry;
-  snapshot(
-    stats: SessionStats,
-    _policy: WorkerBudgetPolicy,
-    opts: { marker: "warning" | "exhausted" | "checkpoint"; signal: AbortSignal; kind?: BudgetLedgerKind },
-  ): BudgetLedgerEntry;
-  snapshot(
-    stats: SessionStats,
-    _policy: WorkerBudgetPolicy,
-    arg3: "warning" | "exhausted" | "checkpoint" | { marker: "warning" | "exhausted" | "checkpoint"; signal: AbortSignal; kind?: BudgetLedgerKind },
-    arg4?: AbortSignal,
-    arg5: BudgetLedgerKind | undefined = undefined,
+    kind: BudgetLedgerKind | undefined = undefined,
   ): BudgetLedgerEntry {
-    const opts: { marker: "warning" | "exhausted" | "checkpoint"; signal: AbortSignal; kind?: BudgetLedgerKind } = typeof arg3 === "string"
-      ? { marker: arg3, signal: arg4 as AbortSignal, kind: arg5 }
-      : arg3;
     const cumulative = {
       tokens: stats.tokens.total,
       costUsd: stats.cost,
@@ -259,9 +243,9 @@ export class BudgetLedger {
       cumulative,
       writtenAt: Date.now(),
       agentSlug: this.agentName,
-      marker: opts.marker,
+      marker,
     };
-    if (opts.kind !== undefined) data.kind = opts.kind;
+    if (kind !== undefined) data.kind = kind;
     const written = this.appendLedgerEntry(data);
     this.entries.push(written);
     this.lastWrittenTokens = cumulative.tokens;
