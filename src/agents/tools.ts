@@ -20,7 +20,7 @@ import { emitHiveEvent } from "../engine/observability";
 import * as openspec from "../engine/openspec";
 import { agentRef, agentRoster, resolveRuntime } from "../engine/agent-lookup";
 import { agentSlug } from "../core/utils";
-import { budgetRemaining, effectiveWorkerGovernance } from "../engine/budget/remaining";
+import { budgetRemaining, effectiveWorkerGovernance } from "../engine/budget/policy";
 
 type ToolUpdate = AgentToolUpdateCallback<object>;
 // Replaced the local `ToolRenderOptions` shape with the SDK's

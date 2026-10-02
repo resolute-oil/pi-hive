@@ -13,7 +13,7 @@
 import type { AgentSession, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetLedger } from "./ledger";
 import { isLedgerEntry } from "./ledger";
-import type { BudgetBlock, IncludeKeys, WorkerBudgetPolicy } from "../../core/types";
+import type { AgentRuntime, BudgetBlock, HiveState, IncludeKeys, WorkerBudgetPolicy, WorkerGovernance } from "../../core/types";
 
 // Pre-flight gate: returns a BudgetBlock describing the first violated cap
 // (worker or team scope; tokens/costUsd/runs/depth), or undefined when the
@@ -176,4 +176,76 @@ export function ratioRemaining(used: number, cap: number): number {
 // ratio-vs-ratio interpretation (`crossedThreshold(0.10, 0.20)` = true).
 export function crossedThreshold(remaining: number, threshold: number): boolean {
   return remaining <= threshold;
+}
+
+// §1.3/§1.4 replacement: the worker's remaining budget under the legacy
+// WorkerGovernance-shaped caps. The runtime now carries the SDK's
+// session-lifetime aggregates (overwritten from getSessionStats in
+// dispatch-lifecycle.ts), so worker consumed tokens/cost reads from those
+// fields directly — no more `runStart*` baselines (per §1.1, those are gone
+// from AgentRuntime). The team total walks the live state.runtimes Map,
+// matching the legacy `teamUsage` shape so the worker-prompt display and the
+// checkDispatchBudgets surface stay consistent.
+export interface BudgetRemaining {
+  runs?: number;
+  tokens?: number;
+  costUsd?: number;
+  distillerRuns?: number;
+}
+
+// Merge shim: combines the project-wide `workerBudgets` config tier with
+// per-agent `governance` overrides (per-agent wins on conflict). Moved from
+// `budget/remaining.ts` when that legacy module was deleted by Gap 3. The
+// resolver (`resolveWorkerBudgetPolicy`) does NOT model timeoutMs /
+// distillerRuns because those are per-agent concurrency settings, not
+// budget caps — keeping them out of `WorkerBudgetPolicy` is intentional
+// and the seam is documented at the call sites (see dispatch.ts and
+// distiller.ts).
+export function effectiveWorkerGovernance(state: HiveState, runtime: AgentRuntime): WorkerGovernance {
+  return { ...(state.config?.settings.workerBudgets || {}), ...(runtime.config.governance || {}) };
+}
+
+function runtimeTokensForScope(runtime: AgentRuntime, scope: "input_output" | "all"): number {
+  const base = runtime.inputTokens + runtime.outputTokens;
+  return scope === "input_output"
+    ? base
+    : base + runtime.cacheReadTokens + runtime.cacheWriteTokens + runtime.reasoningTokens;
+}
+
+function teamTotals(state: HiveState, scope: "input_output" | "all"): { runs: number; tokens: number; costUsd: number } {
+  let runs = 0;
+  let tokens = 0;
+  let costUsd = 0;
+  for (const runtime of state.runtimes.values()) {
+    if (runtime.config.role === "orchestrator") continue;
+    runs += runtime.runCount;
+    tokens += runtimeTokensForScope(runtime, scope);
+    costUsd += runtime.costUsd;
+  }
+  return { runs, tokens, costUsd };
+}
+
+function remaining(limit: number | undefined, used: number): number | undefined {
+  return limit === undefined ? undefined : Math.max(0, limit - used);
+}
+
+export function budgetRemaining(state: HiveState, runtime: AgentRuntime): { worker: BudgetRemaining; team: BudgetRemaining } {
+  const limits = effectiveWorkerGovernance(state, runtime);
+  const teamLimits = state.config?.settings.teamBudgets || {};
+  const workerScope = limits.tokenBudgetScope ?? "all";
+  const teamScope = teamLimits.tokenBudgetScope ?? "all";
+  const team = teamTotals(state, teamScope);
+  return {
+    worker: {
+      runs: remaining(limits.maxRuns, runtime.runCount),
+      tokens: remaining(limits.tokenBudget, runtimeTokensForScope(runtime, workerScope)),
+      costUsd: remaining(limits.costBudgetUsd, runtime.costUsd),
+      distillerRuns: remaining(limits.distillerRuns, runtime.distillerRunCount || 0),
+    },
+    team: {
+      runs: remaining(teamLimits.maxRuns, team.runs),
+      tokens: remaining(teamLimits.tokenBudget, team.tokens),
+      costUsd: remaining(teamLimits.costBudgetUsd, team.costUsd),
+    },
+  };
 }
