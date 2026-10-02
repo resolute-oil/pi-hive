@@ -417,20 +417,17 @@ test("delegation_end emits per-run deltas against the run-start baseline (Decisi
   assert.equal(ends.length, 2, "expected a delegation_end per run");
   const run1 = ends[0].payload, run2 = ends[1].payload;
   // Both rows are marked as delta-schema so aggregation excludes legacy rows.
-  assert.equal(run1.delegationsSchema, 2);
-  assert.equal(run2.delegationsSchema, 2);
-  // §1.1: payload.delta was removed; the delegation_end payload now carries
-  // the session-cumulative `lifetime` snapshot (overwritten from
-  // getSessionStats at run end). The per-run contribution is the difference
-  // between consecutive lifetime values.
+  assert.equal(run1.delegationsSchema, 1);
+  assert.equal(run2.delegationsSchema, 1);
+  // v1: payload carries the per-run `delta` (current_lifetime - priorLifetime,
+  // computed at emit time in dispatch-end.ts) AND the session-cumulative
+  // `lifetime` snapshot. The dashboard SUM() uses delta; lifetime is for live
+  // display. Per-run growth on a single agent with two non-fresh runs:
+  // run1 delta = full lifetime (prior was 0); run2 delta = (260-100, 95-40, ...).
   assert.deepEqual(run1.lifetime, { inputTokens: 100, outputTokens: 40, cacheReadTokens: 10, cacheWriteTokens: 5, reasoningTokens: 0, costUsd: 0.10 });
   assert.deepEqual(run2.lifetime, { inputTokens: 260, outputTokens: 95, cacheReadTokens: 25, cacheWriteTokens: 10, reasoningTokens: 0, costUsd: 0.25 });
-  // Per-run growth = run2.lifetime - run1.lifetime.
-  assert.equal(run2.lifetime.inputTokens - run1.lifetime.inputTokens, 160);
-  assert.equal(run2.lifetime.outputTokens - run1.lifetime.outputTokens, 55);
-  assert.equal(run2.lifetime.cacheReadTokens - run1.lifetime.cacheReadTokens, 15);
-  assert.equal(run2.lifetime.cacheWriteTokens - run1.lifetime.cacheWriteTokens, 5);
-  assert.ok(Math.abs(run2.lifetime.costUsd - run1.lifetime.costUsd - 0.15) < 1e-9);
+  assert.deepEqual(run1.delta, { inputTokens: 100, outputTokens: 40, cacheReadTokens: 10, cacheWriteTokens: 5, reasoningTokens: 0, costUsd: 0.10 });
+  assert.deepEqual(run2.delta, { inputTokens: 160, outputTokens: 55, cacheReadTokens: 15, cacheWriteTokens: 5, reasoningTokens: 0, costUsd: 0.15 });
   // The lifetime runtime summary still rides along for live display / TOK/S.
   assert.equal(run2.runtime.inputTokens, 260);
 });
@@ -479,13 +476,21 @@ test("fresh re-run resets lifetime counters so the delta is the fresh session's 
   const ends = readEmittedEvents(obsLog).filter((e) => e.type === "delegation_end");
   assert.equal(ends.length, 2, "expected a delegation_end per run");
   const run2 = ends[1].payload;
-  // §1.1: payload.lifetime is the session-cumulative snapshot, so the fresh
-  // run's lifetime is its OWN usage — not clamped to 0 by a stale baseline.
+  // v1: payload.lifetime is the session-cumulative snapshot, AND payload.delta is
+  // the per-run contribution (current_lifetime - priorLifetime). The fresh run's
+  // counters are zeroed at archive time (dispatch.ts:388-396), so priorLifetime
+  // for the fresh run is 0 across the board — delta equals lifetime.
   assert.equal(run2.lifetime.inputTokens, 80);
   assert.equal(run2.lifetime.outputTokens, 30);
   assert.equal(run2.lifetime.cacheReadTokens, 5);
   assert.equal(run2.lifetime.cacheWriteTokens, 2);
   assert.ok(Math.abs(run2.lifetime.costUsd - 0.08) < 1e-9, `run2 cost lifetime ${run2.lifetime.costUsd} ≈ 0.08`);
+  // Fresh run: priorLifetime is 0 (counters reset at archive), so delta == lifetime.
+  assert.equal(run2.delta.inputTokens, 80);
+  assert.equal(run2.delta.outputTokens, 30);
+  assert.equal(run2.delta.cacheReadTokens, 5);
+  assert.equal(run2.delta.cacheWriteTokens, 2);
+  assert.ok(Math.abs(run2.delta.costUsd - 0.08) < 1e-9, `run2 delta cost ${run2.delta.costUsd} ≈ 0.08`);
   // Runtime now holds the fresh session's lifetime totals (overwritten by stats).
   assert.equal(worker.inputTokens, 80);
 });
@@ -544,16 +549,18 @@ test("fresh-delta survives a mode-switch runtime restore — third run's delta i
 
   const ends = readEmittedEvents(obsLog).filter((e) => e.type === "delegation_end");
   assert.equal(ends.length, 3, "expected a delegation_end per run");
-  const run2 = ends[1].payload, run3 = ends[2].payload;
-  // §1.1: payload.lifetime is session-cumulative. Run 3's per-run contribution
-  // = run3.lifetime - run2.lifetime, and must equal the run-3-only growth
-  // (50/25/4/2/0.05) — not clamped to 0 by a resurrected baseline.
+  const run3 = ends[2].payload;
+  // v1: payload.delta is the producer-computed per-run contribution
+  // (current_lifetime - priorLifetime, captured at emit time). For run 3, the
+  // restored baseline is 80 (last-row-wins from the log), so the delta equals
+  // the run-3-only growth (50/25/4/2/0.05) — NOT clamped to 0 by a resurrected
+  // 500 baseline. This is the W1.1 / R3-1.1 fix regression-pinned in v1.
   assert.equal(run3.lifetime.inputTokens, 130);
-  assert.equal(run3.lifetime.inputTokens - run2.lifetime.inputTokens, 50, "run 3 growth is run-3-only, not clamped to 0 by a resurrected baseline");
-  assert.equal(run3.lifetime.outputTokens - run2.lifetime.outputTokens, 25);
-  assert.equal(run3.lifetime.cacheReadTokens - run2.lifetime.cacheReadTokens, 4);
-  assert.equal(run3.lifetime.cacheWriteTokens - run2.lifetime.cacheWriteTokens, 2);
-  assert.ok(Math.abs(run3.lifetime.costUsd - run2.lifetime.costUsd - 0.05) < 1e-9, `run3 cost growth ${run3.lifetime.costUsd - run2.lifetime.costUsd} ≈ 0.05`);
+  assert.equal(run3.delta.inputTokens, 50, "run 3 delta is run-3-only, not clamped to 0 by a resurrected baseline");
+  assert.equal(run3.delta.outputTokens, 25);
+  assert.equal(run3.delta.cacheReadTokens, 4);
+  assert.equal(run3.delta.cacheWriteTokens, 2);
+  assert.ok(Math.abs(run3.delta.costUsd - 0.05) < 1e-9, `run3 delta cost ${run3.delta.costUsd} ≈ 0.05`);
 });
 
 // Phase 4.8: reasoning ("thinking") tokens are extracted from message_end usage,
@@ -589,10 +596,12 @@ test("dispatchAgent carries reasoning tokens through the delta + summary (Phase 
   // Accumulated on the runtime and preserved past the getSessionStats overwrite.
   assert.equal(worker.reasoningTokens, 50);
   const end = readEmittedEvents(obsLog).filter((e) => e.type === "delegation_end")[0].payload;
-  // §1.1: payload.delta was removed; reasoning now lives in payload.lifetime
-  // (session-cumulative). Reasoning is not part of SessionStats so the
-  // accumulated value is preserved through the lifetime overwrite.
+  // v1: reasoning lives in BOTH payload.lifetime (session-cumulative) AND
+  // payload.delta (per-run contribution, current - prior). Reasoning is not
+  // part of SessionStats so the accumulated value is preserved through the
+  // lifetime overwrite; for a first run, prior=0, so delta equals lifetime.
   assert.equal(end.lifetime.reasoningTokens, 50);
+  assert.equal(end.delta.reasoningTokens, 50);
   assert.equal(end.runtime.reasoningTokens, 50);
 });
 
