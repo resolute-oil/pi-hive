@@ -65,13 +65,13 @@ opposite: **it's config-first, and you own the whole tree.** Nothing runs until
 Install from GitHub with `pi install` (recommended):
 
 ```sh
-pi install git:github.com/demetere/pi-hive          # latest main
-pi install git:github.com/demetere/pi-hive@v0.1.0   # pin a tag/commit
+pi install git:github.com/resolute-oil/pi-hive          # latest main
+pi install git:github.com/resolute-oil/pi-hive@v0.1.0   # pin a tag/commit
 ```
 
 `pi install` also accepts the full HTTPS or SSH URL, e.g.
-`pi install https://github.com/demetere/pi-hive` or
-`pi install ssh://git@github.com/demetere/pi-hive`. Pi runs `npm install` for the
+`pi install https://github.com/resolute-oil/pi-hive` or
+`pi install ssh://git@github.com/resolute-oil/pi-hive`. Pi runs `npm install` for the
 package, so the extension's runtime dependency
 ([OpenSpec](https://github.com/Fission-AI/OpenSpec)) is fetched automatically; the
 Pi host packages are declared as peer dependencies and provided by Pi at load time.
@@ -80,7 +80,7 @@ You can also add it declaratively in Pi's `settings.json`:
 
 ```json
 {
-  "packages": ["git:github.com/demetere/pi-hive"]
+  "packages": ["git:github.com/resolute-oil/pi-hive"]
 }
 ```
 
