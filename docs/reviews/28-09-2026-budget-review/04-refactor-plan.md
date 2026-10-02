@@ -913,14 +913,14 @@ Note: `restoreWorkerSession` reuses the original session ID via branching — th
 | Mid-run warning | `emitBudgetWarning` mutates `runtime.systemPrompt` | `appendCustomMessageEntry("budget_warning", ..., display=true)` |
 | Mid-run exhaustion | `runController.abort()` | `runController.abort()` (same; can also use `session.abort()`) |
 | `fresh=true` semantics | 4-operation flag (reload, archive, reset, start), order-sensitive | `SessionManager.create()` (1 operation, structurally safe) |
-| EOL options | 3 commands (end, compact, respawn) | 6 commands (+ pause, snapshot, restore) |
+| EOL options | 3 commands (end, compact, respawn) | 11 commands (+ pause, snapshot, restore, resume, abort-compaction, force-kill, force-end, tear-down-all) |
 | Config schema | Flat (`token-budget`, `cost-budget-usd`, ...) | Nested (`tokens.cap`, `cost-usd.cap`, ...) |
 | Reload survival | Counters die; bug class emerges | `getBranch()` re-derives from `CustomEntry` |
 | Race condition coverage | None for abort-then-stats | New tests in `tests/budget-races.test.ts` |
 | `ctx.signal` propagation | Inconsistent (gap noted in pi-docs audit) | Threaded through every ledger write |
 | Listener cleanup on respawn | MISSING (Issue 9 latent leak) | `session.dispose()` called explicitly |
 | Final-message hook | `agent_end` (may fire mid-recovery) | `agent_settled` (canonical "Pi will not continue automatically") |
-| Line count | `dispatch.ts` ~1100 LOC, `governance.ts` ~175 LOC, `budget-strategy.ts` ~200 LOC | `budget/worker-tools.ts` ~400 LOC, `budget/policy.ts` ~100 LOC, `budget/ledger.ts` ~150 LOC, `budget/events.ts` ~100 LOC, `budget/strategy.ts` ~30 LOC; `dispatch.ts` shrinks to ~600 LOC |
+| Line count | `dispatch.ts` ~1100 LOC, `governance.ts` ~175 LOC, `budget-strategy.ts` ~200 LOC | `budget/worker-tools.ts` ~600 LOC, `budget/policy.ts` ~100 LOC, `budget/ledger.ts` ~150 LOC, `budget/events.ts` ~100 LOC, `budget/strategy.ts` ~30 LOC; `dispatch.ts` shrinks to a routing layer (~750 LOC; no LOC target per user policy) |
 
 ---
 
@@ -1064,7 +1064,7 @@ Ready for F4 when: F3's behavior is visible end-to-end (run a worker, observe le
 
 Ready for F5 when: F4 is the canonical end-of-run path; legacy `agent_end` math is gone.
 
-#### Feature F5 — Six EOL/respawn operator commands
+#### Feature F5 — Eleven EOL/respawn operator commands
 
 > Goal: the user can end, compact, respawn, pause, snapshot, or restore a worker's session from the operator surface. Each command writes a ledger snapshot with a unique marker.
 
@@ -1287,9 +1287,9 @@ Ready for F9 when: F8's reload behavior is verified in a real session.
   - Files: deletions + import updates
   - Gate: `just test` clean
 
-- [ ] **T9.3** Slim `src/engine/dispatch.ts` from ~1100 LOC to ≤600 LOC. Move budget logic to `src/engine/budget/`.
+- [ ] **T9.3** Slim `src/engine/dispatch.ts` from ~1100 LOC to a routing layer. Move budget logic to `src/engine/budget/`. (No artificial LOC target — per user policy: no LOC targets. Current size: 752 LOC, informational only.)
   - Files: `src/engine/dispatch.ts`
-  - Gate: `wc -l src/engine/dispatch.ts` shows ≤600; `just test` clean
+  - Gate: `just test` clean
 
 - [ ] **T9.4** `npx eslint` is clean on all touched files.
   - Files: all
@@ -1299,7 +1299,7 @@ Ready for F9 when: F8's reload behavior is verified in a real session.
 - [ ] All 4 task checkboxes above are marked.
 - [ ] `src/engine/governance.ts` does not exist (`! test -f src/engine/governance.ts`).
 - [ ] `src/engine/budget-strategy.ts` does not exist (`! test -f src/engine/budget-strategy.ts`).
-- [ ] `src/engine/dispatch.ts` LOC ≤ 600 (`wc -l`).
+- [ ] `src/engine/dispatch.ts` is a routing layer (size is informational — per user policy: no LOC targets; current size 752 LOC).
 - [ ] `grep -r "from.*governance" src/` returns no matches.
 - [ ] `grep -r "from.*budget-strategy" src/` returns no matches.
 - [ ] `grep -r "bun:" src/engine/budget/` returns no matches (G-25: Bun-isolation check).
@@ -1405,9 +1405,9 @@ Ready for F13 when: F12 is published and linked from the README.
 
 #### Feature F13 — Dashboard intervention UI
 
-> Goal: the dashboard exposes buttons for the 6 EOL commands. Surfaces the `interventionAvailable` flag on `budget_warning` events.
+> Goal: the dashboard exposes buttons for the 11 EOL commands (6 base + 2 shape variants + 3 escape-hatch variants). Surfaces the `interventionAvailable` flag on `budget_warning` events.
 
-- [ ] **T13.1** Add TUI/RPC buttons for the 6 EOL commands (end / compact / respawn / pause / snapshot / restore).
+- [ ] **T13.1** Add TUI/RPC buttons for the 11 EOL commands (end / compact / respawn / pause / snapshot / restore / resume / abort-compaction / force-kill / force-end / tear-down-all).
   - Files: `ui/web/src/**`
   - Gate: separate PR; `just dashboard-build` clean; visual review
 
@@ -1421,7 +1421,7 @@ Ready for F13 when: F12 is published and linked from the README.
 
 **How do I know F13 is complete?**
 - [ ] All 3 task checkboxes above are marked.
-- [ ] Dashboard shows 6 buttons per active worker.
+- [ ] Dashboard shows 11 buttons per active worker.
 - [ ] Clicking a button invokes the corresponding operator command.
 - [ ] `interventionAvailable` flag is honored — verified by visual inspection.
 - [ ] Mode-independent (works in TUI, RPC, print, JSON modes) — verified by smoke test.
@@ -1440,7 +1440,7 @@ Ready for F13 when: F12 is published and linked from the README.
   - F6: T6.10 (per-day rollover, G-10)
   - F7: T7.7 (Bug 3 regression, G-03)
   - F8: T8.5 (tree coverage, G-11), T8.6 (fork coverage, G-11)
-- [ ] Test count: **575+ server tests passing** (was 510 at start; +65 new budget tests after the gap-decisions walkthrough: 16 worker-tools + 19 events + 24 eol + 7 summarize + 3 cooperative + 5 reload + 1 per-day rollover + 1 Bug 3 = 76 additional tests planned; 65 net new after consolidation).
+- [ ] Test count: **659+ server tests passing** (was 510 at start; +149 new budget tests across Waves 0-3.5: 16 worker-tools + 19 events + 24 eol + 7 summarize + 3 cooperative + 5 reload + 1 per-day rollover + 1 Bug 3 = 76 additional planned; +73 from the Wave 3 fixup continuation + Wave 3.5 wiring regressions to reach 659 baseline).
 - [ ] Test count: 49+ dashboard tests passing (no change expected unless F13 is in scope).
 - [ ] `just typecheck` clean across core/bun/tests/dashboard configs.
 - [ ] `just test` clean.
@@ -1479,7 +1479,7 @@ Ready for F13 when: F12 is published and linked from the README.
 | 5 | PR #54 conflicts with refactor PR | High | Low | Task 3.4 decides disposition BEFORE implementation begins |
 | 6 | `session.dispose()` doesn't release all listener references | Low | Medium | Task 2.3 tests verify old session's `getSessionStats()` returns undefined after dispose |
 | 7 | Dashboard reads obsolete telemetry event shapes | Medium | Medium | Keep emitting legacy events for one release; map old → new in observability layer |
-| 8 | Six EOL commands overwhelm the TUI UI | Low | Low | Dashboard task (4.2) can choose to expose only a subset |
+| 8 | Eleven EOL commands overwhelm the TUI UI | Low | Low | Dashboard task (T13.1) can choose to expose only a subset; the brief's full 11-button surface is the default per C2 walkthrough |
 
 ### 6.2 Open questions for the user
 
@@ -1719,7 +1719,7 @@ Agent 2 handles F2 (`delegateAgent`): T2.1, T2.2, T2.3. This is the integration 
 |---|---|---|
 | 5A F9 cleanup | T9.1-T9.4 | Sequential after Wave 3 (deletes `governance.ts`, `budget-strategy.ts`; every consumer must be updated first) |
 | 5B F10 reviews | T10.1-T10.4 | Three sequential review rounds in one agent (multi-round review can lose context per HANDOFF pitfall #32) |
-| 5C F11 merge | T11.1-T11.4 | User-driven (no auto-merge per AGENTS.md) |
+| 5C F11 merge | T11.1-T11.3 | User-driven (no auto-merge per AGENTS.md). F11 enumerates T11.1-T11.3 only — the §11.7 row's "T11.1-T11.4" range is a stale placeholder carried over from earlier drafts. |
 
 ### 11.8 Out-of-band — F13 dashboard (1 agent, parallel)
 
