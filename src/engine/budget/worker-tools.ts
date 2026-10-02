@@ -187,12 +187,13 @@ export type DelegateAgentResult =
   | { kind: "ready"; session: AgentSession; sessionId: string; ledger: BudgetLedger; controller: AbortController; sessionManager: SessionManager; policy: WorkerBudgetPolicy }
   | { kind: "partial"; session: AgentSession; controller: AbortController; sessionManager: SessionManager; error: unknown };
 
-// Production wiring the dispatcher uses. The `orchestrator` parameter
-// carries the session-factory inputs that previously lived in
-// `options`/`internals` (model, thinkingLevel, tools, customTools,
-// resourceLoader, depthFn, controller). Production never sees the test
-// internals — `defaultDelegateAgentInternals` is used as-is.
-export interface DelegateAgentOrchestrator {
+// Production wiring the dispatcher uses. The `options` parameter carries
+// the session-factory inputs the dispatcher already wires (model,
+// thinkingLevel, tools, customTools, resourceLoader, depthFn, controller,
+// createSession). The shape is shared with `delegateAgentWithInternals`
+// so production and tests use the same options object — `delegateAgent`
+// is now a thin wrapper that supplies the default internals.
+export interface DelegateAgentOptions {
   controller?: AbortController;
   depthFn?: () => number;
   model?: DelegateAgentModel<unknown>;
@@ -202,7 +203,9 @@ export interface DelegateAgentOrchestrator {
   resourceLoader?: ResourceLoader;
   // Production-side session factory. Tests typically inject this through
   // `delegateAgentWithInternals` instead; for production the dispatcher
-  // supplies it directly.
+  // supplies it directly. Routed into the internals seam inside
+  // delegateAgentWithInternals so a single call site can override it
+  // without rebuilding the entire internals object.
   createSession?: (opts: CreateSessionOptions) => Promise<{ session: AgentSession }>;
 }
 
@@ -212,21 +215,9 @@ export async function delegateAgent(
   task: string,
   opts: { fresh?: boolean } | undefined,
   ctx: ExtensionContext,
-  orchestrator: DelegateAgentOrchestrator = {},
+  options: DelegateAgentOptions = {},
 ): Promise<DelegateAgentResult> {
-  return delegateAgentWithInternals(state, agentName, task, opts, ctx, defaultDelegateAgentInternals, {
-    controller: orchestrator.controller,
-    depthFn: orchestrator.depthFn,
-    model: orchestrator.model,
-    thinkingLevel: orchestrator.thinkingLevel,
-    tools: orchestrator.tools,
-    customTools: orchestrator.customTools,
-    resourceLoader: orchestrator.resourceLoader,
-    // Bridge the orchestrator's createSession into the internals.seam so
-    // tests using delegateAgentWithInternals can override it AND production
-    // can supply it without re-stating the rest of the internals object.
-    createSession: orchestrator.createSession,
-  });
+  return delegateAgentWithInternals(state, agentName, task, opts, ctx, defaultDelegateAgentInternals, options);
 }
 
 export async function delegateAgentWithInternals(
@@ -236,24 +227,12 @@ export async function delegateAgentWithInternals(
   opts: { fresh?: boolean } | undefined,
   ctx: ExtensionContext,
   internals: DelegateAgentInternals,
-  options: {
-    controller?: AbortController;
-    depthFn?: () => number;
-    model?: DelegateAgentModel<unknown>;
-    thinkingLevel?: DelegateAgentThinkingLevel;
-    tools?: string[];
-    customTools?: ToolDefinition[];
-    resourceLoader?: ResourceLoader;
-    // Bridge the production orchestrator's createSession into the internals
-    // seam so a single call site can override it without rebuilding the
-    // entire internals object.
-    createSession?: (opts: CreateSessionOptions) => Promise<{ session: AgentSession }>;
-  } = {},
+  options: DelegateAgentOptions = {},
 ): Promise<DelegateAgentResult> {
   void task; // task is consumed by session.prompt() in the production wiring (Cycle 2 above the dispatch.ts refactor).
 
   // Bridge `options.createSession` into the internals seam (production
-  // passes it via orchestrator; tests pass it via internals directly).
+  // passes it via the options object; tests pass it via internals directly).
   const effectiveInternals: DelegateAgentInternals = options.createSession
     ? { ...internals, createSession: options.createSession }
     : internals;
