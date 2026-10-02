@@ -35,10 +35,29 @@ import type { WorkerBudgetPolicy } from "../../core/types";
 // Read threshold + action from the policy's optional Strategies block (per
 // §2.13 C5 v2 wiring). Falls back to the legacy defaults (0.20 warning,
 // abort-on-zero) when the block is absent.
+//
+// interventionAvailable (T13.2) is the operator-facing flag the F13
+// dashboard reads off the `budget_warning` event to decide which
+// intervention buttons to render. It is `true` under the "default"
+// strategy (the system aborts on exhaustion, so the operator can rescue
+// the worker by hand) and `false` under the "compact" strategy (the
+// system auto-compacts, so operator intervention would conflict with the
+// automation). The brief maps this to the `WorkerBudgetStrategy` enum
+// ("default" | "compact") at `src/core/types.ts:568` — the flat enum's
+// "compact" value matches the structured `onExhaustion.action === "compact"`
+// (or `onApproachingLimit.action === "compact"`), both of which are the
+// auto-recovery paths the F13 dashboard should NOT offer an "abort" /
+// "compact" / "respawn" escape hatch for. We use `onExhaustion.action` as
+// the single predicate because that is the strategy decision the flat
+// enum captures most directly.
 function resolveStrategies(policy: WorkerBudgetPolicy) {
   const warningThreshold = policy.strategies?.onApproachingLimit?.threshold ?? 0.20;
   const onExhaustionAction = policy.strategies?.onExhaustion?.action ?? "abort";
-  return { warningThreshold, onExhaustionAction };
+  const onApproachingLimitAction = policy.strategies?.onApproachingLimit?.action ?? "wrap-up";
+  // "default" strategy → operator may intervene. "compact" strategy → system
+  // handles recovery, so the operator buttons would be misleading.
+  const interventionAvailable = onExhaustionAction !== "compact" && onApproachingLimitAction !== "compact";
+  return { warningThreshold, onExhaustionAction, onApproachingLimitAction, interventionAvailable };
 }
 
 // Extract a synthetic cumulative from session.getSessionStats() so message_end
@@ -164,7 +183,7 @@ export function installBudgetEventHooks(
   policy: WorkerBudgetPolicy,
   controller: AbortController,
 ): () => void {
-  const { warningThreshold, onExhaustionAction } = resolveStrategies(policy);
+  const { warningThreshold, onExhaustionAction, interventionAvailable } = resolveStrategies(policy);
   const warnedKeys = new Set<string>();
   // session.sessionManager is the canonical SDK seam (agent-session.d.ts:170).
   const sessionManager = session.sessionManager;
@@ -203,7 +222,7 @@ export function installBudgetEventHooks(
               "budget_warning",
               `Worker tokens at ${pct}% of cap. Wrap up your work; call summarize_progress({ notes: "..." }) to record completion intent.`,
               true,
-              { scope: "worker", resource: "tokens", remaining, cap: workerTokensCap },
+              { scope: "worker", resource: "tokens", remaining, cap: workerTokensCap, interventionAvailable },
             );
           }
         }
