@@ -48,10 +48,10 @@ Single sub-agent. Tasks must complete in order (T10.1 → apply fixes → T10.2 
 
 | Task | Description |
 |---|---|
-| [ ] T10.1 | Run `kieran-typescript-reviewer` on the implementation diff. Apply all should-fix items. Gate: zero unresolved should-fix items |
-| [ ] T10.2 | Run `architecture-strategist` on the implementation diff. Apply all should-fix items. Gate: zero unresolved should-fix items |
-| [ ] T10.3 | Run `code-simplicity-reviewer` on the implementation diff. Apply all should-fix items. Gate: zero unresolved should-fix items |
-| [ ] T10.4 | Save each reviewer's output to `docs/reviews/28-09-2026-budget-review/review-runs/` for audit trail. Gate: 3 reviewer reports committed |
+| [ ] T10.1 | Run `kieran-typescript-reviewer` on the implementation diff. Apply all should-fix items. Gate: zero unresolved should-fix items (skipped per user instruction 2026-09-30 — done in a prior session) |
+| [x] T10.2 | Run `architecture-strategist` on the implementation diff. Apply all should-fix items. Gate: zero unresolved should-fix items — **done 2026-09-30** (commit 44a93bc; A2, A3, A5, A11 applied; A1, A4, A6-A10, A12 informational) |
+| [x] T10.3 | Run `code-simplicity-reviewer` on the implementation diff. Apply all should-fix items. Gate: zero unresolved should-fix items — **done 2026-09-30** (commit 55e5838; S1, S2, S3 applied; S4-S8 informational) |
+| [x] T10.4 | Save each reviewer's output to `docs/reviews/28-09-2026-budget-review/review-runs/` for audit trail. Gate: 3 reviewer reports committed — **done 2026-09-30** (commit c064bcd adds code-simplicity report; architecture-strategist committed in 55e5838; kieran-typescript-reviewer deferred per T10.1 note) |
 
 For full task prose and gates, the implementing agent reads `04-refactor-plan.md` §5 F10 directly.
 
