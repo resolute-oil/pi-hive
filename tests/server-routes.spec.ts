@@ -215,4 +215,67 @@ describe("dashboard HTTP handler", () => {
     expect(missing.response.status).toBe(404);
     expect(missing.body.error).toBe("not found");
   });
+
+  // F13 (T13.1) — POST /operator-command queues a request for the parent pi
+  // to pick up. The endpoint must:
+  //   1. Reject unauthenticated calls (write gate).
+  //   2. Reject malformed JSON / missing fields.
+  //   3. Reject commands outside the 11-command allow-list.
+  //   4. Accept each of the 11 commands and queue a sidecar pickup file.
+  test("POST /operator-command validates the 11-command allow-list and queues requests (F13 T13.1)", async () => {
+    const { readOperatorCommandRequests, clearOperatorCommandRequests } = await import("../src/observability/server/db");
+    clearOperatorCommandRequests();
+
+    const allCommands = [
+      "end", "compact", "respawn", "pause", "snapshot", "restore",
+      "resume", "abort-compaction", "force-kill", "force-end", "tear-down-all",
+    ];
+    for (const command of allCommands) {
+      const res = await json("/operator-command", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agent: "builder", command }),
+      }, true);
+      expect(res.response.status, command).toBe(200);
+      expect(res.body.ok, command).toBe(true);
+      expect(res.body.command, command).toBe(command);
+    }
+    const queued = readOperatorCommandRequests();
+    expect(queued.length, "11 requests queued").toBe(11);
+    for (let i = 0; i < allCommands.length; i++) {
+      expect(queued[i].command).toBe(allCommands[i]);
+      expect(queued[i].agent).toBe("builder");
+    }
+    clearOperatorCommandRequests();
+
+    // Reject commands outside the allow-list.
+    const bogus = await json("/operator-command", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agent: "builder", command: "shell-escape" }),
+    }, true);
+    expect(bogus.response.status).toBe(400);
+
+    // Reject missing fields.
+    const missingAgent = await json("/operator-command", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ command: "end" }),
+    }, true);
+    expect(missingAgent.response.status).toBe(400);
+    const missingCommand = await json("/operator-command", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agent: "builder" }),
+    }, true);
+    expect(missingCommand.response.status).toBe(400);
+
+    // Unauthenticated calls rejected by the write gate.
+    const unauth = await json("/operator-command", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agent: "builder", command: "end" }),
+    }, false);
+    expect(unauth.response.status).toBe(401);
+  });
 });

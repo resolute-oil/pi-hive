@@ -345,6 +345,31 @@ export function saveProjectOverride(projectId: string, label: string): Promise<W
   return writeResult("save project name", writeFetch("/project-overrides", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId, label }) }));
 }
 
+// ── F13 operator commands (T13.1) ──────────────────────────────────────────────
+// 11 EOL commands surfaced in the dashboard's per-worker button strip. The
+// daemon's POST /operator-command endpoint queues the request and writes a
+// `command_request` telemetry row; the parent pi picks it up via the SSE
+// stream and runs the matching operator command. RPC contract is JSON in /
+// JSON out (also the print-mode shape — see brief T13.3).
+export type OperatorCommandName =
+  | "end"
+  | "compact"
+  | "respawn"
+  | "pause"
+  | "snapshot"
+  | "restore"
+  | "resume"
+  | "abort-compaction"
+  | "force-kill"
+  | "force-end"
+  | "tear-down-all";
+
+export interface OperatorCommandRequest { agent: string; command: OperatorCommandName; }
+export interface OperatorCommandResponse { ok: boolean; status: number; error?: string; kind?: string; }
+export function runOperatorCommand(agent: string, command: OperatorCommandName): Promise<OperatorCommandResponse> {
+  return writeResult(command, writeFetch("/operator-command", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ agent, command } satisfies OperatorCommandRequest) }));
+}
+
 // ── Plan store ───────────────────────────────────────────────────────────────
 
 export interface PlanVerdict {
