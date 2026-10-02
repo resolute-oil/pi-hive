@@ -31,7 +31,7 @@ import { acquireWorkerSlot, releaseWorkerSlot } from "./worker-queue";
 import { effectiveWorkerGovernance } from "./budget/remaining";
 import { WorkerRunLifecycle } from "./worker-lifecycle";
 import { modelKey, resolveModel, type ResolvedModel } from "./model-resolution";
-import { delegateAgent as delegateAgentFn, BudgetExhaustedError, type DelegateAgentThinkingLevel } from "./budget/worker-tools";
+import { delegateAgent as delegateAgentFn, BudgetExhaustedError, type DelegateAgentThinkingLevel, registerWorkerHandleForProduction, unregisterWorkerHandleForProduction } from "./budget/worker-tools";
 import { buildWorkerOnlyTools, populateWorkerOnlyBindings } from "./budget/worker-only-tools";
 import { installBudgetEventHooks } from "./budget/events";
 import { wireDispatchSubscription, makeDispatchStreamState } from "./dispatch-subscribe";
@@ -593,6 +593,25 @@ export async function dispatchAgent(
     delegateResult.policy,
   );
 
+  // Wave 3.5 wiring (Gap 3): register the worker handle so the 11 operator
+  // commands (forceKillWorkerSession, forceEndWorkerSession, endWorkerSession,
+  // etc.) can find the session by agent name. Before this, the operator
+  // commands threw `notImpl(agent)` because the Map was never populated.
+  // Registration happens HERE — after delegateAgent settled
+  // `kind: "ready"`, before `runtime.status = "running"` mutates state.
+  // The Map is the contract between this dispatcher and the operator-command
+  // surface (F13 dashboard + RPC); the test seam
+  // __registerHandle / __unregisterHandle in worker-tools.ts stays for
+  // the budget-eol test suite.
+  registerWorkerHandleForProduction({
+    agent: runtime.config.name,
+    session: delegateResult.session,
+    controller: delegateResult.controller,
+    sessionManager: delegateResult.sessionManager,
+    ledger: delegateResult.ledger,
+    policy: delegateResult.policy,
+  });
+
   const resolvedModelKey = modelKey(resolvedModel, model);
 
   runtime.status = "running";
@@ -687,26 +706,47 @@ export async function dispatchAgent(
   lifecycle.attachSubscription(unsubscribe);
 
 
-  return await runPromptAndFinalize({
-    state,
-    runtime,
-    session,
-    streamState,
-    fresh,
-    task,
-    ctx,
-    caller,
-    prompt,
-    delegationDepth,
-    sessionFileExisted,
-    lifecycle,
-    timeout,
-    abortSignal,
-    abortFromParent,
-    getAbortedByParent: () => abortedByParent,
-    getTimedOut: () => timedOut,
-    governanceTimeoutMs: governance.timeoutMs,
-    tokenBudgetScope,
-  });
+  // Wave 3.5 wiring (Gap 3 unregister half): runPromptAndFinalize reaps
+  // the session via lifecycle.close (abort + dispose) before returning,
+  // so the handle is no longer addressable. Unregister it here so the
+  // operator-command surface sees a clean slate for the next dispatch.
+  // The brief's "ensure unregister is called in the endWorkerSession
+  // path" is satisfied by this block — the dispatcher's normal end-of-
+  // run IS the endWorkerSession path in production (operator-initiated
+  // endWorkerSession itself preserves the handle for resume, which is
+  // intentional and matches the documented "no dispose (operator may
+  // resume)" contract).
+  try {
+    const finalOutcome = await runPromptAndFinalize({
+      state,
+      runtime,
+      session,
+      streamState,
+      fresh,
+      task,
+      ctx,
+      caller,
+      prompt,
+      delegationDepth,
+      sessionFileExisted,
+      lifecycle,
+      timeout,
+      abortSignal,
+      abortFromParent,
+      getAbortedByParent: () => abortedByParent,
+      getTimedOut: () => timedOut,
+      governanceTimeoutMs: governance.timeoutMs,
+      tokenBudgetScope,
+    });
+    unregisterWorkerHandleForProduction(runtime.config.name);
+    return finalOutcome;
+  } catch (error) {
+    // Even on the abnormal path, unregister so the operator-command
+    // surface doesn't leak handles for crashed workers. The
+    // registerWorkerHandle call above already happened on the ready
+    // path; the Map entry is otherwise unreachable.
+    unregisterWorkerHandleForProduction(runtime.config.name);
+    throw error;
+  }
 }
 
