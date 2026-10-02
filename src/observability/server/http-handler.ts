@@ -142,13 +142,17 @@ export function createDashboardHttpHandler(options: DashboardHttpHandlerOptions 
         setProjectOverride(projectId, project.project_root, savedLabel, new Date().toISOString());
         return json({ ok: true, projectId, label: savedLabel });
       }
-      // POST /operator-command { agent, command } — F13 (T13.1). Queues an
-      // operator-command request for the parent pi to pick up. The dashboard
-      // server is a process boundary away from the parent pi (the extension
-      // runs in the user's pi session, the dashboard server is a separate
-      // Bun process), so the request is recorded in a sidecar JSONL file the
-      // parent pi watches via `pickupOperatorCommandRequests()` (added in
-      // T13.3). The endpoint validates the command against the 11-command
+      // POST /operator-command { agent, command } — F13 (T13.1 + Wave 7
+      // fixup). Queues an operator-command request for the parent pi to
+      // pick up. The dashboard server is a process boundary away from
+      // the parent pi (the extension runs in the user's pi session, the
+      // dashboard server is a separate Bun process), so the request is
+      // recorded in a sidecar JSONL file the parent pi watches via
+      // `pickupOperatorCommandRequests()` in
+      // `src/integration/operator-pickup.ts`. The consumer is started
+      // from the parent's `session_start` hook and torn down on
+      // `session_shutdown` (per AGENTS.md session-scoped process rules).
+      // The endpoint validates the command against the 11-command
       // allow-list; out-of-set commands are rejected before they reach disk.
       if (url.pathname === "/operator-command") {
         let body: any = {};
@@ -156,10 +160,16 @@ export function createDashboardHttpHandler(options: DashboardHttpHandlerOptions 
         const agent = String(body.agent || "").trim();
         const command = String(body.command || "").trim();
         if (!agent) return json({ error: "agent required" }, 400);
-        // 11-command allow-list, per F13 brief. force-kill / force-end /
-        // tear-down-all are operator-only (not in the cooperative tool
-        // registry); all 11 surface on the dashboard.
-        const ALLOWED = new Set(["end", "compact", "respawn", "pause", "snapshot", "restore", "resume", "abort-compaction", "force-kill", "force-end", "tear-down-all"]);
+        // 12-command allow-list (11 operator commands + hive_reload_agent_config).
+        // force-kill / force-end / tear-down-all are operator-only (not in
+        // the cooperative tool registry); all 12 surface on the dashboard.
+        // hive_reload_agent_config was added in Wave 7 (T13.0 follow-up):
+        // the F1-F13 brief's T13.0 sunset removed the legacy `fresh`
+        // parameter on `delegate_agent` (which used to call
+        // `reloadAgentConfig` on every dispatch), so the only way to
+        // reload an agent's YAML config is via this explicit operator
+        // command.
+        const ALLOWED = new Set(["end", "compact", "respawn", "pause", "snapshot", "restore", "resume", "abort-compaction", "force-kill", "force-end", "tear-down-all", "hive_reload_agent_config"]);
         if (!ALLOWED.has(command)) return json({ error: `unknown command "${command}"` }, 400);
         // 0..120 chars for the agent name; matches the existing identifier
         // hygiene (e.g. project-overrides uses the same cap on its label).

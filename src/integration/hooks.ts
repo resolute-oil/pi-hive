@@ -16,6 +16,7 @@ import { emitHiveEvent, emitModelCatalog, writeHiveStateSnapshot } from "../engi
 import { resolveConfiguredPath } from "../core/safe-path";
 import { cancelWorkerQueue } from "../engine/worker-queue";
 import { clearCommandCtx, getCommandCtx } from "./commands";
+import { startOperatorCommandPickup, stopOperatorCommandPickup } from "./operator-pickup";
 
 const EXTENSION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -471,6 +472,14 @@ ${catalog}`,
       );
       const missing = missingSkills.length ? `\nMissing configured skills: ${missingSkills.slice(0, 5).join(", ")}${missingSkills.length > 5 ? "..." : ""}` : "";
       if (ctx.hasUI) ctx.ui.notify(`Hive loaded: ${state.runtimes.size} agents in normal mode\nUse /hive:toggle or Ctrl+Alt+T to switch to orchestrator mode.${missing}`, missingSkills.length ? "warning" : "info");
+      // F13 production wiring (Wave 7): start the operator-command
+      // pickup loop. The dashboard server queues `operator-command`
+      // requests in a sidecar JSONL; this consumer drains it and
+      // invokes the matching operator command on the live worker
+      // handles. Per AGENTS.md: long-lived processes must be started
+      // from a session hook (NOT the extension factory) and torn
+      // down on session_shutdown (done below).
+      startOperatorCommandPickup(state, ctx);
     } catch (error: unknown) {
       // H5: on a config-load failure, force the session back to plain-Pi normal
       // mode so it is never left with hive tools registered but unconfigured.
@@ -497,6 +506,12 @@ ${catalog}`,
     // Drop any captured ExtensionCommandContext — without this, a stale ctx
     // from the previous session could leak into the new one.
     clearCommandCtx();
+    // F13 production wiring (Wave 7): stop the operator-command
+    // pickup loop. AGENTS.md: session-owned processes must be torn
+    // down on session shutdown. A stale timer would keep polling
+    // the file and (worst case) double-invoke a command after the
+    // session that issued it is gone.
+    stopOperatorCommandPickup();
     if (orchestratorSnapshotTimer) clearTimeout(orchestratorSnapshotTimer);
     orchestratorSnapshotTimer = undefined;
     orchestratorToolStartedAt.clear();
