@@ -138,6 +138,10 @@ export interface CreateSessionOptions {
   resourceLoader: ResourceLoader;
 }
 
+// Production-side internals for `delegateAgent`. Tests that need to stub
+// internals pass a custom `DelegateAgentInternals` object directly to
+// `delegateAgentWithInternals`; the production function never sees the
+// seam.
 const defaultInternals: DelegateAgentInternals = {
   resolveWorkerBudgetPolicy: resolveWorkerBudgetPolicyFn,
   restoreLedger: BudgetLedgerClass.restore,
@@ -146,13 +150,6 @@ const defaultInternals: DelegateAgentInternals = {
   sessionManagerCreate: (cwd) => SessionManagerClass.create(cwd),
   sessionManagerContinueRecent: (cwd) => SessionManagerClass.continueRecent(cwd),
 };
-
-// Module-private default internals used by `delegateAgent` below. Tests that
-// need to stub internals pass a custom `DelegateAgentInternals` object
-// directly to `delegateAgentWithInternals`; the production function never
-// sees the seam, and no caller spreads these defaults, so the export is
-// unnecessary.
-const defaultDelegateAgentInternals: DelegateAgentInternals = defaultInternals;
 
 // ── delegateAgent ────────────────────────────────────────────────────────
 //
@@ -217,7 +214,7 @@ export async function delegateAgent(
   ctx: ExtensionContext,
   options: DelegateAgentOptions = {},
 ): Promise<DelegateAgentResult> {
-  return delegateAgentWithInternals(state, agentName, task, opts, ctx, defaultDelegateAgentInternals, options);
+  return delegateAgentWithInternals(state, agentName, task, opts, ctx, defaultInternals, options);
 }
 
 export async function delegateAgentWithInternals(
@@ -376,21 +373,20 @@ export const __unregisterHandle = unregisterWorkerHandle;
 // expose the WorkerHandle shape so production callers get a typed handle
 // without reaching into the test-only `__`-prefixed names.
 //
-// The internal `WorkerHandle` interface (line 331 in region 3B) and the
+// The internal `WorkerHandle` interface (line 345 in region 3B) and the
 // internal `registerWorkerHandle` / `unregisterWorkerHandle` functions
-// (lines 333-334 in region 3B) are file-local and bound by name; we
+// (lines 347-348 in region 3B) are file-local and bound by name; we
 // cannot re-export them under the same identifier without renaming the
 // internals. The wrappers below delegate to the existing test seams, so
 // both surface and test seam point at the same Map entry.
-export type WorkerHandleShape = { agent: string; session: AgentSession; controller: AbortController; sessionManager: SessionManager; ledger: BudgetLedger; policy: WorkerBudgetPolicy; };
-export function registerWorkerHandleForProduction(h: WorkerHandleShape): WorkerHandleShape | undefined {
-  return __registerHandle(h as unknown as Parameters<typeof __registerHandle>[0]);
+export function registerWorkerHandleForProduction(h: WorkerHandle): WorkerHandle | undefined {
+  return __registerHandle(h);
 }
-export function unregisterWorkerHandleForProduction(a: string): WorkerHandleShape | undefined {
-  return __unregisterHandle(a) as unknown as WorkerHandleShape | undefined;
+export function unregisterWorkerHandleForProduction(a: string): WorkerHandle | undefined {
+  return __unregisterHandle(a);
 }
-export function lookupWorkerHandleForProduction(a: string): WorkerHandleShape | undefined {
-  return lookupWorkerHandle(a) as unknown as WorkerHandleShape | undefined;
+export function lookupWorkerHandleForProduction(a: string): WorkerHandle | undefined {
+  return lookupWorkerHandle(a);
 }
 function notImpl(a: string) { return new Error(`not implemented: no worker handle for '${a}'`); }
 // T5.1 endWorkerSession — session.abort() + ledger kind:"end". No dispose (operator may resume). forceEndWorkerSession is the middle-ground for the case where the operator wants disposal too.
