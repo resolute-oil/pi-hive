@@ -144,8 +144,6 @@ function withOrchestratorUsage(
     ...summary,
     status: (orch.status || summary.status) as TelemetryAgentStatus, // same "queued" → "idle" collapse as runtimeSummary above; the orchestrator never queues so the cast is always identity here.
     elapsedMs: orch.elapsedMs ?? summary.elapsedMs,
-    runStartInputTokens: orch.runStartInputTokens ?? summary.runStartInputTokens,
-    runStartOutputTokens: orch.runStartOutputTokens ?? summary.runStartOutputTokens,
     toolCount: (summary.toolCount || 0) + orch.toolCount,
     inputTokens: (summary.inputTokens || 0) + orch.inputTokens,
     outputTokens: (summary.outputTokens || 0) + orch.outputTokens,

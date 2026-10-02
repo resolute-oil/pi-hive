@@ -401,7 +401,7 @@ function Node(props: {
   // Dial level resolution (K3/Decision 6): node sidecar → rt sidecar → /models
   // lookup by effective model → undefined (plain text, no invented ladder).
   const resolvedLevels = resolveDialLevels((data as any).thinkingLevels, rt?.thinkingLevels, model, modelLevels);
-  const tps = tokPerSec(rt?.inputTokens, rt?.outputTokens, rt?.elapsedMs, rt?.runStartInputTokens, rt?.runStartOutputTokens);
+  const tps = tokPerSec(rt?.inputTokens, rt?.outputTokens, rt?.elapsedMs);
 
   const openLog = () => {
     if (props.sessionId) viewAgent({ sessionId: props.sessionId, name: data.name, color: data.color, status, model });
