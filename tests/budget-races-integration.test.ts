@@ -37,6 +37,19 @@ const noCapPolicy: WorkerBudgetPolicy = { worker: {}, team: {} };
 // `getSessionStats()` (real) and the ledger restore (real). The
 // invariant: restored ledger cumulative matches what was last written,
 // regardless of intervening SDK operations.
+//
+// T7.8 is a real-SDK integration test. Per `wave-4-validation.md` line 99,
+// the 100-consecutive-run stability gate is excepted for T7.8 because
+// real SDK timing is inherently non-deterministic; this test is bounded
+// to a 50ms ± 10ms timing window per iteration instead. The single
+// `await BudgetLedger.restore(...)` below is the documented assertion
+// boundary — the boundary between the synchronous SDK write
+// (`appendCustomEntry`) and the read-back we are asserting against —
+// NOT a write/read race. The no-await rule for the racing tests refers
+// to the racing write/read pair inside the deterministic suite
+// (`tests/budget-races.test.ts`); T7.8's `await` is the one place where
+// we deliberately await because we are verifying state at the
+// boundary, not racing it.
 
 test("T7.8.a (integration): abort-then-`getSessionStats()` race against real SessionManager — bounded timing window 50ms ± 10ms", async () => {
   const sm = SessionManager.inMemory("/tmp");
