@@ -26,6 +26,7 @@ import {
   truncateMiddle,
 } from "../core/utils";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import type { CompactionResult } from "@earendil-works/pi-coding-agent";
 import type { AgentRuntime, HiveState } from "../core/types";
 
 const MAX_DIAGNOSTICS = 20;
@@ -175,17 +176,19 @@ export function wireDispatchSubscription(
         // Phase 4.5: keep the compaction RESULT fields, not just {reason, phase}.
         // Budget accounting (recordCompaction) is wired via installBudgetEventHooks
         // (T2.1) — this handler only emits telemetry.
-        // The SDK types result as CompactionResult<unknown>; tokensBefore /
-        // estimatedTokensAfter are T-conditional, so we widen via a
-        // structural cast to read them.
-        const result = (event.result ?? {}) as { tokensBefore?: unknown; estimatedTokensAfter?: unknown; aborted?: unknown; willRetry?: unknown; errorMessage?: unknown };
+        // The SDK types event.result as CompactionResult | undefined; tokensBefore
+        // is required, estimatedTokensAfter is optional. aborted / willRetry /
+        // errorMessage live on the event itself, NOT on CompactionResult, so
+        // they are read off `event` directly (the previous structural cast hid
+        // this misread by silently finding undefined on CompactionResult).
+        const result: CompactionResult | undefined = event.result;
         emitHiveEvent(state, "worker_compaction", {
           agent: runtime.config.name, reason: event.reason, phase: "end",
-          tokensBefore: finiteOrUndef(result.tokensBefore),
-          estimatedTokensAfter: finiteOrUndef(result.estimatedTokensAfter),
-          aborted: result.aborted === true ? true : undefined,
-          willRetry: result.willRetry === true ? true : undefined,
-          errorMessage: result.errorMessage ? truncateMiddle(String(result.errorMessage), 500) : (event.errorMessage ? truncateMiddle(event.errorMessage, 500) : undefined),
+          tokensBefore: result ? finiteOrUndef(result.tokensBefore) : undefined,
+          estimatedTokensAfter: result ? finiteOrUndef(result.estimatedTokensAfter) : undefined,
+          aborted: event.aborted === true ? true : undefined,
+          willRetry: event.willRetry === true ? true : undefined,
+          errorMessage: event.errorMessage ? truncateMiddle(event.errorMessage, 500) : undefined,
         }, runtime.config.name);
         break;
       }
@@ -207,36 +210,43 @@ export function wireDispatchSubscription(
         break;
       }
       case "message_end": {
-        const message = event.message as { model?: unknown; responseModel?: unknown; provider?: unknown; api?: unknown; responseId?: unknown; diagnostics?: unknown; stopReason?: unknown; usage?: unknown; role?: string } | undefined;
-        const actualModel = message?.model || message?.responseModel;
-        if (actualModel) modelsSeen.add(String(actualModel));
-        if (message?.provider) providersSeen.add(String(message.provider));
-        if (message?.api) apisSeen.add(String(message.api));
-        if (message?.responseId) {
-          const rid = String(message.responseId);
-          if (!streamState.firstResponseId) streamState.firstResponseId = rid;
-          streamState.lastResponseId = rid;
-        }
-        if (diagnostics.length < MAX_DIAGNOSTICS) {
-          // R4.3: shared bounded/undefined-omitting normalizer, capped across the run.
-          const norm = boundedDiagnostics(message?.diagnostics, MAX_DIAGNOSTICS - diagnostics.length);
-          if (norm) diagnostics.push(...norm);
-        }
-        if (message?.stopReason) streamState.lastStopReason = String(message.stopReason);
-        const usage = message?.usage;
-        if (usage) {
-          // Incremental accumulation for live display only. Authoritative totals
-          // are overwritten from getSessionStats() at run end (A1) — this avoids
-          // the historical double-count where agent_end re-added the final
-          // message's usage.
-          // Budget warning / abort is handled in installBudgetEventHooks (T2.1).
-          const u = extractUsage(usage);
-          runtime.inputTokens += u.input;
-          runtime.outputTokens += u.output;
-          runtime.cacheReadTokens += u.cacheRead;
-          runtime.cacheWriteTokens += u.cacheWrite;
-          runtime.reasoningTokens += u.reasoning;
-          runtime.costUsd += u.cost;
+        // message_end fires for any AgentMessage — assistant / user / toolResult /
+        // custom. The model/provider/api/usage fields only exist on the
+        // assistant branch, so the handler narrows event.message via the
+        // isAssistantMessage predicate before reading them. The structural
+        // cast in the prior version flattened the union to a single shape and
+        // relied on undefined returns for non-assistant messages; the
+        // predicate makes that branch explicit at the type level.
+        const message = event.message;
+        if (isAssistantMessage(message)) {
+          const actualModel = message.model || message.responseModel;
+          if (actualModel) modelsSeen.add(actualModel);
+          if (message.provider) providersSeen.add(message.provider);
+          if (message.api) apisSeen.add(message.api);
+          if (message.responseId) {
+            if (!streamState.firstResponseId) streamState.firstResponseId = message.responseId;
+            streamState.lastResponseId = message.responseId;
+          }
+          if (diagnostics.length < MAX_DIAGNOSTICS) {
+            // R4.3: shared bounded/undefined-omitting normalizer, capped across the run.
+            const norm = boundedDiagnostics(message.diagnostics, MAX_DIAGNOSTICS - diagnostics.length);
+            if (norm) diagnostics.push(...norm);
+          }
+          if (message.stopReason) streamState.lastStopReason = message.stopReason;
+          if (message.usage) {
+            // Incremental accumulation for live display only. Authoritative totals
+            // are overwritten from getSessionStats() at run end (A1) — this avoids
+            // the historical double-count where agent_end re-added the final
+            // message's usage.
+            // Budget warning / abort is handled in installBudgetEventHooks (T2.1).
+            const u = extractUsage(message.usage);
+            runtime.inputTokens += u.input;
+            runtime.outputTokens += u.output;
+            runtime.cacheReadTokens += u.cacheRead;
+            runtime.cacheWriteTokens += u.cacheWrite;
+            runtime.reasoningTokens += u.reasoning;
+            runtime.costUsd += u.cost;
+          }
         }
         break;
       }
@@ -290,4 +300,35 @@ function finiteOrUndef(x: unknown): number | undefined {
   if (x == null) return undefined;
   const n = Number(x);
   return Number.isFinite(n) ? n : undefined;
+}
+
+// Narrow an AgentMessage to the assistant branch. The discriminator is
+// role === "assistant" — every other AgentMessage branch (user, toolResult,
+// custom) lacks model/provider/api/usage and is silently ignored by the
+// message_end handler. The structural cast in the prior code flattened the
+// union to a single unknown-typed record and hid this branch; the typed
+// predicate makes it explicit. Reads only fields that exist on the SDK's
+// AssistantMessage shape (see pi-coding-agent/dist/core/extensions/types.d.ts
+// MessageEndEvent and pi-ai/dist/types.d.ts AssistantMessage). The optional
+// fields stay optional in the type so test fixtures that emit a subset
+// (e.g. role + model + usage, no provider) still narrow successfully —
+// every downstream read is guarded by a `typeof X === "string"` or
+// truthy check before consumption.
+type AssistantMessageLike = {
+  role: "assistant";
+  model?: string;
+  responseModel?: string;
+  provider?: string;
+  api?: string;
+  responseId?: string;
+  diagnostics?: unknown;
+  stopReason?: string;
+  usage?: unknown;
+};
+function isAssistantMessage(m: unknown): m is AssistantMessageLike {
+  return (
+    typeof m === "object" &&
+    m !== null &&
+    (m as { role?: unknown }).role === "assistant"
+  );
 }
