@@ -31,7 +31,8 @@ import { acquireWorkerSlot, releaseWorkerSlot } from "./worker-queue";
 import { effectiveWorkerGovernance } from "./budget/remaining";
 import { WorkerRunLifecycle } from "./worker-lifecycle";
 import { modelKey, resolveModel, type ResolvedModel } from "./model-resolution";
-import { delegateAgent as delegateAgentFn, BudgetExhaustedError, type DelegateAgentThinkingLevel } from "./budget/worker-tools";
+import { delegateAgent as delegateAgentFn, BudgetExhaustedError, type DelegateAgentThinkingLevel, registerWorkerHandleForProduction, unregisterWorkerHandleForProduction } from "./budget/worker-tools";
+import { buildWorkerOnlyTools, populateWorkerOnlyBindings } from "./budget/worker-only-tools";
 import { installBudgetEventHooks } from "./budget/events";
 import { wireDispatchSubscription, makeDispatchStreamState } from "./dispatch-subscribe";
 import { emitDelegationEnd } from "./dispatch-end";
@@ -456,7 +457,18 @@ export async function dispatchAgent(
   // internals so the 565-test AgentSession factory keeps working.
   const toolNamesForGate = tools.split(",").map((t) => t.trim()).filter(Boolean);
   const hiveToolsForGate = buildHiveTools(state, runtime.config.name).filter((t) => toolNamesForGate.includes(t.name) || TYPE_SCOPED_TOOL_NAMES.has(t.name));
-  const allToolNamesForGate = dispatchToolNames(toolNamesForGate, hiveToolsForGate);
+
+  // Wave 3.5 wiring (Gap 1, Gap 2): build the per-worker-only tool set
+  // (summarize_progress + 3 cooperative tools) and union their names
+  // into the `tools` array passed to the session. The SDK silently drops
+  // a customTool whose name is missing from `tools`, so the union is
+  // mandatory. The wrappers use deferred bindings — the SDK's
+  // session.customTools list is fixed at creation time, so we register
+  // wrappers that close over a binding object populated AFTER
+  // delegateAgent returns `kind: "ready"`. The full rationale lives in
+  // src/engine/budget/worker-only-tools.ts.
+  const { tools: workerOnlyTools, bindings: workerOnlyBindings } = buildWorkerOnlyTools(state, runtime.config.name);
+  const allToolNamesForGate = dispatchToolNames(toolNamesForGate, [...hiveToolsForGate, ...workerOnlyTools]);
   const skillPathsForGate = resolveWorkerSkillPaths(ctx.cwd, runtime.config.skills as unknown[]);
   const sessionManager = SessionManager.open(runtime.sessionFile);
   // createAgentSession only calls reload() when it creates its own resource
@@ -486,7 +498,7 @@ export async function dispatchAgent(
         // accepts the union-typed string.
         thinkingLevel: thinking as DelegateAgentThinkingLevel | undefined,
         tools: allToolNamesForGate,
-        customTools: hiveToolsForGate,
+        customTools: [...hiveToolsForGate, ...workerOnlyTools],
         resourceLoader: workerLoader,
         // Production-side seam: the dispatcher's createSession is what every
         // test in tests/dispatch-usage.test.ts injects. delegateAgent routes
@@ -565,6 +577,40 @@ export async function dispatchAgent(
     await lifecycle.close(true);
     return await emitSetupFailure({ state, runtime, caller, task, ctx, errorMessage });
   }
+
+  // Wave 3.5 wiring (Gap 1, Gap 2): populate the deferred bindings now
+  // that delegateAgent settled `kind: "ready"` and the session + ledger
+  // + policy are available. The four ToolDefinitions registered as part of
+  // customTools read from these on execute(). We populate before the
+  // `runtime.status = "running"` mutation so any error here fails with
+  // `runtime.status = "error"` (defensive parity with the partial-session
+  // branch above — a binding-mutation throw is not expected but the
+  // shape is symmetric).
+  populateWorkerOnlyBindings(
+    workerOnlyBindings,
+    delegateResult.session,
+    delegateResult.ledger,
+    delegateResult.policy,
+  );
+
+  // Wave 3.5 wiring (Gap 3): register the worker handle so the 11 operator
+  // commands (forceKillWorkerSession, forceEndWorkerSession, endWorkerSession,
+  // etc.) can find the session by agent name. Before this, the operator
+  // commands threw `notImpl(agent)` because the Map was never populated.
+  // Registration happens HERE — after delegateAgent settled
+  // `kind: "ready"`, before `runtime.status = "running"` mutates state.
+  // The Map is the contract between this dispatcher and the operator-command
+  // surface (F13 dashboard + RPC); the test seam
+  // __registerHandle / __unregisterHandle in worker-tools.ts stays for
+  // the budget-eol test suite.
+  registerWorkerHandleForProduction({
+    agent: runtime.config.name,
+    session: delegateResult.session,
+    controller: delegateResult.controller,
+    sessionManager: delegateResult.sessionManager,
+    ledger: delegateResult.ledger,
+    policy: delegateResult.policy,
+  });
 
   const resolvedModelKey = modelKey(resolvedModel, model);
 
@@ -660,26 +706,47 @@ export async function dispatchAgent(
   lifecycle.attachSubscription(unsubscribe);
 
 
-  return await runPromptAndFinalize({
-    state,
-    runtime,
-    session,
-    streamState,
-    fresh,
-    task,
-    ctx,
-    caller,
-    prompt,
-    delegationDepth,
-    sessionFileExisted,
-    lifecycle,
-    timeout,
-    abortSignal,
-    abortFromParent,
-    getAbortedByParent: () => abortedByParent,
-    getTimedOut: () => timedOut,
-    governanceTimeoutMs: governance.timeoutMs,
-    tokenBudgetScope,
-  });
+  // Wave 3.5 wiring (Gap 3 unregister half): runPromptAndFinalize reaps
+  // the session via lifecycle.close (abort + dispose) before returning,
+  // so the handle is no longer addressable. Unregister it here so the
+  // operator-command surface sees a clean slate for the next dispatch.
+  // The brief's "ensure unregister is called in the endWorkerSession
+  // path" is satisfied by this block — the dispatcher's normal end-of-
+  // run IS the endWorkerSession path in production (operator-initiated
+  // endWorkerSession itself preserves the handle for resume, which is
+  // intentional and matches the documented "no dispose (operator may
+  // resume)" contract).
+  try {
+    const finalOutcome = await runPromptAndFinalize({
+      state,
+      runtime,
+      session,
+      streamState,
+      fresh,
+      task,
+      ctx,
+      caller,
+      prompt,
+      delegationDepth,
+      sessionFileExisted,
+      lifecycle,
+      timeout,
+      abortSignal,
+      abortFromParent,
+      getAbortedByParent: () => abortedByParent,
+      getTimedOut: () => timedOut,
+      governanceTimeoutMs: governance.timeoutMs,
+      tokenBudgetScope,
+    });
+    unregisterWorkerHandleForProduction(runtime.config.name);
+    return finalOutcome;
+  } catch (error) {
+    // Even on the abnormal path, unregister so the operator-command
+    // surface doesn't leak handles for crashed workers. The
+    // registerWorkerHandle call above already happened on the ready
+    // path; the Map entry is otherwise unreachable.
+    unregisterWorkerHandleForProduction(runtime.config.name);
+    throw error;
+  }
 }
 
