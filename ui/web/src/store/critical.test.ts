@@ -161,7 +161,15 @@ describe("topology and identity state", () => {
   // through the payload (multiple workers can share a parent session
   // and they need distinct map entries). The reducer must prefer
   // payload.session_id (the worker) over e.session_id (the parent).
-  test("buildInterventionBySession prefers payload.session_id (worker) over e.session_id (parent) for the F13 production emit", () => {
+  //
+  // Wave 7.5 F13 fixup: the worker key alone is not enough. The row
+  // builder at `scoped-agents.ts` looks up the flag by the parent's
+  // session id (the row's `session_id` is the parent — the topology
+  // describes the parent's team, not a specific worker's session).
+  // The reducer now also writes the same value under the parent key
+  // (a side alias) so the per-row lookup works. The worker-keyed
+  // entries are still distinct per-worker, preserving the test below.
+  test("buildInterventionBySession keys per-worker AND aliases to the parent session for the F13 row-lookup", () => {
     // Two distinct workers running in the same parent session (parent_sess).
     // Each worker has its own SDK AgentSession (worker_a, worker_b). The
     // engine emits a budget_warning with session_id=parent_sess and
@@ -171,13 +179,20 @@ describe("topology and identity state", () => {
       event("a2", 2, "parent_sess", "budget_warning", { scope: "worker", resource: "tokens", remaining: 200, cap: 1000, interventionAvailable: false, session_id: "worker_b" }),
     ];
     const out = buildInterventionBySession(events);
-    // Without the Wave 7 fix, both events would collide on key=parent_sess
-    // and only the last value (false) would be visible — worker_a's
-    // rescue buttons would be wrongly disabled. With the fix, each
-    // worker gets its own map entry.
+    // Per-worker keys stay distinct — without the Wave 7 fix both events
+    // would collide on key=parent_sess and only the last value (false)
+    // would be visible.
     expect(out.get("worker_a")).toBe(true);
     expect(out.get("worker_b")).toBe(false);
-    expect(out.has("parent_sess"), "parent session_id is NOT used as the key when payload.session_id is present").toBe(false);
-    expect(out.size).toBe(2);
+    // The parent key holds the MOST-RECENT worker's flag (latest event
+    // wins, same rule as the worker keys). The row builder at
+    // `scoped-agents.ts` reads this key. In the multi-worker case the
+    // parent's row gets the most recent worker's flag; the per-worker
+    // child rows would need a per-worker sessionId plumbed through
+    // `buildAgentRow` to read the worker key directly. That's a future
+    // improvement; the parent alias is enough to make the gate engage.
+    expect(out.has("parent_sess"), "parent session_id is also written as a side alias so scoped-agents.ts row lookup works").toBe(true);
+    expect(out.get("parent_sess")).toBe(false); // last event wins
+    expect(out.size).toBe(3);
   });
 });
