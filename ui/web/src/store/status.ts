@@ -50,6 +50,17 @@ export function buildInterventionBySession(events: HiveEvent[]): InterventionByS
     // "latest" keeps the reducer monotonic in the face of any future
     // mid-session policy swap (e.g. a tool re-arming the strategy).
     out.set(workerSessionId, flag);
+    // Wave 7.5 F13 fixup: also write the entry under the parent's session id
+    // (when it differs from the worker key). The row builder at
+    // `scoped-agents.ts` looks up the flag by the parent's session id
+    // because the row's `session_id` field is the parent (the topology
+    // describes the parent's team, not the worker's own session). Without
+    // this alias every row's `interventionAvailable` is undefined and the
+    // `OperatorCommands` compact-strategy gate never engages. The worker
+    // key above still keeps the per-worker distinction intact for any
+    // future consumer that wants it; the parent key is the alias the
+    // current UI looks up. Cost: one extra Map.set per event.
+    if (workerSessionId !== e.session_id) out.set(e.session_id, flag);
   }
   return out;
 }
