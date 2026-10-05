@@ -283,6 +283,15 @@ export interface AgentRuntime {
   startedAt?: number;
   timer?: ReturnType<typeof setInterval>;
   session?: any;
+  // Last budget-pre-flight rejection the dispatcher observed for
+  // this agent. Populated when `delegateAgent` throws
+  // `BudgetExhaustedError` (pre-flight gate refused). Cleared on
+  // the next successful delegation. Read by the
+  // `hive_explain_rejection` LLM tool so the orchestrator can
+  // diagnose a failed `delegate_agent` call without re-running the
+  // gate. The `at` field is an ISO 8601 timestamp so the tool
+  // can warn if the rejection is stale.
+  lastRejection?: { reason: string; scope: BudgetBlock["scope"]; resource: BudgetBlock["resource"]; remaining: BudgetBlock["remaining"]; limit: BudgetBlock["limit"]; at: string };
 }
 
 export interface SessionState {

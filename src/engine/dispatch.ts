@@ -462,6 +462,20 @@ export async function dispatchAgent(
       // legacy {output, exitCode: 1} shape so the delegate_agent tool caller
       // gets a failed tool result per Pi docs §2.
       releaseWorkerSlot(state);
+      // Record the rejection on the runtime so the
+      // hive_explain_rejection LLM tool can answer "why was my
+      // delegation refused" without re-running the pre-flight
+      // gate. The `at` field lets the tool warn about stale
+      // rejections. Cleared on the next successful delegation
+      // (post-success status flip below).
+      runtime.lastRejection = {
+        reason: error.reason,
+        scope: error.scope,
+        resource: error.resource,
+        remaining: error.remaining,
+        limit: error.limit,
+        at: new Date().toISOString(),
+      };
       emitHiveEvent(state, "budget_exhausted", {
         agent: runtime.config.name,
         resource: error.resource,
@@ -566,6 +580,11 @@ export async function dispatchAgent(
   runtime.elapsedMs = 0;
   runtime.runCount++;
   runtime.startedAt = Date.now();
+  // Clear the prior rejection — a new delegation has started,
+  // so the hive_explain_rejection tool should report a fresh
+  // observation. The next delegation that fails will repopulate
+  // this field in the BudgetExhaustedError catch.
+  delete runtime.lastRejection;
   // timeoutMs is the one budget-shaped field still consumed from
   // effectiveWorkerGovernance rather than from resolveWorkerBudgetPolicy —
   // WorkerBudgetPolicy models caps (token/cost/runs/depth), not concurrency
