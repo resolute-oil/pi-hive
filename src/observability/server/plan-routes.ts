@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, readdir } from "node:fs/promises";
 import { join, relative } from "node:path";
 import * as openspec from "../../engine/openspec";
-import { latestVerdict, latestVerdictExcludingHumanGreen, listVerdicts } from "./db";
+import { hasHumanApproval, latestVerdict, latestVerdictExcludingHumanGreen, listVerdicts } from "./db";
 
 // OpenSpec-backed read routes for the dashboard. CLI-backed reads are async,
 // content-versioned, and shared across identical concurrent requests so they
@@ -148,11 +148,14 @@ export interface PlanDetail {
   files: string[];
   validation: { passed: boolean; failed: number; issues: openspec.ValidateIssue[] };
   artifactsReady: boolean;
-  // Gated to isExecutionGateOpen (artifacts ready + validation passes +
-  // every artifact has a current human approval). The dashboard uses this
-  // for the green "ready to execute" pill; `artifactsReady` alone stays as
-  // the "artifacts ready, awaiting human approval" signal so the pill can
-  // render in a neutral pending state until approval completes.
+  // Gated on a current human approval (reviewer="ui", verdict="green" in
+  // the SQLite plan_verdicts ledger) for the change. The dashboard uses
+  // this for the green "ready to execute" pill; `artifactsReady` alone
+  // stays as the "artifacts ready, awaiting human approval" signal so the
+  // pill can render in a neutral pending state until approval completes.
+  // OpenSpec validation is enforced separately at dispatch time via
+  // isExecutionGateOpen (see commands.ts), not here — the dashboard's
+  // pill is a display-time hint, not the load-bearing gate.
   executionReady: boolean;
   taskProgress: openspec.ExecutionTaskProgress[];
   verdicts: ReturnType<typeof listVerdicts>;
@@ -194,8 +197,18 @@ export async function planDetail(cwd: string, changeId: string, options: PlanRou
     nextReady: loaded.detail.nextReady,
     files: openspec.listArtifacts(cwd, changeId),
     validation: loaded.validation,
-    artifactsReady: openspec.isReadyToExecuteWithValidation(cwd, changeId, loaded.validation),
-    executionReady: openspec.isExecutionGateOpen(cwd, changeId),
+    // `artifactsReady` is the authoring check only — tasks.md is materially
+    // present. OpenSpec validation is intentionally NOT part of this field;
+    // it is enforced at dispatch time via isExecutionGateOpen, and a failing
+    // validate run should not turn the dashboard's "ready" pill into
+    // "validation pending" (the validation result is rendered separately as
+    // `validation.passed` + `validation.issues`).
+    artifactsReady: openspec.hasTasks(cwd, changeId),
+    // `executionReady` flips on once a human approval is recorded. Computed
+    // from the SQLite ledger and the authored-artifacts check above — no
+    // additional CLI calls, so concurrent planDetail calls coalesce cleanly
+    // via the cached `loaded` (Fix 2 in the after-action report).
+    executionReady: openspec.hasTasks(cwd, changeId) && hasHumanApproval(changeId, cwd),
     taskProgress: openspec.executionTaskProgress(cwd, changeId),
     verdicts: listVerdicts(changeId, cwd),
   };
