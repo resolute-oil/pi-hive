@@ -1657,6 +1657,18 @@ export function latestVerdictExcludingHumanGreen(changeId: string, cwd?: string)
   return all.length > 0 ? all[all.length - 1] : null;
 }
 
+// Whether the dashboard review surface has recorded a human approval
+// (`reviewer = "ui"`, `verdict = "green"`) for the change. This is the
+// SQLite ledger the dashboard writes via review-wiring.ts; the per-artifact
+// file-system approval records are a separate authority used by
+// isExecutionGateOpen / isApprovedForExecution (dispatch). The two stay
+// in sync for genuine dashboard approvals, but the SQLite row is the
+// cheaper signal for the dashboard's `executionReady` field, which is a
+// display-time hint rather than a dispatch gate.
+export function hasHumanApproval(changeId: string, cwd?: string): boolean {
+  return listVerdicts(changeId, cwd).some((v) => v.reviewer === "ui" && v.verdict === "green");
+}
+
 export interface PlanApprovalRow {
   id: string;
   changeId: string;
