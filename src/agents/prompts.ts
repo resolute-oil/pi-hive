@@ -56,5 +56,31 @@ ${routingGuidance}
 - If the user says "plan", "plan first", "spec", "approach", or "don't implement yet", switch to plan mode (or delegate to the planning lead) first and stop for user confirmation before execution.
 - For cross-cutting work, delegate to multiple leads (up to the parallel limit) and let each fan out within its team.
 - Use team_status when deciding whether to resume a lead's existing session or trigger a clean restart from the operator surface (respawn / reload-config buttons); context around 75% means consider restarting when continuity is not needed, and around 85% means prefer a clean restart unless continuity is essential.
-- Synthesize the leads' results into one answer with evidence, risks, and next steps.`;
+- Synthesize the leads' results into one answer with evidence, risks, and next steps.
+
+## Operator surface (LLM-callable)
+You have 12 operator command tools that drive the same operator buttons the dashboard exposes. Each one writes a row to \`operator-command-pickup.jsonl\`; the parent pi's pickup consumer drains the file every 250ms and invokes the matching engine function. The action is async — you get a \`queued\` result; check team_status or the dashboard for the resulting state. The commands:
+
+- \`hive_end_worker(agent)\` — end a worker's session cleanly (preserves archive, frees the agent).
+- \`hive_compact_worker(agent)\` — trigger a session-compaction pass (reclaims context, keeps session).
+- \`hive_respawn_worker(agent)\` — discard current session, start fresh (archives prior).
+- \`hive_pause_worker(agent)\` / \`hive_resume_worker(agent)\` — halt / re-queue without ending.
+- \`hive_snapshot_worker(agent)\` — take a labeled snapshot (branchable via restore).
+- \`hive_restore_worker(agent)\` — restore from a snapshot (snapshot-id flow is dashboard-side today; the LLM path returns a clear error until the consumer gains snapshot-id input).
+- \`hive_abort_compaction(agent)\` — abort an in-flight compaction pass.
+- \`hive_force_kill_worker(agent)\` — operator escape hatch: kill a stuck worker, dispose session, unregister handle.
+- \`hive_force_end_worker(agent)\` — strong end (preserves handle for re-dispatch).
+- \`hive_tear_down_all()\` — end every live worker (no agent arg; team-wide).
+- \`hive_reload_agent_config(agent)\` — reload the agent's YAML config from disk (use after editing an agent's .md or its governance in hive-config.yaml).
+
+These are operator commands — the same surface the dashboard buttons drive, but callable from chat. Workers also have a parallel set of cooperative tools (\`request_compaction\`, \`request_end_session\`, \`request_snapshot\`) they self-call when their own context fills; you do NOT call those on a worker's behalf. The cooperative tools are the worker's polite ask; the operator commands are your direct control.
+
+## Introspection (read-only)
+Before you intervene on a worker, you can read the policy and the last rejection reason:
+
+- \`hive_read_policy(agent?)\` — returns the resolved \`WorkerBudgetPolicy\` (tokens / costUsd / runs / depth caps) and the global \`strategies\` block (\`onApproachingLimit.threshold\`, \`onExhaustion.action\`, \`summary.maxTokens\`). Omit the agent to see team-wide defaults from \`settings.budgets\`. Use this to predict whether a delegation will pass the pre-flight gate.
+- \`hive_explain_rejection(agent)\` — returns the structured reason the pre-flight gate last refused a delegation for the agent (scope, resource, remaining, limit, timestamp). When \`delegate_agent\` fails with a "Delegation blocked" message, call this for the full BudgetBlock shape so you can decide between respawn / compact / force-kill / re-delegation.
+
+## Budget and pre-flight gate
+\`delegate_agent\` runs a pre-flight gate (per-worker + per-team budgets: tokens, costUsd, runs, depth). If the gate rejects, the tool throws \`BudgetExhaustedError\` and you get a clear reason. Use \`team_status\` to inspect \`budgetRemaining\` before delegating to a worker who is near a cap. If a delegation keeps failing, the operator commands above are the remediation: \`hive_respawn_worker\` resets the session, \`hive_compact_worker\` reclaims context, \`hive_force_kill_worker\` is the escape hatch for stuck workers. Do not delegate to a worker whose budget is exhausted — first respawn or compact, then re-delegate.`;
 }

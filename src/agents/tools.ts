@@ -21,6 +21,8 @@ import * as openspec from "../engine/openspec";
 import { agentRef, agentRoster, resolveRuntime } from "../engine/agent-lookup";
 import { agentSlug } from "../core/utils";
 import { budgetRemaining, effectiveWorkerGovernance } from "../engine/budget/policy";
+import { queueOperatorCommand } from "../engine/budget/operator-command-queue";
+import { resolveWorkerBudgetPolicy } from "../engine/budget/strategy";
 
 type ToolUpdate = AgentToolUpdateCallback<object>;
 // Replaced the local `ToolRenderOptions` shape with the SDK's
@@ -504,6 +506,260 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
         const detail = openspec.changeDetail(ctx.cwd, changeId);
         const next = detail?.nextReady ? ` (next artifact: ${detail.nextReady})` : "";
         return { content: [{ type: "text", text: `Active change set to "${changeId}"${next}.` }], details: { ok: true, changeId, detail } };
+      },
+    }));
+  }
+
+  // ── LLM tool gap (Wave `refactor/llm-tool-gap`) ────────────────────────
+  // The 12 operator command tools. Each one writes a row to
+  // `operator-command-pickup.jsonl` (the same file the dashboard's
+  // 11-button UI uses). The parent pi's pickup consumer
+  // (`src/integration/operator-pickup.ts`) drains the file on a
+  // 250ms tick and invokes the matching engine function. The LLM
+  // tool is thin: validate input against the same allow-list the
+  // HTTP handler enforces, write a row, return success. The
+  // command is async (the model does not wait for the actual
+  // operator action to complete).
+  //
+  // Gated to `callerType === "lead"` so only the orchestrator (and
+  // any other `agentType: "lead"` agent) sees these tools. Workers
+  // typed {coder, tester, reviewer, planner} do NOT get them — they
+  // have their own cooperative tools (request_compaction,
+  // request_end_session, request_snapshot) for self-call.
+  if (callerType === "lead") {
+    // Shared schema for tools that take a single worker name. Some
+    // commands (tear-down-all) omit the agent; the optional
+    // description tells the LLM to pass an empty/missing agent
+    // for team-wide commands. The roster is summarized in the
+    // system prompt so the LLM can pick a valid name without
+    // guessing.
+    const workerNameSchema = Type.String({ description: "Configured agent name (the same identifier used by delegate_agent and team_status). Must be in the configured roster." });
+
+    // Shared execute body: validate the agent is configured, write
+    // the row, return success. Mirrors the dashboard HTTP handler's
+    // validation order: command in allow-list, agent name present
+    // and within the 120-char limit, then the write. The LLM
+    // gets a clear "no such agent" message before the row is
+    // queued so model-side retries are informed.
+    const executeOperatorCommand = (command: string, agent: string | undefined, summary: string) => {
+      const trimmed = String(agent || "").trim();
+      const requestedAt = new Date().toISOString();
+      const result = queueOperatorCommand(state, trimmed, command, requestedAt);
+      if (!result.ok) {
+        return {
+          content: [{ type: "text" as const, text: `${summary} failed: ${result.error}` }],
+          details: { ok: false, status: "rejected", command, agent: trimmed, error: result.error },
+          isError: true,
+        };
+      }
+      return {
+        content: [{
+          type: "text" as const,
+          text: `${summary} queued at ${result.requestedAt}. The parent pi's pickup consumer will invoke the operator command within ~250ms. The action is async — check team_status or the dashboard for the resulting state.`,
+        }],
+        details: { ok: true, status: "queued", command, agent: trimmed, requestedAt: result.requestedAt },
+      };
+    };
+
+    typeScopedTools.push(defineTool({
+      name: "hive_end_worker",
+      label: "End Worker Session",
+      description: "End a worker's current session cleanly. The session is archived (recoverable via restore) but the agent becomes idle. Use when a worker has finished its task and you want to free it for re-dispatch, or when a long-running session has produced its final answer. Prefer this over force_end_worker — force_end is the operator escape hatch for stuck sessions.",
+      parameters: Type.Object({ agent: workerNameSchema }),
+      async execute(_id, params) {
+        return executeOperatorCommand("end", (params as { agent?: string }).agent, "End worker session");
+      },
+    }));
+
+    typeScopedTools.push(defineTool({
+      name: "hive_compact_worker",
+      label: "Compact Worker Session",
+      description: "Trigger a session-compaction pass on a worker's current session. The session is summarized, older turns are dropped, and the worker's context window is reclaimed. Use when a worker's contextPct is high but you want to keep the session alive (vs respawn which starts fresh). Honors policy.strategies.summary.maxTokens if configured.",
+      parameters: Type.Object({ agent: workerNameSchema }),
+      async execute(_id, params) {
+        return executeOperatorCommand("compact", (params as { agent?: string }).agent, "Compact worker session");
+      },
+    }));
+
+    typeScopedTools.push(defineTool({
+      name: "hive_respawn_worker",
+      label: "Respawn Worker",
+      description: "Discard the worker's current session and start fresh. The prior session is archived (recoverable via restore). Use when a worker has accumulated context you want to reset, when the previous session is no longer useful, or when you want a clean slate before a new task. This is the LLM-side equivalent of the dashboard's respawn button.",
+      parameters: Type.Object({ agent: workerNameSchema }),
+      async execute(_id, params) {
+        return executeOperatorCommand("respawn", (params as { agent?: string }).agent, "Respawn worker");
+      },
+    }));
+
+    typeScopedTools.push(defineTool({
+      name: "hive_pause_worker",
+      label: "Pause Worker",
+      description: "Pause a worker's session without ending it. The worker stops processing new tasks but its session is preserved. Use when a worker is mid-delegation and you need to halt further work (e.g. before a config change, before a bug fix lands). Pair with hive_resume_worker to continue.",
+      parameters: Type.Object({ agent: workerNameSchema }),
+      async execute(_id, params) {
+        return executeOperatorCommand("pause", (params as { agent?: string }).agent, "Pause worker");
+      },
+    }));
+
+    typeScopedTools.push(defineTool({
+      name: "hive_snapshot_worker",
+      label: "Snapshot Worker Session",
+      description: "Take a labeled snapshot of a worker's current session. The snapshot is branchable — future restore calls can return to this point. Use before risky changes (e.g. before respawn or compact) so you have a fallback. Snapshots are persisted to the worker's session file.",
+      parameters: Type.Object({ agent: workerNameSchema }),
+      async execute(_id, params) {
+        return executeOperatorCommand("snapshot", (params as { agent?: string }).agent, "Snapshot worker session");
+      },
+    }));
+
+    typeScopedTools.push(defineTool({
+      name: "hive_restore_worker",
+      label: "Restore Worker Session",
+      description: "Restore a worker's session from a prior snapshot. Currently the LLM-side path does not surface a snapshot-id flow (the consumer rejects restores without a snapshot id); the dashboard's restore button is the supported path. Provided here for symmetry with the other operator commands; the call will fail with a clear error until the consumer gains a snapshot-id input.",
+      parameters: Type.Object({ agent: workerNameSchema }),
+      async execute(_id, params) {
+        return executeOperatorCommand("restore", (params as { agent?: string }).agent, "Restore worker session");
+      },
+    }));
+
+    typeScopedTools.push(defineTool({
+      name: "hive_resume_worker",
+      label: "Resume Worker",
+      description: "Resume a paused worker. The worker re-enters the active queue and can take new tasks. Use after a hive_pause_worker to continue a halted session, or after config changes that required the worker to be off the queue.",
+      parameters: Type.Object({ agent: workerNameSchema }),
+      async execute(_id, params) {
+        return executeOperatorCommand("resume", (params as { agent?: string }).agent, "Resume worker");
+      },
+    }));
+
+    typeScopedTools.push(defineTool({
+      name: "hive_abort_compaction",
+      label: "Abort Worker Compaction",
+      description: "Abort an in-flight compaction on a worker. Use when a compaction is hung or producing bad summaries and you want to keep the un-compacted session. Pair with hive_respawn_worker if you want a fresh start instead of an aborted one.",
+      parameters: Type.Object({ agent: workerNameSchema }),
+      async execute(_id, params) {
+        return executeOperatorCommand("abort-compaction", (params as { agent?: string }).agent, "Abort worker compaction");
+      },
+    }));
+
+    typeScopedTools.push(defineTool({
+      name: "hive_force_kill_worker",
+      label: "Force Kill Worker",
+      description: "Operator escape hatch: forcibly kill a stuck worker. The session is disposed, the worker handle is unregistered, and the worker becomes unavailable until a new dispatch re-creates the handle. Use ONLY when the worker is unresponsive and normal end/pause paths are not working. Prefer hive_force_end_worker when possible (it preserves the handle for re-dispatch).",
+      parameters: Type.Object({ agent: workerNameSchema }),
+      async execute(_id, params) {
+        return executeOperatorCommand("force-kill", (params as { agent?: string }).agent, "Force kill worker");
+      },
+    }));
+
+    typeScopedTools.push(defineTool({
+      name: "hive_force_end_worker",
+      label: "Force End Worker",
+      description: "Force-end a worker's session when normal end is not working. Unlike force_kill, the worker handle is preserved (the next dispatch can re-mount it). Use as a stronger end when a worker is hung but you want to keep the agent's handle around.",
+      parameters: Type.Object({ agent: workerNameSchema }),
+      async execute(_id, params) {
+        return executeOperatorCommand("force-end", (params as { agent?: string }).agent, "Force end worker");
+      },
+    }));
+
+    typeScopedTools.push(defineTool({
+      name: "hive_tear_down_all",
+      label: "Tear Down All Workers",
+      description: "Tear down ALL live workers in one operator command. Each worker's session is ended (non-forced). Use at the end of a hive cycle when you want a clean exit, or when the team is over-budget and you want to halt everything. The team is the orchestrator's runtimes map; this is the operator's 'shutdown everything' button.",
+      parameters: Type.Object({}),
+      async execute(_id, _params) {
+        // tear-down-all ignores the per-row agent; the consumer
+        // iterates the workerHandles map. Pass empty string as
+        // the agent — validateCommand allows this for
+        // tear-down-all.
+        return executeOperatorCommand("tear-down-all", "", "Tear down all workers");
+      },
+    }));
+
+    typeScopedTools.push(defineTool({
+      name: "hive_reload_agent_config",
+      label: "Reload Agent Config",
+      description: "Reload an agent's YAML config from disk (.pi/hive/agents/<slug>.md and the team's hive-config.yaml). The next delegate_agent call sees the updated runtime.config (domain, tools, model, governance, agentType, ...). Use after editing an agent's .md file or its governance block in hive-config.yaml. The T13.0 sunset removed the legacy `fresh` parameter on delegate_agent, so this is the only path to pick up config edits without restarting the orchestrator. The command is idempotent — calling it twice with no edits between is a no-op.",
+      parameters: Type.Object({ agent: workerNameSchema }),
+      async execute(_id, params) {
+        return executeOperatorCommand("hive_reload_agent_config", (params as { agent?: string }).agent, "Reload agent config");
+      },
+    }));
+
+    // ── Introspection tools (LLM tool gap, should-have) ───────────
+    // These are the "read" half of the operator surface: the
+    // orchestrator LLM needs to know what policy is in effect and
+    // why a delegation was rejected, not just the cap values from
+    // team_status. Both are gated to leads (orchestrators) so
+    // workers do not see them — the policy surface includes
+    // per-team cap information that is meant for the lead only.
+
+    typeScopedTools.push(defineTool({
+      name: "hive_read_policy",
+      label: "Read Effective Policy",
+      description: "Read the effective budget policy for an agent (or the team-wide defaults when no agent is given). Returns the resolved WorkerBudgetPolicy — tokens / costUsd / runs / depth caps and the strategies block (onApproachingLimit.threshold, onExhaustion.action, summary.maxTokens). Use this when you want to know what the pre-flight gate will enforce BEFORE you delegate, especially after editing an agent's .md or hive-config.yaml. The agent argument is optional: omit it to see the team-wide defaults.",
+      parameters: Type.Object({
+        agent: Type.Optional(Type.String({ description: "Configured agent name. Omit to read the team-wide defaults from settings.budgets." })),
+      }),
+      async execute(_id, params) {
+        if (!state.config) return { content: [{ type: "text" as const, text: "hive is not configured" }], details: { ok: false } };
+        const agentParam = String((params as { agent?: string }).agent || "").trim();
+        if (!agentParam) {
+          // Team defaults: read global budgets (no per-agent merge).
+          const strategies = state.config.settings?.budgets?.strategies;
+          const policy = resolveWorkerBudgetPolicy(state.config, "__team__");
+          return {
+            content: [{ type: "text" as const, text: `Team-wide budget policy (settings.budgets):\n\n${JSON.stringify({ policy, strategies }, null, 2)}` }],
+            details: { ok: true, agent: null, policy, strategies },
+          };
+        }
+        const runtime = resolveRuntime(state, agentParam);
+        if (!runtime) {
+          return { content: [{ type: "text" as const, text: `Unknown agent "${agentParam}". Available: ${agentRoster(state)}.` }], details: { ok: false } };
+        }
+        // The resolver keys by exact config.name; use the runtime's
+        // canonical name so a per-agent override applies regardless
+        // of how the LLM spelled the agent (slug vs display name).
+        const policy = resolveWorkerBudgetPolicy(state.config, runtime.config.name);
+        const strategies = state.config.settings?.budgets?.strategies;
+        const text = JSON.stringify({ agent: runtime.config.name, policy, strategies }, null, 2);
+        return {
+          content: [{ type: "text" as const, text: `Effective policy for ${runtime.config.name}:\n\n${text}` }],
+          details: { ok: true, agent: runtime.config.name, policy, strategies },
+        };
+      },
+    }));
+
+    typeScopedTools.push(defineTool({
+      name: "hive_explain_rejection",
+      label: "Explain Last Rejection",
+      description: "Return the reason the pre-flight gate last refused a delegation for the given agent. The dispatcher records the BudgetExhaustedError on the agent's runtime when delegate_agent is blocked (worker/team cap exceeded). Use this when delegate_agent returns a failed result and you want a structured explanation (scope, resource, remaining, limit, timestamp) so you can decide between respawn / compact / force-kill / re-delegation. Returns a clear 'no rejection recorded' message when the agent has not been refused since the last successful delegation.",
+      parameters: Type.Object({ agent: workerNameSchema }),
+      async execute(_id, params) {
+        const agent = String((params as { agent?: string }).agent || "").trim();
+        if (!agent) return { content: [{ type: "text" as const, text: "agent is required" }], details: { ok: false } };
+        const runtime = resolveRuntime(state, agent);
+        if (!runtime) {
+          return { content: [{ type: "text" as const, text: `Unknown agent "${agent}". Available: ${agentRoster(state)}.` }], details: { ok: false } };
+        }
+        const rejection = runtime.lastRejection;
+        if (!rejection) {
+          return {
+            content: [{ type: "text" as const, text: `No pre-flight rejection recorded for ${agent} since the last successful delegation. The agent is currently delegatable.` }],
+            details: { ok: true, agent, rejection: null },
+          };
+        }
+        const ageMs = Date.now() - Date.parse(rejection.at);
+        const ageLabel = ageMs < 60_000 ? `${Math.round(ageMs / 1000)}s ago` : `${Math.round(ageMs / 60_000)}m ago`;
+        const text = `Last pre-flight rejection for ${agent} (${ageLabel}, at ${rejection.at}):\n\n` +
+          `- reason: ${rejection.reason}\n` +
+          `- scope: ${rejection.scope}\n` +
+          `- resource: ${rejection.resource}\n` +
+          `- remaining: ${JSON.stringify(rejection.remaining)}\n` +
+          `- limit: ${JSON.stringify(rejection.limit)}`;
+        return {
+          content: [{ type: "text" as const, text }],
+          details: { ok: true, agent, rejection, ageMs },
+        };
       },
     }));
   }
