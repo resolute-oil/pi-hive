@@ -170,6 +170,7 @@ export function buildEventStatus(events: HiveEvent[]): AgentStatusBySession {
       case "distill_end":
       case "budget_warning":
       case "budget_exhausted":
+      case "budget_ledger":
       case "queue_update":
       case "review_verdict":
       case "plan_approval":
