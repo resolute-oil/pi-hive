@@ -32,6 +32,7 @@ import type { AgentSession, AgentSessionEvent, ExtensionToolContext, SessionStat
 import type { BudgetLedger } from "./ledger";
 import type { HiveState, WorkerBudgetPolicy } from "../../core/types";
 import { emitHiveEvent } from "../observability";
+import { tokensForInclude } from "./policy";
 
 // Read threshold + action from the policy's optional Strategies block (per
 // §2.13 C5 v2 wiring). Falls back to the legacy defaults (0.20 warning,
@@ -160,16 +161,26 @@ export function buildBudgetToolCallHandler(agentName: string) {
 
     // Compute remaining against the caps in policy.worker. Either cap
     // being absent means "unlimited" → do not block on that dimension.
+    //
+    // Wave-budget-include-filter: the tokens comparison honors the
+    // resolved policy's `include` list (default ["input", "output"]) via
+    // `tokensForInclude` instead of comparing `stats.tokens.total` (which
+    // folds cacheRead / cacheWrite in per the SDK contract). Without this
+    // filter, a worker with high cache hits would get blocked mid-run
+    // even when the dashboard's "tokens used" counter (which DOES honor
+    // the scope) shows it well under cap.
     const stats = budgetCtx.session.getSessionStats();
     const workerTokensCap = budgetCtx.policy.worker.tokens?.cap;
     const workerCostCap = budgetCtx.policy.worker.costUsd?.cap;
-    const tokensRemaining = workerTokensCap !== undefined ? workerTokensCap - stats.tokens.total : Infinity;
+    const workerTokensInclude = budgetCtx.policy.worker.tokens?.include ?? ["input", "output"];
+    const tokensUsed = tokensForInclude(stats, workerTokensInclude);
+    const tokensRemaining = workerTokensCap !== undefined ? workerTokensCap - tokensUsed : Infinity;
     const costRemaining = workerCostCap !== undefined ? workerCostCap - stats.cost : Infinity;
     if (tokensRemaining > 0 && costRemaining > 0) return undefined;
 
     return {
       block: true,
-      reason: `Worker budget exhausted: tokens ${stats.tokens.total}/${workerTokensCap ?? "∞"}, cost $${stats.cost.toFixed(4)}/${workerCostCap ?? "∞"}`,
+      reason: `Worker budget exhausted: tokens ${tokensUsed}/${workerTokensCap ?? "∞"}, cost $${stats.cost.toFixed(4)}/${workerCostCap ?? "∞"}`,
       terminate: false,
     };
   };
