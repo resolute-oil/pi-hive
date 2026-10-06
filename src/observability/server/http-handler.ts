@@ -32,7 +32,7 @@ import {
 import { listPlans, planDetail, planFile } from "./plan-routes";
 import { resolveProjectCwd } from "./plan-bridge";
 import { handlePlanReview, isAuthorizedPlanReviewMutation } from "./review-wiring";
-import { clearProjectOverride, listProjectOverrides, setProjectOverride, writeOperatorCommandRequest } from "./db";
+import { clearProjectOverride, listProjectOverrides, OPERATOR_COMMAND_NAMES, setProjectOverride, writeOperatorCommandRequest } from "./db";
 import { OpenSpecCommandError } from "../../engine/openspec";
 import type {
   DashboardBootstrap,
@@ -168,9 +168,12 @@ export function createDashboardHttpHandler(options: DashboardHttpHandlerOptions 
         // parameter on `delegate_agent` (which used to call
         // `reloadAgentConfig` on every dispatch), so the only way to
         // reload an agent's YAML config is via this explicit operator
-        // command.
-        const ALLOWED = new Set(["end", "compact", "respawn", "pause", "snapshot", "restore", "resume", "abort-compaction", "force-kill", "force-end", "tear-down-all", "hive_reload_agent_config"]);
-        if (!ALLOWED.has(command)) return json({ error: `unknown command "${command}"` }, 400);
+        // command. The allow-list itself lives in
+        // `src/engine/budget/operator-command-queue.ts` (single source of
+        // truth shared with the LLM tools); db.ts re-exports it so this
+        // file imports from `./db` for dashboard-internal symbols.
+        const ALLOWED = new Set(OPERATOR_COMMAND_NAMES);
+        if (!ALLOWED.has(command as typeof OPERATOR_COMMAND_NAMES[number])) return json({ error: `unknown command "${command}"` }, 400);
         // 0..120 chars for the agent name; matches the existing identifier
         // hygiene (e.g. project-overrides uses the same cap on its label).
         if (agent.length > 120) return json({ error: "agent name too long" }, 400);

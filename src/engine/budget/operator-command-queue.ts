@@ -1,25 +1,29 @@
-// LLM tool gap (Wave `refactor/llm-tool-gap`) — Node-safe operator-command
-// queue helper.
+// Runtime-agnostic single source of truth for the
+// `operator-command-pickup.jsonl` writer, reader, and allow-list.
 //
-// The dashboard server's `writeOperatorCommandRequest`
-// (`src/observability/server/db.ts`) and the parent pi's pickup consumer
-// (`src/integration/operator-pickup.ts`) both speak the same
-// `operator-command-pickup.jsonl` shape. The LLM-callable operator command
-// tools in `src/agents/tools.ts` need the SAME producer side so the
-// existing consumer drains them unchanged. But `db.ts` is bun-only
-// (`bun:sqlite`) and the LLM tools run in the orchestrator's parent pi
-// (a Node process). This file is the Node-safe producer that mirrors the
-// dashboard's writer: same path resolution, same row shape, same 12-command
-// allow-list, same mode-0o600 file mode.
+// Two writers used to exist:
+//   1. `src/observability/server/db.ts:writeOperatorCommandRequest`
+//      (Bun runtime, dashboard server).
+//   2. `writeOperatorCommandRequest` in this file
+//      (Node runtime, LLM-callable tools in `src/agents/tools.ts`).
+// Both wrote the same `{id, agent, command, requestedAt}` row shape to
+// the same JSONL file. The parent-pi pickup loop
+// (`src/integration/operator-pickup.ts`) drains the file regardless of
+// origin — the producer identity is invisible to it. The two writers
+// shared no in-process state, so the appends were sequenced by the OS.
 //
-// The dashboard's `writeOperatorCommandRequest` is functionally equivalent;
-// the two writers share the file but never the in-process state, so the
-// appends are sequenced by the OS. The pickup consumer drains whichever
-// rows it finds — origin is invisible to it. A future consolidation (move
-// `writeOperatorCommandRequest` to this file) is straightforward but out of
-// scope here.
+// Wave `refactor/operator-writer-consolidation` collapsed the two
+// writers into this file. The dashboard server now re-exports
+// `writeOperatorCommandRequest`, `readOperatorCommandRequests`, and
+// `clearOperatorCommandRequests` from `db.ts` so its `http-handler.ts`
+// keeps its existing import shape. The dashboard's `bun:sqlite` logic
+// stays in `db.ts`; only the JSONL helpers moved.
+//
+// Path resolution, row shape, allow-list, and mode-0o600 file mode are
+// unchanged. The consumer (`operator-pickup.ts`) keeps its own allow-list
+// as a defense-in-depth check — that one is intentionally not centralized.
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { resolveRuntime } from "../agent-lookup";
@@ -36,10 +40,11 @@ export function operatorCommandQueuePath(): string {
 }
 
 // 12-command allow-list. Mirrors the consumer's ALLOWED_COMMANDS
-// (`src/integration/operator-pickup.ts:95`) and the dashboard HTTP
-// handler's ALLOWED set (`src/observability/server/http-handler.ts:172`).
-// Single source of truth lives here for the LLM-side validation; the
-// consumer's allow-list is a defense-in-depth check.
+// (`src/integration/operator-pickup.ts:95`) — the consumer keeps its
+// own copy as a defense-in-depth check; the dashboard HTTP handler
+// re-exports this set from `db.ts` and the LLM tools use it directly
+// for validation. This is the single source of truth for the
+// 12-command name set.
 export const OPERATOR_COMMAND_NAMES = [
   "end",
   "compact",
@@ -154,9 +159,10 @@ export function queueOperatorCommand(
   return { ok: true, requestedAt: result.requestedAt };
 }
 
-// Test seam: read the queue file's full contents. Mirrors the
-// `readOperatorCommandRequests` API in `db.ts`. Returns an empty
-// array when the file does not exist.
+// Test seam: read the queue file's full contents. Returns an empty
+// array when the file does not exist. Used by the dashboard server
+// (re-exported from `db.ts` as `readOperatorCommandRequests`) and by
+// the LLM-tool tests.
 export function readOperatorCommandQueue(): OperatorCommandRequest[] {
   const queuePath = operatorCommandQueuePath();
   if (!existsSync(queuePath)) return [];
@@ -171,4 +177,19 @@ export function readOperatorCommandQueue(): OperatorCommandRequest[] {
   } catch {
     return [];
   }
+}
+
+// Dashboard-side name for the read helper. `db.ts` re-exports this so
+// the dashboard server's call sites and tests keep importing from
+// `./db` without churn. Implementation is identical to
+// `readOperatorCommandQueue`; both names exist so test seams and
+// production callers each get a name that matches their context.
+export const readOperatorCommandRequests = readOperatorCommandQueue;
+
+// Best-effort unlink of the queue file. Returns void; never throws.
+// Used by the dashboard server's test seams (re-exported from
+// `db.ts`). The parent-pi consumer (`operator-pickup.ts`) drains +
+// unlinks in its own fs-based loop and does not import this helper.
+export function clearOperatorCommandRequests(): void {
+  try { unlinkSync(operatorCommandQueuePath()); } catch { /* best-effort */ }
 }
