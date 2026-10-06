@@ -137,6 +137,130 @@ export function checkContextConstraint(
   return undefined;
 }
 
+// Wave context-constraint (continuation) — team-tier context aggregate.
+// `TeamContextUsageLike` is the per-team live aggregate consumed by
+// `checkTeamContextConstraint`. The caller computes it by walking
+// `state.runtimes` (typically via `aggregateTeamContext` below) so this
+// gate stays pure and decoupled from the HiveState shape. Mirrors the
+// per-worker `ContextUsageLike` shape but adds a `membersCount` field so
+// the gate can distinguish "no team at all" (skip) from "team with all
+// members at zero tokens" (compare against the cap and let the cap
+// decide).
+export interface TeamContextUsageLike {
+  // Sum of `runtime.contextTokens` across all non-orchestrator team
+  // members that have a resolved context window. The numerator for
+  // both the nominal and the percentage comparison.
+  totalTokens: number;
+  // The smallest `runtime.contextWindow` across all team members. Used
+  // as the percentage denominator — the most conservative interpretation
+  // (if one worker has a 32K window and another has 200K, the team is
+  // constrained by the 32K worker's window). 0 when no member has a
+  // resolved window yet (graceful skip).
+  smallestWindow: number;
+  // Number of team members that contributed to `totalTokens` and
+  // `smallestWindow`. 0 when no member has a resolved context yet —
+  // the gate uses this to skip the check.
+  membersCount: number;
+}
+
+// Pure walk: sum the live context values across all team members in the
+// runtimes map. Returns the aggregate; when no runtimes are present (or
+// all are orchestrators, or no runtime has a resolved context window),
+// `membersCount=0` and the team-context check is skipped. Mirrors the
+// `teamUsage(branch)` walk on the branch (which is ledger-based for
+// tokens/cost/runs) but is runtime-based for context — `getContextUsage()`
+// is volatile and lives on the runtime, not on the ledger CustomEntry.
+export function aggregateTeamContext(
+  runtimes: Iterable<AgentRuntime>,
+): TeamContextUsageLike {
+  let totalTokens = 0;
+  let smallestWindow = Number.POSITIVE_INFINITY;
+  let membersCount = 0;
+  for (const runtime of runtimes) {
+    // Skip orchestrators — the team budget applies to worker members.
+    // The legacy `teamTotals` walk in `budgetRemaining` uses the same
+    // filter; match it so the two views are consistent.
+    if (runtime.config?.role === "orchestrator") continue;
+    const window = Number(runtime.contextWindow) || 0;
+    if (window <= 0) continue; // skip workers without a resolved context window
+    const tokens = Number(runtime.contextTokens) || 0;
+    totalTokens += tokens;
+    if (window < smallestWindow) smallestWindow = window;
+    membersCount += 1;
+  }
+  return {
+    totalTokens,
+    smallestWindow: membersCount === 0 ? 0 : smallestWindow,
+    membersCount,
+  };
+}
+
+// Team-tier context-window-fill gate. Mirrors `checkContextConstraint`
+// but compares the team aggregate against the constraint. Returns a
+// BudgetBlock describing the violation, or undefined when the team is
+// under the cap (or when the team has no live values yet — membersCount
+// 0, totalTokens 0, or smallestWindow 0). Pure — no I/O, no SDK. The
+// caller decides the per-dimension exhaustion action via
+// `resolveExhaustionAction(policy, "context")` (abort / compact / none).
+//
+// Design choices:
+//   - Nominal cap: `totalTokens >= cap` (e.g., 100K tokens across the
+//     team).
+//   - Percentage cap: `totalTokens / smallestWindow * 100 >= cap` on
+//     the 0–100 scale (e.g., 80% of the smallest worker's context
+//     window). The smallest window is the conservative denominator —
+//     the team is "full" when the sum of all workers' contexts
+//     exceeds the cap of the most-constrained worker.
+//   - The `include` list does NOT apply (per the brief design decision
+//     4 — `getContextUsage().tokens` is a single coherent number from
+//     the SDK).
+export function checkTeamContextConstraint(
+  teamCtx: TeamContextUsageLike,
+  constraint: ContextConstraint,
+): BudgetBlock | undefined {
+  // Graceful: no team members with resolved context, or no live values
+  // yet. Same skip pattern as the per-worker `checkContextConstraint`.
+  if (teamCtx.membersCount === 0) return undefined;
+  if (teamCtx.smallestWindow <= 0) return undefined;
+  if (teamCtx.totalTokens <= 0) return undefined;
+
+  if ("tokens" in constraint && constraint.tokens !== undefined) {
+    if (teamCtx.totalTokens >= constraint.tokens) {
+      return {
+        reason: `Team context budget exhausted: ${teamCtx.totalTokens}/${constraint.tokens} tokens of context across ${teamCtx.membersCount} worker(s)`,
+        scope: "team",
+        resource: "context",
+        remaining: { context: { tokens: 0, percent: 100 } },
+        limit: { context: { tokens: constraint.tokens } },
+      };
+    }
+    return undefined;
+  }
+
+  if ("percent" in constraint && constraint.percent !== undefined) {
+    // Percentage cap (0–100 scale). The denominator is the SMALLEST
+    // context window in the team — conservative; the team is "full"
+    // when the sum crosses the most-constrained worker's cap.
+    const currentPct = (teamCtx.totalTokens / teamCtx.smallestWindow) * 100;
+    if (currentPct >= constraint.percent) {
+      return {
+        reason: `Team context budget exhausted: ${currentPct.toFixed(1)}% of smallest context window (cap ${constraint.percent}%, ${teamCtx.totalTokens} tokens across ${teamCtx.membersCount} worker(s))`,
+        scope: "team",
+        resource: "context",
+        remaining: { context: { tokens: 0, percent: constraint.percent } },
+        limit: { context: { percent: constraint.percent } },
+      };
+    }
+    return undefined;
+  }
+
+  // Schema enforces "exactly one of tokens/percent is set" — reaching
+  // here is a programming error (the constraint object is empty or both
+  // fields were set). Match the per-worker helper: return undefined so
+  // a misconfigured constraint does NOT block the team.
+  return undefined;
+}
+
 // Pre-flight gate: returns a BudgetBlock describing the first violated cap
 // (worker or team scope; tokens/costUsd/runs/depth), or undefined when the
 // ledger + branch are under every configured cap. Pure — no I/O, no SDK.
@@ -149,12 +273,26 @@ export function checkContextConstraint(
 // pre-flight in worker-tools.ts:278 because no AgentSession is open yet at
 // that point — the mid-run gate (events.ts buildBudgetToolCallHandler) is
 // where the include-aware comparison fires during the run.
+//
+// `contextUsage` is optional — when supplied, the per-worker context check
+// (T4 from the prior wave) compares against the live SDK payload. When
+// absent, the per-worker context check is skipped (graceful — used at
+// pre-flight where no AgentSession is open yet).
+//
+// `teamContext` is optional — when supplied, the team-tier context
+// aggregate (sum across all team members, smallest context window as the
+// percentage denominator) is compared against `policy.team.context`.
+// When absent, the team-context check is skipped (graceful — used at
+// pre-flight where no runtimes are live yet). The team aggregate is
+// caller-computed (typically by `aggregateTeamContext(state.runtimes)`)
+// so this function stays pure and decoupled from the HiveState shape.
 export function checkBudgetPolicy(
   ledger: BudgetLedger,
   policy: WorkerBudgetPolicy,
   branch: SessionEntry[],
   stats?: SessionStats,
   contextUsage?: ContextUsageLike,
+  teamContext?: TeamContextUsageLike,
 ): BudgetBlock | undefined {
   // G-29 boundary check: a structurally-malformed policy (missing the
   // required `worker` field) raises TypeError so the dispatcher refuses with
@@ -267,6 +405,22 @@ export function checkBudgetPolicy(
         limit: { runs: teamCaps.runs.cap },
       };
     }
+  }
+
+  // Team.context (continuation of wave context-constraint). The pre-flight
+  // gate at delegation start has no live runtimes, so the caller passes
+  // `teamContext=undefined` and this check is skipped — same graceful
+  // pattern as the per-worker `contextUsage=undefined` skip above. The
+  // mid-run caller (events.ts) calls `aggregateTeamContext(state.runtimes)`
+  // to compute the aggregate before invoking this gate. The `include`
+  // list does NOT apply to context (per the brief design decision 4).
+  // Per-dimension exhaustion (`resolveExhaustionAction(policy, "context")`)
+  // is the caller's responsibility — the gate only signals that the
+  // cap was hit; the caller decides abort vs compact vs none. This
+  // mirrors the per-worker `checkContextConstraint` helper above.
+  if (teamContext !== undefined && teamCaps.context !== undefined) {
+    const teamCtxBlock = checkTeamContextConstraint(teamContext, teamCaps.context);
+    if (teamCtxBlock !== undefined) return teamCtxBlock;
   }
 
   return undefined;
