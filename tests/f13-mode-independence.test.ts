@@ -131,24 +131,44 @@ describe("F13 mode-independence (T13.3)", () => {
 
   test("the dashboard RPC handler's 11-command allow-list matches the brief", () => {
     // Mirror of the previous check on the server side. The handler builds
-    // a Set<String> allow-list inline at POST /operator-command. The set
-    // must contain exactly the 11 command names — no more, no fewer.
+    // a Set<String> allow-list at POST /operator-command. Wave
+    // `refactor/operator-writer-consolidation` consolidated the
+    // dashboard's writer into `src/engine/budget/operator-command-queue.ts`
+    // (runtime-agnostic, shared with the LLM tools). The handler now
+    // derives `ALLOWED` from the shared `OPERATOR_COMMAND_NAMES` export
+    // re-exported via `db.ts`. This test pins two structural facts:
+    //   1. The handler does NOT define the allow-list inline as a string
+    //      literal any more — it imports from the shared module. The
+    //      single source of truth lives there.
+    //   2. The shared `OPERATOR_COMMAND_NAMES` array contains every
+    //      command name in `ALL_OPERATOR_COMMANDS` (the 11 F13 brief
+    //      commands; `hive_reload_agent_config` is also present but is
+    //      outside the F13 scope and intentionally out of scope here).
     const handlerPath = fileURLToPath(new URL("../src/observability/server/http-handler.ts", import.meta.url));
     const handlerSrc = readFileSync(handlerPath, "utf8");
-    const allowedIdx = handlerSrc.indexOf('const ALLOWED = new Set([');
-    assert.notEqual(allowedIdx, -1, "ALLOWED set not found in http-handler.ts");
-    const allowedEnd = handlerSrc.indexOf("]);", allowedIdx);
-    const allowedEntries = (handlerSrc
-      .slice(allowedIdx, allowedEnd)
-      .match(/"([a-z-]+)"/g) || [])
+    // 1. Handler uses the shared export — no inline literal array.
+    const derivedIdx = handlerSrc.indexOf("new Set(OPERATOR_COMMAND_NAMES)");
+    assert.notEqual(derivedIdx, -1, "handler must derive ALLOWED from OPERATOR_COMMAND_NAMES (consolidation contract)");
+    assert.equal(
+      handlerSrc.indexOf('const ALLOWED = new Set(["'),
+      -1,
+      "handler must not hard-code the allow-list inline — single source of truth lives in operator-command-queue.ts",
+    );
+    // 2. The shared module's allow-list is a superset of the brief's
+    //    11 commands. Read it from disk so the assertion does not depend
+    //    on a runtime import.
+    const queuePath = fileURLToPath(new URL("../src/engine/budget/operator-command-queue.ts", import.meta.url));
+    const queueSrc = readFileSync(queuePath, "utf8");
+    const listStart = queueSrc.indexOf("export const OPERATOR_COMMAND_NAMES = [");
+    assert.notEqual(listStart, -1, "OPERATOR_COMMAND_NAMES export not found in operator-command-queue.ts");
+    const listEnd = queueSrc.indexOf("] as const;", listStart);
+    assert.notEqual(listEnd, -1, "OPERATOR_COMMAND_NAMES array body not terminated");
+    const sharedNames = (queueSrc
+      .slice(listStart, listEnd)
+      .match(/"([a-z_-]+)"/g) || [])
       .map((s) => s.slice(1, -1));
     for (const cmd of ALL_OPERATOR_COMMANDS) {
-      assert.ok(allowedEntries.includes(cmd), `RPC allow-list missing "${cmd}"`);
+      assert.ok(sharedNames.includes(cmd), `OPERATOR_COMMAND_NAMES missing "${cmd}"`);
     }
-    assert.equal(
-      allowedEntries.length,
-      ALL_OPERATOR_COMMANDS.length,
-      `RPC allow-list has ${allowedEntries.length} entries; expected exactly ${ALL_OPERATOR_COMMANDS.length}: ${[...allowedEntries].sort().join(", ")}`,
-    );
   });
 });

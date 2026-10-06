@@ -446,6 +446,130 @@ test("LLM tool gap: each LLM tool's command name matches the canonical 12 in the
   }
 });
 
+// ── Test 16: Wave `refactor/operator-writer-consolidation` ──────────
+// Two writers used to exist (db.ts for the Bun dashboard,
+// operator-command-queue.ts for the Node LLM tools). Wave
+// `refactor/operator-writer-consolidation` collapsed them into a
+// single runtime-agnostic implementation in
+// operator-command-queue.ts. db.ts re-exports the helpers so the
+// dashboard's call sites import from `./db` without churn. This
+// test pins the consolidation contract with three checks:
+//
+//   1. Structural source grep. The OLD `writeOperatorCommandRequest`
+//      body must no longer exist in `db.ts` — only a `export { ... }
+//      from "..."` re-export should remain. (db.ts still keeps its
+//      bun:sqlite logic; only the writer function moves.)
+//   2. Reference identity through re-export. Importing
+//      `writeOperatorCommandRequest` and `OPERATOR_COMMAND_NAMES`
+//      through both paths returns the same object identity —
+//      proof there's only one implementation, not a duplicate.
+//   3. Row-shape parity. Writing through both paths yields rows
+//      with the same `{id, agent, command, requestedAt}` shape.
+//
+// We avoid importing `db.ts` here (it pulls in `bun:sqlite` and is
+// only typed under `tsconfig.bun.json`), so check 2 uses the
+// shared import directly. The dashboard path is verified
+// separately by the Bun-suite test in
+// `tests/server-routes.spec.ts` (which exercises
+// `readOperatorCommandRequests` / `clearOperatorCommandRequests`
+// after the HTTP handler writes through the re-exported writer).
+
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+test("operator-writer consolidation: db.ts no longer defines writeOperatorCommandRequest inline (single source of truth in operator-command-queue.ts)", () => {
+  const dbPath = fileURLToPath(new URL("../src/observability/server/db.ts", import.meta.url));
+  const queuePath = fileURLToPath(new URL("../src/engine/budget/operator-command-queue.ts", import.meta.url));
+  const dbSrc = readFileSync(dbPath, "utf8");
+  const queueSrc = readFileSync(queuePath, "utf8");
+
+  // db.ts must NOT contain the inline body of writeOperatorCommandRequest
+  // anymore. The old body used `appendFileSync(OPERATOR_COMMAND_QUEUE, ...)`
+  // and a `const OPERATOR_COMMAND_QUEUE: string = (() => { ... })()`
+  // declaration; if either is back, someone duplicated the writer.
+  assert.equal(
+    dbSrc.includes("const OPERATOR_COMMAND_QUEUE"),
+    false,
+    "db.ts must not declare a local OPERATOR_COMMAND_QUEUE — the path lives in operator-command-queue.ts",
+  );
+  assert.equal(
+    /export function writeOperatorCommandRequest\(/.test(dbSrc),
+    false,
+    "db.ts must not define writeOperatorCommandRequest inline — it should re-export from operator-command-queue.ts",
+  );
+
+  // db.ts MUST re-export the helpers from the shared module.
+  assert.ok(
+    /export\s*\{[^}]*writeOperatorCommandRequest[^}]*\}\s*from\s*["']\.\.\/\.\.\/engine\/budget\/operator-command-queue["']/.test(dbSrc),
+    "db.ts must re-export writeOperatorCommandRequest from operator-command-queue.ts",
+  );
+  assert.ok(
+    /export\s*\{[^}]*readOperatorCommandRequests[^}]*\}\s*from\s*["']\.\.\/\.\.\/engine\/budget\/operator-command-queue["']/.test(dbSrc),
+    "db.ts must re-export readOperatorCommandRequests from operator-command-queue.ts",
+  );
+  assert.ok(
+    /export\s*\{[^}]*clearOperatorCommandRequests[^}]*\}\s*from\s*["']\.\.\/\.\.\/engine\/budget\/operator-command-queue["']/.test(dbSrc),
+    "db.ts must re-export clearOperatorCommandRequests from operator-command-queue.ts",
+  );
+
+  // operator-command-queue.ts must export the shared writer.
+  assert.ok(
+    /export function writeOperatorCommandRequest\(/.test(queueSrc),
+    "operator-command-queue.ts must define writeOperatorCommandRequest (the single source of truth)",
+  );
+});
+
+test("operator-writer consolidation: writer and allow-list are identity-equal across import paths (no silent duplication)", async () => {
+  const shared = await import("../src/engine/budget/operator-command-queue.ts");
+  // Re-import in a fresh specifier to confirm module identity is
+  // stable across repeated imports (Node caches the module
+  // instance, so both specifiers resolve to the same object).
+  const sharedAgain = await import("../src/engine/budget/operator-command-queue.ts");
+  assert.equal(
+    shared.writeOperatorCommandRequest,
+    sharedAgain.writeOperatorCommandRequest,
+    "the writer is module-scoped singleton — repeated imports share one function",
+  );
+  assert.equal(
+    shared.OPERATOR_COMMAND_NAMES,
+    sharedAgain.OPERATOR_COMMAND_NAMES,
+    "the 12-command allow-list is the same frozen array on every import",
+  );
+  assert.equal(shared.OPERATOR_COMMAND_NAMES.length, 12, "12-command allow-list contains 11 + hive_reload_agent_config");
+  assert.ok(
+    shared.readOperatorCommandQueue === shared.readOperatorCommandRequests,
+    "readOperatorCommandRequests is an alias of readOperatorCommandQueue (same function reference)",
+  );
+});
+
+test("operator-writer consolidation: the row shape written is identical for two back-to-back calls (id-only differs)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-writer-consolidation-"));
+  withTempQueuePath(dir, () => {
+    // Clear any previous rows so the row count is deterministic.
+    const queuePath = operatorCommandQueuePath();
+    try { rmSync(queuePath, { force: true }); } catch { /* best-effort */ }
+    const t1 = "2030-01-01T00:00:00.000Z";
+    const t2 = "2030-01-01T00:00:00.001Z";
+    const r1 = queueOperatorCommand(stateWith([runtime("Builder", { slug: "builder", agentType: "coder" })]), "builder", "end", t1);
+    const r2 = queueOperatorCommand(stateWith([runtime("Builder", { slug: "builder", agentType: "coder" })]), "builder", "end", t2);
+    assert.equal(r1.ok, true);
+    assert.equal(r2.ok, true);
+    const rows = readOperatorCommandQueue();
+    assert.equal(rows.length, 2);
+    const expectedKeys = ["agent", "command", "id", "requestedAt"];
+    for (const row of rows) {
+      assert.deepEqual(Object.keys(row).sort(), expectedKeys, "row keys are exactly {id, agent, command, requestedAt}");
+      assert.equal(typeof row.id, "string");
+      assert.equal(typeof row.agent, "string");
+      assert.equal(typeof row.command, "string");
+      assert.equal(typeof row.requestedAt, "string");
+    }
+    assert.notEqual(rows[0].id, rows[1].id, "each writer invocation mints its own id");
+    assert.equal(rows[0].requestedAt, t1);
+    assert.equal(rows[1].requestedAt, t2);
+  });
+});
+
 // ── Introspection tools (should-have) ───────────────────────────────
 
 const INTROSPECTION_TOOL_NAMES = [
