@@ -210,6 +210,22 @@ const DepthCap = Type.Object({
   cap: Type.Number({ minimum: 0 }),
 });
 
+// Context-window-fill constraint (wave context-constraint). Either a nominal
+// `tokens:` cap (absolute threshold against the SDK's `ContextUsage.tokens`)
+// OR a `percent:` cap (against the SDK's `ContextUsage.tokens / contextWindow
+// * 100` — 0-100 scale, NOT 0-1). The "exactly one" rule is enforced by the
+// post-typebox `enforceContextConstraint` walk in `validateBudgetsConfig`;
+// typebox itself accepts the optional-either form. Rejecting both fields at
+// the schema level would need a discriminated union with a `kind:` tag
+// (intrusive for users); rejecting both at the typebox level would need
+// `additionalProperties: false` plus a oneOf (verbose). Post-typebox
+// enforcement matches the pattern already used for `enforceResourceDiscriminator`
+// and `enforceWindowByTier`.
+const ContextConstraintSchema = Type.Object({
+  tokens: Type.Optional(Type.Number({ minimum: 0 })),
+  percent: Type.Optional(Type.Number({ minimum: 0, maximum: 100 })),
+});
+
 export const BudgetCap = Type.Union([TokensCap, CostUsdCap, RunsCap, DepthCap]);
 export type BudgetCap = Static<typeof BudgetCap>;
 
@@ -220,11 +236,13 @@ export const BudgetsConfigSchema = Type.Object({
     costUsd: Type.Optional(CostUsdCap),
     runs: Type.Optional(RunsCap),
     depth: Type.Optional(DepthCap),
+    context: Type.Optional(ContextConstraintSchema),
   }),
   perTeam: Type.Object({
     tokens: Type.Optional(TokensCap),
     costUsd: Type.Optional(CostUsdCap),
     runs: Type.Optional(RunsCap),
+    context: Type.Optional(ContextConstraintSchema),
   }),
   strategies: Type.Optional(Type.Object({
     onApproachingLimit: Type.Object({
@@ -236,6 +254,22 @@ export const BudgetsConfigSchema = Type.Object({
       action: Type.Union([Type.Literal("compact"), Type.Literal("abort"), Type.Literal("none")]),
       customInstructions: Type.Optional(Type.String()),
     }),
+    // Per-dimension exhaustion overrides (wave context-constraint). Optional
+    // so existing configs without these fields keep working unchanged. The
+    // resolver falls back to `onExhaustion.action` (then `"abort"`) when the
+    // per-dimension field is absent. Each accepts the same `action` enum as
+    // the global onExhaustion plus an optional `customInstructions` (parity
+    // with the global field). The "abort" / "compact" / "none" semantics are
+    // described in the global onExhaustion field; the per-dimension overrides
+    // are a slice of that, not a new behavior.
+    onTokenExhaustion: Type.Optional(Type.Object({
+      action: Type.Union([Type.Literal("compact"), Type.Literal("abort"), Type.Literal("none")]),
+      customInstructions: Type.Optional(Type.String()),
+    })),
+    onContextExhaustion: Type.Optional(Type.Object({
+      action: Type.Union([Type.Literal("compact"), Type.Literal("abort"), Type.Literal("none")]),
+      customInstructions: Type.Optional(Type.String()),
+    })),
     summary: Type.Object({
       maxTokens: Type.Number({ minimum: 0 }),
     }),
@@ -316,6 +350,12 @@ export function validateBudgetsConfig(value: unknown): asserts value is BudgetsC
   // already rejects wrong literals, but this check documents the contract
   // and acts as a safety net if the schema is ever relaxed.
   enforceResourceDiscriminator(value as BudgetsConfig);
+  // Wave context-constraint: the `context:` field is optional at the
+  // perWorker/perTeam tier, but when present it must set exactly one of
+  // `tokens:` or `percent:`. typebox's optional-either object can't enforce
+  // "exactly one" without a discriminator tag (intrusive for users), so we
+  // layer the structural check here, matching the pattern above.
+  enforceContextConstraint(value as BudgetsConfig);
 }
 
 // Window values allowed per (tier, resource). Per C6 the documented matrix
@@ -430,6 +470,27 @@ function enforceResourceDiscriminator(config: BudgetsConfig): void {
   check("perTeam", "tokens", config.perTeam.tokens, "tokens");
   check("perTeam", "costUsd", config.perTeam.costUsd, "costUsd");
   check("perTeam", "runs", config.perTeam.runs, "runs");
+}
+
+// Wave context-constraint: the `context:` field on perWorker/perTeam must
+// set exactly one of `tokens:` (nominal cap) or `percent:` (percentage cap on
+// the 0-100 scale). Both set, or neither set, are configuration mistakes
+// that the brief flags as a strict rejection. The check is tier-aware so
+// the error message points at the offending path.
+function enforceContextConstraint(config: BudgetsConfig): void {
+  const check = (tier: "perWorker" | "perTeam", ctx: { tokens?: number; percent?: number } | undefined): void => {
+    if (ctx === undefined) return;
+    const hasTokens = ctx.tokens !== undefined;
+    const hasPercent = ctx.percent !== undefined;
+    if (hasTokens && hasPercent) {
+      throw new Error(`budgets.${tier}.context: set either \`tokens:\` or \`percent:\` but not both.`);
+    }
+    if (!hasTokens && !hasPercent) {
+      throw new Error(`budgets.${tier}.context: must set either \`tokens:\` or \`percent:\`.`);
+    }
+  };
+  check("perWorker", config.perWorker.context);
+  check("perTeam", config.perTeam.context);
 }
 function enforceWindowByTier(config: BudgetsConfig): void {
   const check = (tier: "perWorker" | "perTeam", block: { tokens?: BudgetCap; costUsd?: BudgetCap } | undefined, allowed: ReadonlySet<string>): void => {
