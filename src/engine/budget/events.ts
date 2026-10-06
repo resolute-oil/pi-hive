@@ -30,9 +30,9 @@
 
 import type { AgentSession, AgentSessionEvent, ExtensionToolContext, SessionStats, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import type { BudgetLedger } from "./ledger";
-import type { HiveState, WorkerBudgetPolicy } from "../../core/types";
+import type { HiveState, WorkerBudgetPolicy, BudgetBlock } from "../../core/types";
 import { emitHiveEvent } from "../observability";
-import { tokensForInclude, checkContextConstraint, resolveExhaustionAction, resolveInterventionAvailable } from "./policy";
+import { tokensForInclude, checkContextConstraint, checkTeamContextConstraint, aggregateTeamContext, resolveExhaustionAction, resolveInterventionAvailable } from "./policy";
 
 // Read threshold + action from the policy's optional Strategies block (per
 // §2.13 C5 v2 wiring). Falls back to the legacy defaults (0.20 warning,
@@ -101,6 +101,15 @@ interface BudgetContext {
   ledger: BudgetLedger;
   policy: WorkerBudgetPolicy;
   controller: AbortController;
+  // Wave continuation — the parent HiveState, threaded through the
+  // budget context map so `buildBudgetToolCallHandler` (which looks
+  // up its budget context by agent name) can compute the team-context
+  // aggregate from `state.runtimes` and call
+  // `checkTeamContextConstraint`. Optional — tests that bypass
+  // `installBudgetEventHooks` register a context without state, and
+  // the team-context gate skips when state is absent (graceful, same
+  // pattern as the per-worker `contextUsage=undefined` skip).
+  state?: HiveState;
 }
 
 const budgetContextsByAgent = new Map<string, BudgetContext>();
@@ -217,16 +226,34 @@ export function buildBudgetToolCallHandler(agentName: string) {
         }
       }
     }
-    if (tokensRemaining > 0 && costRemaining > 0 && contextExhausted === undefined) return undefined;
+    // Wave continuation (team-context wiring) — team-context aggregate
+    // gate at the mid-run tool-call. Mirrors the per-worker context
+    // check above: when `policy.team.context` is set and the parent
+    // HiveState was threaded through `installBudgetEventHooks`
+    // (BudgetContext.state), compute the team aggregate from
+    // `state.runtimes` via `aggregateTeamContext` and run it through
+    // the pure `checkTeamContextConstraint` gate. Skipped when state
+    // is absent (tests without state) or when `policy.team.context`
+    // is undefined (additive — existing configs see no behavior
+    // change). The per-worker context and team-context checks
+    // compose: the worker is blocked if EITHER dimension fires, and
+    // the reason string carries both when both fired.
+    let teamCtxBlock: BudgetBlock | undefined;
+    if (budgetCtx.state && budgetCtx.policy.team.context !== undefined) {
+      const teamCtx = aggregateTeamContext(budgetCtx.state.runtimes.values());
+      teamCtxBlock = checkTeamContextConstraint(teamCtx, budgetCtx.policy.team.context);
+    }
+    if (tokensRemaining > 0 && costRemaining > 0 && contextExhausted === undefined && teamCtxBlock === undefined) return undefined;
 
     const ctxPart = contextExhausted
       ? contextExhausted.kind === "tokens"
         ? `, context ${contextExhausted.current}/${contextExhausted.cap} tokens`
         : `, context ${contextExhausted.current}% of cap ${(contextExhausted.cap as { percent: number }).percent}%`
       : "";
+    const teamCtxPart = teamCtxBlock ? `; ${teamCtxBlock.reason}` : "";
     return {
       block: true,
-      reason: `Worker budget exhausted: tokens ${tokensUsed}/${workerTokensCap ?? "∞"}, cost $${stats.cost.toFixed(4)}/${workerCostCap ?? "∞"}${ctxPart}`,
+      reason: `Worker budget exhausted: tokens ${tokensUsed}/${workerTokensCap ?? "∞"}, cost $${stats.cost.toFixed(4)}/${workerCostCap ?? "∞"}${ctxPart}${teamCtxPart}`,
       terminate: false,
     };
   };
@@ -297,7 +324,7 @@ export function installBudgetEventHooks(
   // context. The regression test in tests/budget-events.test.ts asserts
   // the registration order via a captured subscribe-call timing.
   const agentSlug = ledger.agentName;
-  budgetContextsByAgent.set(agentSlug, { session, ledger, policy, controller });
+  budgetContextsByAgent.set(agentSlug, { session, ledger, policy, controller, state });
 
   const off = session.subscribe((event: AgentSessionEvent) => {
     if (event.type === "message_end") {
@@ -479,6 +506,42 @@ export function installBudgetEventHooks(
               const exhaustedDetails = { scope: "worker", resource: "context", remaining: remainingPayload, cap, action: "compact", session_id: workerSessionId };
               sessionManager.appendCustomEntry("budget_exhausted", exhaustedDetails);
               if (state) emitHiveEvent(state, "budget_exhausted", exhaustedDetails, emitActor);
+            }
+          }
+        }
+      }
+
+      // Wave continuation (team-context wiring) — team-context aggregate
+      // gate at message_end. Mirrors the per-worker context block above:
+      // when `policy.team.context` is set, compute the team aggregate
+      // from `state.runtimes` via `aggregateTeamContext` and run it
+      // through the pure `checkTeamContextConstraint` gate. The block
+      // is graceful — when state is absent (tests that bypass
+      // installBudgetEventHooks) or `policy.team.context` is undefined
+      // (additive — existing configs without `team.context` see no
+      // behavior change), the check is skipped. The exhaustion action
+      // is the same per-dim `contextStrategy.onExhaustionAction` used
+      // by the per-worker block, so `tokens: abort, context: compact`
+      // still aborts the worker when the TEAM-level context cap fires.
+      if (state && policy.team.context !== undefined) {
+        const teamCtx = aggregateTeamContext(state.runtimes.values());
+        const teamCtxBlock = checkTeamContextConstraint(teamCtx, policy.team.context);
+        if (teamCtxBlock) {
+          const teamCtxExhaustionAction = contextStrategy.onExhaustionAction;
+          if (teamCtxExhaustionAction !== "none") {
+            const teamCapValue: number = "tokens" in policy.team.context && policy.team.context.tokens !== undefined
+              ? policy.team.context.tokens
+              : policy.team.context.percent!;
+            const teamCtxExhaustedDetails = { scope: "team" as const, resource: "context" as const, remaining: 0, cap: teamCapValue, session_id: workerSessionId };
+            if (teamCtxExhaustionAction !== "compact") {
+              sessionManager.appendCustomEntry("budget_exhausted", teamCtxExhaustedDetails);
+              emitHiveEvent(state, "budget_exhausted", teamCtxExhaustedDetails, emitActor);
+              if (!controller.signal.aborted) controller.abort(new Error("Team context budget exhausted"));
+            } else {
+              // "compact" strategy: log the exhausted marker but do not
+              // abort so the cooperative tools can run.
+              sessionManager.appendCustomEntry("budget_exhausted", { ...teamCtxExhaustedDetails, action: "compact" });
+              emitHiveEvent(state, "budget_exhausted", { ...teamCtxExhaustedDetails, action: "compact" }, emitActor);
             }
           }
         }

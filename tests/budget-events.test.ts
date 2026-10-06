@@ -1782,3 +1782,126 @@ test("message_end context warning fires ONCE per session (dedup key 'worker:cont
   const ctxWarnings = msgs.filter((m) => m.customType === "budget_warning" && (m.details as { resource?: string })?.resource === "context");
   assert.equal(ctxWarnings.length, 1, "context warning deduped to exactly one per session (key 'worker:context')");
 });
+
+// =====================================================================
+// Wave context-constraint continuation — team-context aggregate wiring.
+//
+// The prior wave (T8) added the pure `aggregateTeamContext` and
+// `checkTeamContextConstraint` helpers in src/engine/budget/policy.ts,
+// but the mid-run call sites in events.ts still only checked
+// `policy.worker.context`. These two tests pin the end-to-end wiring:
+// the mid-run `message_end` handler aborts the worker when the team
+// aggregate exceeds `state.teamBudgets.context.tokens`, and the
+// `buildBudgetToolCallHandler` blocks a tool call when the team
+// aggregate exceeds the cap even if the per-worker check passes.
+// =====================================================================
+
+// Build a minimal HiveState with the supplied runtimes. Mirrors the
+// `stateFor` helper in tests/budget-policy.test.ts:1070 but inlined
+// here so the events tests stay self-contained.
+function stateWithRuntimes(runtimes: Array<{ slug: string; contextTokens: number; contextWindow: number }>) {
+  return {
+    runtimes: new Map(
+      runtimes.map((r) => [
+        r.slug,
+        {
+          config: { name: r.slug, slug: r.slug, role: "member" as const },
+          contextTokens: r.contextTokens,
+          contextWindow: r.contextWindow,
+        },
+      ]),
+    ),
+  } as unknown as import("../src/core/types.ts").HiveState;
+}
+
+test("message_end blocks a worker when team.context aggregate (sum of runtime.contextTokens) exceeds state.teamBudgets.context.tokens cap (continuation wiring)", () => {
+  // Two-worker team. worker-a has 60K context tokens (window 100K);
+  // worker-b has 60K context tokens (window 200K). Sum = 120K across
+  // the team. The per-worker context cap is 80K (60K is below it —
+  // the per-worker check is skipped). The TEAM context cap is 100K
+  // (sum 120K >= 100K — the team check fires and aborts the worker).
+  // The session we install hooks for is worker-a's; the message_end
+  // event fires on worker-a, but the team aggregate includes both
+  // workers from `state.runtimes`.
+  let captured: Listener | undefined;
+  const directSession = {
+    sessionId: "team-ctx-abort",
+    subscribe(listener: Listener) { captured = listener; return () => { captured = undefined; }; },
+    getSessionStats: () => ({ sessionFile: undefined, sessionId: "team-ctx-abort", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2, tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, total: 150 }, cost: 0.01 }),
+    getContextUsage: () => ({ tokens: 60_000, contextWindow: 100_000, percent: 0.60 }),
+    sessionManager: {
+      appendCustomMessageEntry() {},
+      appendCustomEntry(customType: string, data: unknown) {
+        entries.push({ customType, data });
+      },
+    },
+  } as unknown as AgentSession;
+
+  const entries: Array<{ customType: string; data: unknown }> = [];
+  const controller = new AbortController();
+  const state = stateWithRuntimes([
+    { slug: "worker-a", contextTokens: 60_000, contextWindow: 100_000 },
+    { slug: "worker-b", contextTokens: 60_000, contextWindow: 200_000 },
+  ]);
+  // Per-worker context cap of 80K (60K is below it — per-worker check
+  // is skipped). Team context cap of 100K (sum 120K fires it).
+  installBudgetEventHooks(
+    directSession,
+    makeStubLedger("worker-a"),
+    { worker: { tokens: { cap: 1_000_000, window: "per-session" }, context: { tokens: 80_000 } }, team: { context: { tokens: 100_000 } } },
+    controller,
+    state,
+  );
+
+  captured!({ type: "message_end", message: { usage: {} as any, role: "assistant" } } as any);
+
+  // The team-context block must have fired and aborted the worker.
+  assert.equal(controller.signal.aborted, true, "controller aborted when team aggregate (120K) >= team cap (100K)");
+  const teamCtxExhausted = entries.find((e) => e.customType === "budget_exhausted" && (e.data as { scope?: string })?.scope === "team" && (e.data as { resource?: string })?.resource === "context");
+  assert.ok(teamCtxExhausted, "budget_exhausted entry written for team context (scope=team, resource=context)");
+  const details = teamCtxExhausted!.data as { scope: string; resource: string; cap: number; remaining: number };
+  assert.equal(details.scope, "team", "scope is team");
+  assert.equal(details.resource, "context", "resource is context");
+  assert.equal(details.cap, 100_000, "cap carries the team context cap (100K)");
+  assert.equal(details.remaining, 0, "remaining is 0 when exhausted");
+  __resetBudgetContextsForTests();
+});
+
+test("buildBudgetToolCallHandler blocks a tool call when team-context aggregate exceeds the cap, even if the per-worker check passes (continuation wiring)", async () => {
+  // Same team-aggregate scenario as the message_end test, but exercise
+  // the buildBudgetToolCallHandler path. The per-worker context (60K)
+  // is below the per-worker cap (80K), so the per-worker check is
+  // skipped. The team aggregate (60K + 60K = 120K) exceeds the team
+  // cap (100K) — the tool call must be blocked.
+  __resetBudgetContextsForTests();
+  // Use the sessionWithContext helper to get a session whose
+  // getContextUsage() returns 60K/100K (well below the per-worker 80K
+  // cap) and whose getSessionStats() returns cumulative tokens/cost
+  // well under any per-worker cap (no block from the tokens / cost
+  // / per-worker context paths). The handler's only block trigger
+  // is the team-context aggregate.
+  const session = sessionWithContext({
+    stats: { input: 100, output: 50, cost: 0.0001 },
+    ctx: { tokens: 60_000, contextWindow: 100_000, percent: 0.60 },
+  });
+  const state = stateWithRuntimes([
+    { slug: "worker-a", contextTokens: 60_000, contextWindow: 100_000 },
+    { slug: "worker-b", contextTokens: 60_000, contextWindow: 200_000 },
+  ]);
+  installBudgetEventHooks(
+    session,
+    makeStubLedger("worker-a"),
+    { worker: { tokens: { cap: 1_000_000, window: "per-session" }, context: { tokens: 80_000 } }, team: { context: { tokens: 100_000 } } },
+    new AbortController(),
+    state,
+  );
+  const handler = buildBudgetToolCallHandler("worker-a");
+  const result = await handler({ toolName: "bash", input: { command: "ls" } }, {} as any);
+  assert.ok(result, "block returned when team aggregate (120K) >= team cap (100K), per-worker check passed");
+  assert.equal(result!.block, true);
+  // The reason string includes the team-context block reason —
+  // appended by the wiring as `; ${teamCtxBlock.reason}`.
+  assert.match(result!.reason ?? "", /2 worker/, "reason mentions the worker count (2 members contributed to the aggregate)");
+  assert.match(result!.reason ?? "", /120000\/100000/, "reason includes the sum/cap pair from the team aggregate");
+  __resetBudgetContextsForTests();
+});
