@@ -34,7 +34,8 @@ The user's motivation: "tokens do not line up nicely with context usage." The `t
 2. **Context update cadence** — call `getContextUsage()` at every `message_end` event (not just run end), so the runtime's `contextTokens`/`contextPct` fields stay current mid-run.
 3. **Both `tokens` and `context` apply when both are set** — the worker is blocked when either fires. They are not mutually exclusive.
 4. **`include` list does NOT apply to `context`** — `getContextUsage().tokens` is a single coherent number from the SDK; including the `include` list would be double-counting.
-5. **`onExhaustion.action` strategy for context** — same code path as tokens (default `abort`, configurable `compact`/`none`). The `interventionAvailable` flag (F13 wiring) also fires for context exhaustion.
+5. **Per-dimension exhaustion strategies** — tokens and context each have their own exhaustion action. The `Strategies` config gains two new optional fields, `onTokenExhaustion` and `onContextExhaustion`, that override the global `onExhaustion` for their respective dimension. The global `onExhaustion` remains the default for any dimension without a specific override. Backward compat: existing configs that only set `onExhaustion` apply the same action to both dimensions.
+6. **`interventionAvailable` flag is per-dimension** — the F13 wiring currently uses a single flag computed from both dimensions. The new per-dimension strategies mean the flag must be computed per-dimension too (e.g., a worker in `tokens: abort, context: compact` mode should have `interventionAvailable: true` for the token warning, since the operator can still rescue on the token side). The `budget_warning` event payload includes the flag for the dimension that fired.
 
 ## Scope
 
@@ -50,12 +51,31 @@ The user's motivation: "tokens do not line up nicely with context usage." The `t
   ```
 
   Add `context?: ContextConstraint` to `WorkerBudgetPolicy.worker`, `WorkerBudgetPolicy.team`, and `BudgetsConfig.perWorker`/`perTeam`. Files: `src/core/types.ts`, `src/core/schema.ts`. Typebox validation: `percent` field has `minimum: 0, maximum: 100`; reject configs with both `tokens` and `percent` set, or neither set, on the same constraint object.
+
+  Also extend the `Strategies` type to add per-dimension exhaustion overrides:
+
+  ```ts
+  type Strategies = {
+    onApproachingLimit?: { threshold?: number; action?: "wrap-up" | "compact" | "none" };
+    onExhaustion?: { action: "abort" | "compact" | "none" };
+    onTokenExhaustion?: { action: "abort" | "compact" | "none" };    // NEW — overrides for tokens
+    onContextExhaustion?: { action: "abort" | "compact" | "none" };  // NEW — overrides for context
+  };
+  ```
+
+  Validation: each field is optional. The resolver falls back to the global `onExhaustion.action` (then to `"abort"`) when the per-dimension field is absent. Backward compat: existing configs without the new fields work unchanged.
 - T2 — **Policy resolver.** `resolveWorkerBudgetPolicy` surfaces the `context` field from the global `BudgetsConfig` + per-agent `governance` overrides (per-agent wins, matching the existing merge rules). Files: `src/engine/budget/strategy.ts`.
 - T3 — **Context update cadence.** Move the `getContextUsage()` call from run-end-only (`src/engine/dispatch-lifecycle.ts:127-130`) to also fire at every `message_end` event. The runtime's `contextTokens`/`contextPct`/`contextWindow` fields must stay current so the mid-run tool-call gate can use them. Files: `src/engine/dispatch-lifecycle.ts`, `src/engine/budget/events.ts`.
 - T4 — **Pre-flight gate.** Add a `checkContextConstraint` branch to `checkBudgetPolicy`. The gate reads `session.getContextUsage()` and compares against `worker.context.tokens` (nominal) or `worker.context.percent` (percentage, 0-100 scale — multiply the SDK's `getContextUsage().percent` by 100 to compare, OR compute `(ctx.tokens / ctx.contextWindow) * 100 >= worker.context.percent`). Files: `src/engine/budget/policy.ts`.
 - T5 — **Tool-call handler.** Add a context check alongside the existing tokens check in `buildBudgetToolCallHandler`. Same logic: nominal cap OR percentage cap. Files: `src/engine/budget/events.ts`.
 - T6 — **Display.** `budgetRemaining` exposes `context.tokens` (current value) and `context.percent` (current fill). The existing `formatContextFill` helper at `src/agents/tools.ts:79` can be reused. Files: `src/engine/budget/policy.ts`, `src/agents/tools.ts`.
-- T7 — **Strategy interaction.** `onExhaustion.action` for context exhaustion — same path as tokens exhaustion. The `interventionAvailable` flag (from the F13 work) must also fire for context exhaustion. Files: `src/engine/budget/events.ts`, `src/engine/budget/policy.ts`.
+- T7 — **Strategy interaction.** Per-dimension exhaustion action resolution:
+  - New `resolveExhaustionAction(policy, dimension: "tokens" | "context")` helper in `src/engine/budget/policy.ts`. Returns `policy.strategies.onTokenExhaustion?.action ?? policy.strategies.onExhaustion?.action ?? "abort"` for tokens; same shape with `onContextExhaustion` for context. Pure function, no SDK calls.
+  - The existing `resolveStrategies` in `src/engine/budget/events.ts` is updated to either (a) take a dimension parameter and return the per-dimension action, or (b) be split into `resolveStrategies(policy, "tokens")` and `resolveStrategies(policy, "context")` calls at the message_end site. Pick whichever keeps the diff smaller.
+  - The `interventionAvailable` flag becomes per-dimension: `dimensionExhaustionAction !== "compact" && dimensionApproachingAction !== "compact"`. The `budget_warning` event payload includes the flag for the dimension that fired.
+  - The existing tokens warning block in `message_end` uses the tokens dimension. The new context warning block (T7.5) uses the context dimension. Both dual-emit with their dimension-specific `interventionAvailable` flag.
+  - The `controller.abort(...)` call for tokens exhaustion respects the per-dimension action. The same for context exhaustion.
+  - Files: `src/engine/budget/events.ts`, `src/engine/budget/policy.ts`.
 - T7.5 — **Context warning path.** Mirror the existing tokens warning block in `message_end` for the new context constraint, so the worker LLM gets advance notice before the gate aborts. Specifically:
   - Compute `ctxUsage = session.getContextUsage()`. If `tokens == null` or `contextWindow == 0`, skip (graceful handling — same as the gate).
   - For nominal `context.tokens`: warn at `warningThreshold` of the cap (same as tokens — `ctxUsage.tokens / context.tokens >= 1 - warningThreshold`).
@@ -160,6 +180,7 @@ Single agent (`refactor/budget-context-constraint`). The 9 tasks touch 6 source 
 - **`getContextUsage()` returning `null` tokens.** Per the SDK contract, `tokens: number | null` (null when "right after compaction, before next LLM response"). The gate must skip the check gracefully — not block, not crash. The implementation must check for `null` explicitly. Tests cover this case (T8).
 - **Per-worker `getContextUsage()` may not be available in all runtimes.** If the SDK doesn't expose it for a specific mode (TUI vs RPC vs print vs JSON), the gate falls back to "no context constraint applied." Document this. Tests don't cover this — the SDK is mocked.
 - **Strategy interaction with `interventionAvailable`.** The F13 wiring uses `onExhaustionAction !== "compact" && onApproachingLimitAction !== "compact"` to set the flag. If the context constraint fires under a different code path, the flag may not be set. The T7 task explicitly tests this.
+- **Per-dimension `interventionAvailable` semantics (T7).** With per-dimension strategies, the flag must be computed per-dimension too. A worker in `tokens: abort, context: compact` mode has `interventionAvailable: true` for the token warning (operator can still rescue) and `interventionAvailable: false` for the context warning (system handles it). The `budget_warning` event payload includes the flag for the dimension that fired, not a single global flag. Tests must cover the per-dimension computation.
 - **Warning message text (T7.5).** The warning text mentions `summarize_progress` and "the orchestrator may compact/respawn" — these are the worker LLM's documented responses. The text must be informative without being prescriptive (different workers may have different completion semantics). The implementer should match the tone of the existing tokens warning at `events.ts` (informative, suggests `summarize_progress`, doesn't force a specific action).
 - **Backwards compat for `getContextUsage()` frequency change.** Moving the call from run-end-only to every `message_end` increases the per-event cost. Profile a long-running worker to confirm the overhead is negligible.
 - **Stale-process trap.** T3, T4, T5, T6, T7 all touch `src/engine/budget/**` and may touch `src/engine/dispatch.ts` (indirectly). Per AGENTS.md: kill the dev server before re-running.
@@ -168,7 +189,7 @@ Single agent (`refactor/budget-context-constraint`). The 9 tasks touch 6 source 
 
 - New: ~14 tests across 4 test files
 - Modified: 0 existing tests should change (additive — the existing tests don't use `context`)
-- Target: 732 + ~14 = **~746 Node tests** + 63 vitest (unchanged) + 14 bun (unchanged)
+- Target: 732 + ~17 = **~749 Node tests** + 63 vitest (unchanged) + 14 bun (unchanged)
 - Per-test breakdown:
   - T1: 0 (covered by `just typecheck`)
   - T2: 1 (resolver unit test)
@@ -176,7 +197,7 @@ Single agent (`refactor/budget-context-constraint`). The 9 tasks touch 6 source 
   - T4: 3 (nominal, percentage, both)
   - T5: 2 (nominal, percentage)
   - T6: 1 (display test)
-  - T7: 2 (strategy + interventionAvailable)
+  - T7: 5 (strategy + per-dimension exhaustion: 2 existing + 3 new — `onTokenExhaustion` override, `onContextExhaustion` override, `interventionAvailable` per-dimension)
   - T7.5: 2 (nominal cap warning, percentage cap warning — both verify dual-emit)
   - T8: 1 (`include` does not apply; 1 contract test for backward compat)
   - T9: 0 (covered by `just typecheck` on the doc-test path)
@@ -188,7 +209,8 @@ Single agent (`refactor/budget-context-constraint`). The 9 tasks touch 6 source 
 - **Why the user wants this.** "tokens do not line up nicely with context usage." A worker can have a low cumulative `tokens` count but be at 95% of its context window (because cache hits kept the cumulative low but the conversation is long). The `context` cap catches this; the `tokens` cap doesn't.
 - **Context is what the LLM sees, not what was sent.** `getContextUsage().tokens` is the SDK's estimate of what's currently in the LLM's input. Cache hits count, cache misses count, the system prompt counts, the conversation history counts. This is the "context window fill" semantic the user is asking about.
 - **Pre-flight gate at delegation start** — has no `AgentSession` open yet, so it can't call `getContextUsage()`. The gate at `worker-tools.ts:278` keeps the legacy `ledger.cumulative.tokens` fallback for the pre-flight check. The new context check applies at `message_end` (mid-run) and at the tool-call handler (also mid-run), not at pre-flight. This is a documented design choice; the user accepted it.
-- **C5 strategies.** The existing `onExhaustion.action` (`abort` / `compact` / `none`) works for context the same as tokens. The `interventionAvailable` flag (from the F13 work) also fires for context exhaustion under the same conditions.
+- **C5 strategies.** The existing `onExhaustion.action` (`abort` / `compact` / `none`) is the global default. The new per-dimension overrides (`onTokenExhaustion`, `onContextExhaustion`) let the user set different strategies for tokens vs context. Backward compat: existing configs that only set `onExhaustion` apply the same action to both dimensions. The `interventionAvailable` flag is computed per-dimension and emitted with the `budget_warning` event for whichever dimension fired.
+- **Per-dimension strategies rationale (T7).** The user requested independent exhaustion strategies for token and context limits because they're conceptually different resources: tokens measure cumulative cost, context measures the LLM's current view. A user might want `tokens: abort` (block immediately when cost exceeds budget) but `context: compact` (auto-compact when context fills) — the two are not coupled. Per-dimension strategies let the user express this. The implementer must NOT collapse them back into a single strategy (defeats the purpose).
 - **Context warning mirrors tokens warning (T7.5).** T7.5 adds the warning path for context, parallel to the existing tokens warning block in `message_end`. The worker LLM gets advance notice before the gate aborts — it can call `summarize_progress`, wrap up, or signal that the orchestrator should intervene (`hive_compact_worker`, `hive_respawn_worker`, etc.). Without this, the worker's first signal is the `controller.abort(...)` from the gate, which is too late to do anything useful. The dual-emit pattern (custom message entry + HiveTelemetryEvent) is the same as tokens, with a separate dedup key (`"worker:context"`) so each warning fires once per session.
 - **F13 dashboard.** The dashboard already exposes `formatContextFill` (in `team_status`). No dashboard work is required for this wave. The F13 `interventionAvailable` flag now also fires for context, which is automatically reflected in the dashboard.
 - **Cooperative tool trigger** (the previously skipped scope) is still out of scope. This wave doesn't add a cooperative context trigger; the operator commands cover equivalent operations.
