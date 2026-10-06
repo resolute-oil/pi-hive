@@ -32,7 +32,7 @@ import type { AgentSession, AgentSessionEvent, ExtensionToolContext, SessionStat
 import type { BudgetLedger } from "./ledger";
 import type { HiveState, WorkerBudgetPolicy } from "../../core/types";
 import { emitHiveEvent } from "../observability";
-import { tokensForInclude } from "./policy";
+import { tokensForInclude, checkContextConstraint } from "./policy";
 
 // Read threshold + action from the policy's optional Strategies block (per
 // §2.13 C5 v2 wiring). Falls back to the legacy defaults (0.20 warning,
@@ -169,6 +169,14 @@ export function buildBudgetToolCallHandler(agentName: string) {
     // filter, a worker with high cache hits would get blocked mid-run
     // even when the dashboard's "tokens used" counter (which DOES honor
     // the scope) shows it well under cap.
+    //
+    // Wave context-constraint (T5): the handler ALSO reads the live
+    // `getContextUsage()` payload and checks the worker's
+    // `policy.worker.context` cap (nominal tokens or percentage fill).
+    // The check reuses the pure `checkContextConstraint` from policy.ts
+    // for parity with the pre-flight gate (T4). When tokens is null
+    // (right after compaction) or contextWindow is 0, the check is
+    // skipped gracefully — matches the gate's null-handling.
     const stats = budgetCtx.session.getSessionStats();
     const workerTokensCap = budgetCtx.policy.worker.tokens?.cap;
     const workerCostCap = budgetCtx.policy.worker.costUsd?.cap;
@@ -176,11 +184,37 @@ export function buildBudgetToolCallHandler(agentName: string) {
     const tokensUsed = tokensForInclude(stats, workerTokensInclude);
     const tokensRemaining = workerTokensCap !== undefined ? workerTokensCap - tokensUsed : Infinity;
     const costRemaining = workerCostCap !== undefined ? workerCostCap - stats.cost : Infinity;
-    if (tokensRemaining > 0 && costRemaining > 0) return undefined;
+    // Context check (mid-run, post-T3 cadence). getContextUsage() may be
+    // absent on some SDK builds (capability probe via `?.()`); when
+    // absent, the comparison is skipped (no context cap → no block).
+    const ctxUsage = budgetCtx.session.getContextUsage?.();
+    let contextExhausted: { cap: number | { percent: number }; current: number; kind: "tokens" | "percent" } | undefined;
+    if (ctxUsage && budgetCtx.policy.worker.context) {
+      const ctxConstraint = budgetCtx.policy.worker.context;
+      const ctxBlock = checkContextConstraint(ctxUsage, ctxConstraint);
+      if (ctxBlock) {
+        // Reuse the cap shape (nominal tokens OR percentage) so the
+        // reason string matches the constraint the user wrote. The
+        // discriminated-union narrowing uses an explicit `tokens` check
+        // (the second variant has `tokens?: never`, so a `tokens`
+        // property check is the discriminator).
+        if ("tokens" in ctxConstraint && ctxConstraint.tokens !== undefined) {
+          contextExhausted = { cap: ctxConstraint.tokens, current: ctxUsage.tokens ?? 0, kind: "tokens" };
+        } else if ("percent" in ctxConstraint && ctxConstraint.percent !== undefined) {
+          contextExhausted = { cap: { percent: ctxConstraint.percent }, current: Math.round((ctxUsage.tokens ?? 0) / Math.max(1, ctxUsage.contextWindow) * 100), kind: "percent" };
+        }
+      }
+    }
+    if (tokensRemaining > 0 && costRemaining > 0 && contextExhausted === undefined) return undefined;
 
+    const ctxPart = contextExhausted
+      ? contextExhausted.kind === "tokens"
+        ? `, context ${contextExhausted.current}/${contextExhausted.cap} tokens`
+        : `, context ${contextExhausted.current}% of cap ${(contextExhausted.cap as { percent: number }).percent}%`
+      : "";
     return {
       block: true,
-      reason: `Worker budget exhausted: tokens ${tokensUsed}/${workerTokensCap ?? "∞"}, cost $${stats.cost.toFixed(4)}/${workerCostCap ?? "∞"}`,
+      reason: `Worker budget exhausted: tokens ${tokensUsed}/${workerTokensCap ?? "∞"}, cost $${stats.cost.toFixed(4)}/${workerCostCap ?? "∞"}${ctxPart}`,
       terminate: false,
     };
   };

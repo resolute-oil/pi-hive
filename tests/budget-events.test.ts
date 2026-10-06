@@ -1575,3 +1575,84 @@ test("buildBudgetToolCallHandler applies the include filter to all 4 BLOCKED too
   }
   __resetBudgetContextsForTests();
 });
+
+// =====================================================================
+// Wave context-constraint — T5: tool_call handler context check.
+// 2 new tests pin the worker.context branch in buildBudgetToolCallHandler:
+//   1. Nominal tokens cap: bash is blocked when ctx.tokens >= cap
+//   2. Percentage cap: bash is blocked when ctx fill >= cap (0–100 scale)
+// Both run through the standard installBudgetEventHooks wiring so the
+// budget context the handler reads is the one the events.ts handler
+// registered (matches the production flow).
+// =====================================================================
+
+// Build an AgentSession whose getSessionStats returns the supplied stats
+// AND whose getContextUsage returns the supplied context. Mirrors the SDK
+// contract for both seams. The sessionManager is a no-op (we don't read
+// budget_warning / budget_exhausted from here — that's the events.ts path).
+function sessionWithContext(opts: { stats: { input: number; output: number; cacheRead?: number; cacheWrite?: number; cost?: number }; ctx: { tokens: number | null; contextWindow: number; percent?: number | null } }) {
+  return {
+    subscribe: () => () => {},
+    getSessionStats: () => ({
+      sessionFile: undefined as undefined,
+      sessionId: "context-gate-test",
+      userMessages: 0,
+      assistantMessages: 0,
+      toolCalls: 0,
+      toolResults: 0,
+      totalMessages: 0,
+      tokens: { input: opts.stats.input, output: opts.stats.output, cacheRead: opts.stats.cacheRead ?? 0, cacheWrite: opts.stats.cacheWrite ?? 0, total: opts.stats.input + opts.stats.output + (opts.stats.cacheRead ?? 0) + (opts.stats.cacheWrite ?? 0) },
+      cost: opts.stats.cost ?? 0,
+    }),
+    getContextUsage: () => ({ tokens: opts.ctx.tokens, contextWindow: opts.ctx.contextWindow, percent: opts.ctx.percent ?? (opts.ctx.tokens != null ? opts.ctx.tokens / opts.ctx.contextWindow : null) }),
+    sessionManager: { appendCustomMessageEntry() {}, appendCustomEntry() {} },
+  } as unknown as AgentSession;
+}
+
+test("buildBudgetToolCallHandler respects worker.context tokens: bash BLOCKED when ctx.tokens >= cap (T5 nominal)", async () => {
+  __resetBudgetContextsForTests();
+  // cumulative tokens are well under cap=1M (no block from the tokens
+  // path), but the LLM's current context is at 200K which exceeds the
+  // configured nominal context cap of 100K. The handler must block.
+  const session = sessionWithContext({
+    stats: { input: 100, output: 50, cost: 0.0001 },
+    ctx: { tokens: 200_000, contextWindow: 400_000, percent: 0.5 },
+  });
+  installBudgetEventHooks(
+    session,
+    makeStubLedger("worker-ctx"),
+    { worker: { tokens: { cap: 1_000_000, window: "per-session" }, context: { tokens: 100_000 } }, team: {} },
+    new AbortController(),
+  );
+  const handler = buildBudgetToolCallHandler("worker-ctx");
+  const result = await handler({ toolName: "bash", input: { command: "ls" } }, {} as any);
+  assert.ok(result, "block returned when ctx.tokens (200K) >= nominal cap (100K)");
+  assert.equal(result!.block, true);
+  assert.match(result!.reason ?? "", /context 200000\/100000/, "reason string includes the context fill (200K/100K)");
+  __resetBudgetContextsForTests();
+});
+
+test("buildBudgetToolCallHandler respects worker.context percent: bash BLOCKED when fill >= cap (T5 percent)", async () => {
+  __resetBudgetContextsForTests();
+  // Worker at 90% of a 200K context window (180K tokens), with a
+  // configured cap of 80%. The handler must block at the 0–100 scale
+  // comparison. cumulative tokens are still well under cap=1M.
+  const session = sessionWithContext({
+    stats: { input: 100, output: 50, cost: 0.0001 },
+    ctx: { tokens: 180_000, contextWindow: 200_000, percent: 0.9 },
+  });
+  installBudgetEventHooks(
+    session,
+    makeStubLedger("worker-pct"),
+    { worker: { tokens: { cap: 1_000_000, window: "per-session" }, context: { percent: 80 } }, team: {} },
+    new AbortController(),
+  );
+  const handler = buildBudgetToolCallHandler("worker-pct");
+  const result = await handler({ toolName: "bash", input: { command: "ls" } }, {} as any);
+  assert.ok(result, "block returned when ctx fill (90%) >= percent cap (80%)");
+  assert.equal(result!.block, true);
+  // Reason string should mention the percent cap (80%) so the worker
+  // LLM can see which dimension fired.
+  assert.match(result!.reason ?? "", /80%/, "reason string includes the percent cap (80%)");
+  __resetBudgetContextsForTests();
+});
