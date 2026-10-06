@@ -34,7 +34,10 @@ test("BudgetPolicy exports the six pure functions with pinned arities", () => {
   // arity is now 4. Pin it here so a future refactor that drops the
   // parameter (or adds a default value, which would shrink length)
   // breaks here before reaching runtime.
-  assert.equal(policy.checkBudgetPolicy.length, 4, "checkBudgetPolicy takes (ledger, policy, branch, stats?) — arity is 4");
+  // Wave context-constraint (T4): checkBudgetPolicy gained an optional
+  // 5th `contextUsage?: ContextUsageLike` parameter for the
+  // worker.context branch. Arity is now 5.
+  assert.equal(policy.checkBudgetPolicy.length, 5, "checkBudgetPolicy takes (ledger, policy, branch, stats?, contextUsage?) — arity is 5");
   assert.equal(policy.workerConsumedTokens.length, 2, "workerConsumedTokens takes (session, scope)");
   assert.equal(policy.workerConsumedCost.length, 1, "workerConsumedCost takes (session)");
   assert.equal(policy.teamUsage.length, 1, "teamUsage takes (branch)");
