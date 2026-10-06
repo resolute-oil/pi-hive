@@ -22,6 +22,14 @@ import type {
   IncludeKey,
 } from "../../core/types";
 
+// ContextConstraint is the new per-worker/per-team cap type
+// (wave context-constraint T1). The strategy resolver passes it
+// through verbatim — typebox validation already enforced "exactly one
+// of tokens/percent" at config-load (see schema.ts enforceContextConstraint),
+// so the runtime does not need to re-validate. The named type is
+// imported here so a future code path (per-agent governance override
+// of context) can extend the resolver without re-importing.
+
 // Resolve an agent's budget strategy from its config + the project defaults.
 // Pure function over config — no I/O, no SDK. The (config, agentName) signature
 // is the contract Wave 1 must preserve.

@@ -8,7 +8,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import type { SessionStats } from "@earendil-works/pi-coding-agent";
 import { BudgetLedger } from "../src/engine/budget/ledger.ts";
 
 test("BudgetLedger is exported as a class", () => {
