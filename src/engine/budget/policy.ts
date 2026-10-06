@@ -344,11 +344,29 @@ export function crossedThreshold(remaining: number, threshold: number): boolean 
 // from AgentRuntime). The team total walks the live state.runtimes Map,
 // matching the legacy `teamUsage` shape so the worker-prompt display and the
 // checkDispatchBudgets surface stay consistent.
+//
+// Wave context-constraint (T6): the `context` field exposes the worker's
+// live context-window fill (the values the runtime picks up at every
+// `message_end` from `getContextUsage()` — see T3 in events.ts). `tokens`
+// is the LLM's current context in tokens (0 when not yet known), and
+// `percent` is the same value expressed as a 0–1 ratio (matches the
+// SDK's `ContextUsage.percent` scale; multiply by 100 for the user-
+// facing 0–100 view the `formatContextFill` helper at
+// `src/agents/tools.ts:79` already renders). The shape is additive — the
+// pre-existing `tokens` / `costUsd` / `runs` / `distillerRuns` fields are
+// untouched. When the runtime has not yet seen a `message_end` event
+// (contextPct=0 from a fresh dispatch, contextTokens/contextWindow
+// undefined), `context` is still returned with the available fields so
+// the dashboard has a stable shape.
 export interface BudgetRemaining {
   runs?: number;
   tokens?: number;
   costUsd?: number;
   distillerRuns?: number;
+  // Wave context-constraint: live context-window fill on the 0–1 scale
+  // (matches `runtime.contextPct` which is the SDK's `ContextUsage.percent`
+  // value). `tokens` is the raw SDK value (0 when not yet known).
+  context?: { tokens: number; percent: number };
 }
 
 // Merge shim: combines the project-wide `workerBudgets` config tier with
@@ -393,12 +411,22 @@ export function budgetRemaining(state: HiveState, runtime: AgentRuntime): { work
   const workerScope = limits.tokenBudgetScope ?? "all";
   const teamScope = teamLimits.tokenBudgetScope ?? "all";
   const team = teamTotals(state, teamScope);
+  // Wave context-constraint (T6): read the live context values from the
+  // runtime (populated at every message_end by the events.ts handler; see
+  // T3). When `contextPct` is the runtime-default 0 and `contextTokens` is
+  // undefined, return zeros rather than undefined so callers can render a
+  // deterministic "no fill yet" view. The `percent` here is on the 0–1
+  // scale (the SDK's `ContextUsage.percent`); callers that want a 0–100
+  // percentage multiply by 100.
+  const ctxTokens = Number(runtime.contextTokens) || 0;
+  const ctxPct = Number(runtime.contextPct) || 0;
   return {
     worker: {
       runs: remaining(limits.maxRuns, runtime.runCount),
       tokens: remaining(limits.tokenBudget, runtimeTokensForScope(runtime, workerScope)),
       costUsd: remaining(limits.costBudgetUsd, runtime.costUsd),
       distillerRuns: remaining(limits.distillerRuns, runtime.distillerRunCount || 0),
+      context: { tokens: ctxTokens, percent: ctxPct },
     },
     team: {
       runs: remaining(teamLimits.maxRuns, team.runs),
