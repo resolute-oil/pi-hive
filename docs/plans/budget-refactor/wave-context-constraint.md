@@ -40,10 +40,19 @@ The user's motivation: "tokens do not line up nicely with context usage." The `t
 
 **In scope:**
 
-- T1 — **Type + schema additions.** Add `ContextConstraint` type (`{ tokens: number }` | `{ percent: number }` | `undefined`) and add `context` to `WorkerBudgetPolicy.worker`, `WorkerBudgetPolicy.team`, and `BudgetsConfig`. Files: `src/core/types.ts`, `src/core/schema.ts`.
+- T1 — **Type + schema additions.** Add `ContextConstraint` type:
+
+  ```ts
+  type ContextConstraint = 
+    | { tokens: number }      // nominal: stop when getContextUsage().tokens >= tokens
+    | { percent: number }    // percentage of context window, 0-100 scale (e.g. 80 means 80% full, NOT 0.80)
+    | undefined;
+  ```
+
+  Add `context?: ContextConstraint` to `WorkerBudgetPolicy.worker`, `WorkerBudgetPolicy.team`, and `BudgetsConfig.perWorker`/`perTeam`. Files: `src/core/types.ts`, `src/core/schema.ts`. Typebox validation: `percent` field has `minimum: 0, maximum: 100`; reject configs with both `tokens` and `percent` set, or neither set, on the same constraint object.
 - T2 — **Policy resolver.** `resolveWorkerBudgetPolicy` surfaces the `context` field from the global `BudgetsConfig` + per-agent `governance` overrides (per-agent wins, matching the existing merge rules). Files: `src/engine/budget/strategy.ts`.
 - T3 — **Context update cadence.** Move the `getContextUsage()` call from run-end-only (`src/engine/dispatch-lifecycle.ts:127-130`) to also fire at every `message_end` event. The runtime's `contextTokens`/`contextPct`/`contextWindow` fields must stay current so the mid-run tool-call gate can use them. Files: `src/engine/dispatch-lifecycle.ts`, `src/engine/budget/events.ts`.
-- T4 — **Pre-flight gate.** Add a `checkContextConstraint` branch to `checkBudgetPolicy`. The gate reads `session.getContextUsage()` and compares against `worker.context.tokens` (nominal) or `worker.context.percent` (percentage). Files: `src/engine/budget/policy.ts`.
+- T4 — **Pre-flight gate.** Add a `checkContextConstraint` branch to `checkBudgetPolicy`. The gate reads `session.getContextUsage()` and compares against `worker.context.tokens` (nominal) or `worker.context.percent` (percentage, 0-100 scale — multiply the SDK's `getContextUsage().percent` by 100 to compare, OR compute `(ctx.tokens / ctx.contextWindow) * 100 >= worker.context.percent`). Files: `src/engine/budget/policy.ts`.
 - T5 — **Tool-call handler.** Add a context check alongside the existing tokens check in `buildBudgetToolCallHandler`. Same logic: nominal cap OR percentage cap. Files: `src/engine/budget/events.ts`.
 - T6 — **Display.** `budgetRemaining` exposes `context.tokens` (current value) and `context.percent` (current fill). The existing `formatContextFill` helper at `src/agents/tools.ts:79` can be reused. Files: `src/engine/budget/policy.ts`, `src/agents/tools.ts`.
 - T7 — **Strategy interaction.** `onExhaustion.action` for context exhaustion — same path as tokens exhaustion. The `interventionAvailable` flag (from the F13 work) must also fire for context exhaustion. Files: `src/engine/budget/events.ts`, `src/engine/budget/policy.ts`.
@@ -161,6 +170,7 @@ Single agent (`refactor/budget-context-constraint`). The 9 tasks touch 6 source 
 ## Notes
 
 - **Additive only.** This is the central design decision. The user explicitly said: "I don't want to get rid of the token config/implementation. I want to enhance the config/implementation with a context constraint strategy." If an implementer feels tempted to consolidate `tokens` and `context` into a single "spend" cap, surface the temptation in the after-action report and DO NOT do it. They are distinct concepts.
+- **`percent` uses the 0-100 scale, not 0-1.** A value of `80` means 80% of the context window. The implementer must NOT use the SDK's `getContextUsage().percent` directly (which is 0-1) — convert by multiplying by 100. The typebox schema validates `percent` in the `0-100` range. This matches typical user-facing config conventions (e.g., "stop at 80%") and avoids the "is it 0.80 or 80?" ambiguity.
 - **Why the user wants this.** "tokens do not line up nicely with context usage." A worker can have a low cumulative `tokens` count but be at 95% of its context window (because cache hits kept the cumulative low but the conversation is long). The `context` cap catches this; the `tokens` cap doesn't.
 - **Context is what the LLM sees, not what was sent.** `getContextUsage().tokens` is the SDK's estimate of what's currently in the LLM's input. Cache hits count, cache misses count, the system prompt counts, the conversation history counts. This is the "context window fill" semantic the user is asking about.
 - **Pre-flight gate at delegation start** — has no `AgentSession` open yet, so it can't call `getContextUsage()`. The gate at `worker-tools.ts:278` keeps the legacy `ledger.cumulative.tokens` fallback for the pre-flight check. The new context check applies at `message_end` (mid-run) and at the tool-call handler (also mid-run), not at pre-flight. This is a documented design choice; the user accepted it.
