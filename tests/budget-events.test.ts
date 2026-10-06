@@ -1656,3 +1656,129 @@ test("buildBudgetToolCallHandler respects worker.context percent: bash BLOCKED w
   assert.match(result!.reason ?? "", /80%/, "reason string includes the percent cap (80%)");
   __resetBudgetContextsForTests();
 });
+
+// =====================================================================
+// Wave context-constraint — T7.5: context warning path. Mirrors the
+// existing tokens warning block: a single warning per session (dedup key
+// "worker:context"), dual-emit (custom message + HiveTelemetryEvent),
+// warningThreshold ratio from the strategies block. Two new tests cover
+// the nominal and percentage flavors.
+// =====================================================================
+
+test("message_end emits budget_warning with resource:context for nominal cap (T7.5 nominal)", () => {
+  // Captured listener seam (matches the existing warning test pattern at
+  // Test 4). The session reports getContextUsage() returning a fill
+  // (160K/200K = 80%) above the 80% warning threshold for a configured
+  // cap of 100K (i.e., 60% of the cap is consumed → remaining ratio =
+  // 0.40, ABOVE the 0.20 threshold — no warning). We pick a cap of 165K
+  // to force remaining = 5K, ratio = 0.03, threshold crossed.
+  let captured: Listener | undefined;
+  const directSession = {
+    sessionId: "ctx-warn",
+    subscribe(listener: Listener) { captured = listener; return () => { captured = undefined; }; },
+    getSessionStats: () => ({ sessionFile: undefined, sessionId: "ctx-warn", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2, tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, total: 150 }, cost: 0.01 }),
+    getContextUsage: () => ({ tokens: 160_000, contextWindow: 200_000, percent: 0.80 }),
+    sessionManager: {
+      appendCustomMessageEntry(customType: string, content: string, display: boolean, details?: unknown) {
+        msgs.push({ customType, content, display, details });
+      },
+      appendCustomEntry() {},
+    },
+  } as unknown as AgentSession;
+
+  const msgs: Array<{ customType: string; content: string; display: boolean; details?: unknown }> = [];
+  // Cumulative tokens (150) are well under the tokens cap (1M) so the
+  // tokens warning doesn't fire — the context warning is the one we
+  // assert on. context cap of 165K means remaining = 5K, ratio = 0.03,
+  // below the default 0.20 threshold → warning fires.
+  installBudgetEventHooks(
+    directSession,
+    makeStubLedger("ctx-warn"),
+    { worker: { tokens: { cap: 1_000_000, window: "per-session" }, context: { tokens: 165_000 } }, team: {} },
+    new AbortController(),
+  );
+  captured!({ type: "message_end", message: { usage: {} as any, role: "assistant" } } as any);
+
+  // Find the context warning (not a tokens warning).
+  const ctxMsg = msgs.find((m) => m.customType === "budget_warning" && (m.details as { resource?: string })?.resource === "context");
+  assert.ok(ctxMsg, "context warning emitted (resource=context)");
+  assert.equal(ctxMsg!.display, true, "warning is delivered into worker context (dual-emit pattern: custom message)");
+  assert.match(ctxMsg!.content, /Worker context at \d+% of cap/, "warning text uses the documented format");
+  const details = ctxMsg!.details as { scope: string; resource: string; remaining: number; cap: number; interventionAvailable: boolean; session_id: string };
+  assert.equal(details.scope, "worker", "scope is worker");
+  assert.equal(details.resource, "context", "resource is context");
+  assert.equal(details.cap, 165_000, "cap carries the nominal context cap (165K)");
+  assert.equal(details.remaining, 5_000, "remaining is cap - current (165K - 160K = 5K)");
+  assert.equal(details.interventionAvailable, true, "interventionAvailable is true (default strategy, abort path)");
+  assert.equal(details.session_id, "ctx-warn", "session_id is the worker's session id (for dashboard reducer)");
+});
+
+test("message_end emits budget_warning with resource:context for percentage cap (T7.5 percent)", () => {
+  let captured: Listener | undefined;
+  const directSession = {
+    sessionId: "ctx-pct-warn",
+    subscribe(listener: Listener) { captured = listener; return () => { captured = undefined; }; },
+    getSessionStats: () => ({ sessionFile: undefined, sessionId: "ctx-pct-warn", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2, tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, total: 150 }, cost: 0.01 }),
+    getContextUsage: () => ({ tokens: 85_000, contextWindow: 100_000, percent: 0.85 }),
+    sessionManager: {
+      appendCustomMessageEntry(customType: string, content: string, display: boolean, details?: unknown) {
+        msgs.push({ customType, content, display, details });
+      },
+      appendCustomEntry() {},
+    },
+  } as unknown as AgentSession;
+
+  const msgs: Array<{ customType: string; content: string; display: boolean; details?: unknown }> = [];
+  // 85% fill on a 100K window vs a 90% percent cap → remaining = 5%, ratio = 0.055, threshold crossed.
+  installBudgetEventHooks(
+    directSession,
+    makeStubLedger("ctx-pct-warn"),
+    { worker: { tokens: { cap: 1_000_000, window: "per-session" }, context: { percent: 90 } }, team: {} },
+    new AbortController(),
+  );
+  captured!({ type: "message_end", message: { usage: {} as any, role: "assistant" } } as any);
+
+  const ctxMsg = msgs.find((m) => m.customType === "budget_warning" && (m.details as { resource?: string })?.resource === "context");
+  assert.ok(ctxMsg, "context warning emitted for percentage cap (resource=context)");
+  const details = ctxMsg!.details as { scope: string; resource: string; remaining: number; cap: number; interventionAvailable: boolean; session_id: string };
+  assert.equal(details.resource, "context");
+  assert.equal(details.cap, 90, "cap carries the percent cap (90) on the 0–100 scale");
+  // 90 - 85 = 5% remaining (on the percent scale, the cap is the
+  // percent value, the remaining is the gap to the cap, also in
+  // percent units).
+  assert.equal(details.remaining, 5, "remaining is 5 (percent units): 90% cap - 85% current fill");
+  assert.equal(details.interventionAvailable, true, "interventionAvailable is true (default strategy)");
+});
+
+test("message_end context warning fires ONCE per session (dedup key 'worker:context')", () => {
+  // Pin the dedup behavior: a second message_end past the threshold
+  // must NOT emit a second warning. The tokens warning block has the
+  // same dedup (key 'worker:tokens') — this test pins the context
+  // variant so a future refactor doesn't break the contract.
+  let captured: Listener | undefined;
+  const directSession = {
+    sessionId: "ctx-dedup",
+    subscribe(listener: Listener) { captured = listener; return () => { captured = undefined; }; },
+    getSessionStats: () => ({ sessionFile: undefined, sessionId: "ctx-dedup", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2, tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, total: 150 }, cost: 0.01 }),
+    getContextUsage: () => ({ tokens: 160_000, contextWindow: 200_000, percent: 0.80 }),
+    sessionManager: {
+      appendCustomMessageEntry(customType: string, content: string, display: boolean, details?: unknown) {
+        msgs.push({ customType, content, display, details });
+      },
+      appendCustomEntry() {},
+    },
+  } as unknown as AgentSession;
+
+  const msgs: Array<{ customType: string; content: string; display: boolean; details?: unknown }> = [];
+  installBudgetEventHooks(
+    directSession,
+    makeStubLedger("ctx-dedup"),
+    { worker: { tokens: { cap: 1_000_000, window: "per-session" }, context: { tokens: 165_000 } }, team: {} },
+    new AbortController(),
+  );
+  // Fire message_end twice past the threshold — only the first should emit.
+  captured!({ type: "message_end", message: { usage: {} as any, role: "assistant" } } as any);
+  captured!({ type: "message_end", message: { usage: {} as any, role: "assistant" } } as any);
+  const ctxWarnings = msgs.filter((m) => m.customType === "budget_warning" && (m.details as { resource?: string })?.resource === "context");
+  assert.equal(ctxWarnings.length, 1, "context warning deduped to exactly one per session (key 'worker:context')");
+});

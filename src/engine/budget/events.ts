@@ -266,6 +266,13 @@ export function installBudgetEventHooks(
   actor?: string,
 ): () => void {
   const { warningThreshold, onExhaustionAction, interventionAvailable } = resolveStrategies(policy, "tokens");
+  // Wave context-constraint (T7.5): resolve the per-dimension strategy
+  // for context separately so the context warning / exhaustion paths
+  // honor the per-dim override (or fall back to the global, then to
+  // "abort"). The `warningThreshold` is dimension-agnostic — both
+  // dimensions use the same approaching-limit threshold from the
+  // strategies block (per §2.13/C5 wiring).
+  const contextStrategy = resolveStrategies(policy, "context");
   const warnedKeys = new Set<string>();
   // session.sessionManager is the canonical SDK seam (agent-session.d.ts:170).
   const sessionManager = session.sessionManager;
@@ -371,6 +378,108 @@ export function installBudgetEventHooks(
             const exhaustedDetails = { scope: "worker", resource: "tokens", remaining, cap: workerTokensCap, action: "compact", session_id: workerSessionId };
             sessionManager.appendCustomEntry("budget_exhausted", exhaustedDetails);
             if (state) emitHiveEvent(state, "budget_exhausted", exhaustedDetails, emitActor);
+          }
+        }
+      }
+
+      // Wave context-constraint (T7.5) — context warning path. Mirrors
+      // the tokens warning block above: a single warning emit per
+      // session, dual-emit (custom message entry + HiveTelemetryEvent),
+      // dedup key `"worker:context"`. Compute the live context values
+      // from the SDK's getContextUsage() (T3 already saved them onto
+      // the runtime; re-read here so the warning handler is self-
+      // contained and the same source-of-truth contract holds). The
+      // warning threshold is the same `warningThreshold` ratio (0.20
+      // default) applied to the context cap, regardless of whether the
+      // cap is nominal tokens or percentage fill.
+      //
+      // Graceful handling: when tokens is null (right after compaction)
+      // or contextWindow is 0, the warning is skipped — no false-
+      // positive emission. When policy.worker.context is absent, the
+      // whole context block is skipped — the additive design means
+      // existing configs without `context:` see no behavior change.
+      if (policy.worker.context !== undefined) {
+        const ctxUsage = session.getContextUsage?.();
+        if (ctxUsage && ctxUsage.tokens != null && ctxUsage.contextWindow > 0) {
+          const ctxConstraint = policy.worker.context;
+          // Per-dim exhaustion action (T7) — context dimension can
+          // have its own override (e.g. `context: compact` even when
+          // global is `abort`). The interventionAvailable flag is
+          // also per-dim so the F13 dashboard renders the right
+          // rescue buttons for the context warning vs. the tokens
+          // warning.
+          const ctxExhaustionAction = contextStrategy.onExhaustionAction;
+          const ctxInterventionAvailable = contextStrategy.interventionAvailable;
+          // Compute the "remaining" ratio the same way the tokens path
+          // does: nominal cap → (cap - tokens) / cap; percentage cap →
+          // (1 - currentFill/cap) on the 0–1 scale. The warning fires
+          // when remaining-ration ≤ warningThreshold (default 0.20).
+          let ratio: number;
+          let currentFill: number;
+          let cap: number;
+          let capKind: "tokens" | "percent";
+          if ("tokens" in ctxConstraint && ctxConstraint.tokens !== undefined) {
+            // Nominal cap: ratio is (cap - ctxUsage.tokens) / cap.
+            cap = ctxConstraint.tokens;
+            capKind = "tokens";
+            currentFill = ctxUsage.tokens;
+            ratio = (cap - currentFill) / cap;
+          } else {
+            // Percentage cap (0–100 scale). Compute current fill on the
+            // same scale; ratio is (cap - currentFill) / cap, but we
+            // compare on the 0–1 scale: ratio = 1 - currentFill/cap.
+            cap = ctxConstraint.percent!;
+            capKind = "percent";
+            const currentPct = (ctxUsage.tokens / ctxUsage.contextWindow) * 100;
+            currentFill = currentPct;
+            ratio = 1 - currentPct / cap;
+          }
+          if (ratio <= warningThreshold) {
+            const warningKey = "worker:context";
+            if (!warnedKeys.has(warningKey)) {
+              warnedKeys.add(warningKey);
+              // cap value for the payload: nominal tokens OR the
+              // percentage (0–100), depending on which flavor. The
+              // dashboard reducer expects one or the other.
+              const capPayload: number = cap;
+              const fillPct = capKind === "tokens"
+                ? Math.round((currentFill / cap) * 100)
+                : Math.round(currentFill);
+              // remaining is the gap to the cap on the SAME scale as
+              // the cap (tokens for nominal, percent for percentage).
+              const remainingPayload = Math.max(0, cap - currentFill);
+              const warningDetails = { scope: "worker", resource: "context", remaining: remainingPayload, cap: capPayload, interventionAvailable: ctxInterventionAvailable, session_id: workerSessionId };
+              sessionManager.appendCustomMessageEntry(
+                "budget_warning",
+                `Worker context at ${fillPct}% of cap. Consider calling summarize_progress to record completion intent, or the orchestrator may compact/respawn.`,
+                true,
+                warningDetails,
+              );
+              if (state) emitHiveEvent(state, "budget_warning", warningDetails, emitActor);
+            }
+          }
+
+          // Context exhaustion (T7.5 extends T7's coverage to the
+          // warning emit, not just the abort): mirror the tokens
+          // exhaustion block with the per-dim `ctxExhaustionAction`.
+          // "abort"  → controller.abort() + budget_exhausted entry
+          // "compact"→ budget_exhausted entry, do NOT abort
+          // "none"   → do nothing
+          // The cap is at-or-below its configured value (ratio ≤ 0).
+          if (ratio <= 0 && ctxExhaustionAction !== "none") {
+            const remainingPayload = Math.max(0, cap - currentFill);
+            if (ctxExhaustionAction !== "compact") {
+              const exhaustedDetails = { scope: "worker", resource: "context", remaining: remainingPayload, cap, session_id: workerSessionId };
+              sessionManager.appendCustomEntry("budget_exhausted", exhaustedDetails);
+              if (state) emitHiveEvent(state, "budget_exhausted", exhaustedDetails, emitActor);
+              if (!controller.signal.aborted) controller.abort(new Error("Worker context budget exhausted"));
+            } else {
+              // "compact" strategy: log the exhausted marker but do not
+              // abort so the cooperative tools can run.
+              const exhaustedDetails = { scope: "worker", resource: "context", remaining: remainingPayload, cap, action: "compact", session_id: workerSessionId };
+              sessionManager.appendCustomEntry("budget_exhausted", exhaustedDetails);
+              if (state) emitHiveEvent(state, "budget_exhausted", exhaustedDetails, emitActor);
+            }
           }
         }
       }
