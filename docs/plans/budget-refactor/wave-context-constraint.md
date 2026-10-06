@@ -121,7 +121,7 @@ Tasks must complete in order (T1 → T2 → T3 → T4 → T5 → T6 → T7 → T
 | [x] T7 | Strategy interaction — `onExhaustion.action` and `interventionAvailable` work for context. Gate: 2 new tests asserting both behaviors |
 | [x] T7.5 | Context warning path — `message_end` emits `budget_warning` (with `resource: "context"`) when context crosses the warning threshold, with dual-emit (custom message + HiveTelemetryEvent) and dedup key `"worker:context"`. Gate: 2 new tests in `budget-events.test.ts` — nominal cap warning, percentage cap warning; both verify the worker session receives the custom message and the parent telemetry log receives the event |
 | [x] T8 | All tests. Gate: `just test` passes; test count delta recorded in Test delta section below |
-| [ ] T9 | Migration guide update. Gate: `docs/migrations/budget-config-v2.md` has the new section; example configs compile (validated by `just typecheck` on the doc-test path if one exists) |
+| [x] T9 | Migration guide update. Gate: `docs/migrations/budget-config-v2.md` has the new section; example configs compile (validated by `just typecheck` on the doc-test path if one exists) |
 
 ## Files touched
 

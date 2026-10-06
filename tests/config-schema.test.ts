@@ -307,3 +307,48 @@ test("currentUtcDayStart rolls over at UTC midnight (cap resets across the bound
     Date.now = originalNow;
   }
 });
+
+// Wave context-constraint (T9) — the migration guide's Example 9 (add a
+// `context` cap) is the documented user-facing surface. This test pins
+// that the nominal and percentage flavors parse through the typebox
+// schema and round-trip through the validateBudgetsConfig seam, AND
+// that the "both" and "neither" mistakes are caught with the documented
+// error messages.
+
+test("migration guide Example 9a: context.tokens parses and validates", () => {
+  const cfg = {
+    perWorker: { context: { tokens: 100_000 } },
+    perTeam: {},
+  };
+  assert.doesNotThrow(() => validateBudgetsConfig(cfg), "nominal context cap (100K) validates cleanly");
+});
+
+test("migration guide Example 9b: context.percent parses and validates", () => {
+  const cfg = {
+    perWorker: { context: { percent: 80 } },
+    perTeam: {},
+  };
+  assert.doesNotThrow(() => validateBudgetsConfig(cfg), "percentage context cap (80%) validates cleanly");
+});
+
+test("migration guide Example 9: rejecting both tokens AND percent on the same constraint", () => {
+  // The "exactly one" rule is enforced by enforceContextConstraint
+  // post-typebox. The error message must name the path so the user
+  // can find the offending key quickly.
+  const cfg = {
+    perWorker: { context: { tokens: 100_000, percent: 80 } },
+    perTeam: {},
+  };
+  assert.throws(() => validateBudgetsConfig(cfg), /perWorker\.context.*set either.*but not both/, "both tokens+percent is rejected with a path-bearing error");
+});
+
+test("migration guide Example 9: rejecting neither tokens nor percent on the same constraint", () => {
+  // The "exactly one" rule also rejects an empty constraint object —
+  // configuring a `context:` block without one of tokens/percent is a
+  // user mistake (silent unlimited would be worse than a hard fail).
+  const cfg = {
+    perWorker: { context: {} },
+    perTeam: {},
+  };
+  assert.throws(() => validateBudgetsConfig(cfg), /perWorker\.context.*must set either/, "empty context is rejected with a path-bearing error");
+});

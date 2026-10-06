@@ -319,6 +319,89 @@ Notes:
 - `on-approaching-limit.action` accepts `wrap-up`, `compact`, or `none`. `threshold` is a fraction (0.0–1.0) of the remaining budget at which the warning fires. `hint` is the text injected into the worker's prompt.
 - `on-exhaustion.action` accepts `compact`, `abort`, or `none`. `custom-instructions` is optional and is used as the compaction prompt when `action: compact`.
 
+## Example 9: Add a `context` cap (the LLM's current view)
+
+The `context` cap is a separate constraint from the existing `tokens` cap. They measure different resources:
+
+- `tokens` — cumulative session cost (input + output + cacheRead + cacheWrite + reasoning, scoped by the `include` list).
+- `context` — what the LLM is currently looking at (the SDK's `ContextUsage.tokens`). A worker can have a low cumulative `tokens` count but be at 95% of its context window (because cache hits kept the cumulative low but the conversation is long). The `context` cap catches this; the `tokens` cap doesn't.
+
+Set exactly one of `tokens:` (nominal) or `percent:` (fill on the 0–100 scale) — not both, not neither.
+
+### 9a. Nominal tokens cap (stop at 100K tokens of context)
+
+```yaml
+# .pi/hive/hive-config.yaml
+budgets:
+  per-worker:
+    context:
+      tokens: 100_000   # stop when getContextUsage().tokens >= 100K
+```
+
+### 9b. Percentage cap (stop at 80% of the context window)
+
+```yaml
+# .pi/hive/hive-config.yaml
+budgets:
+  per-worker:
+    context:
+      percent: 80       # 80% of the context window (0–100 scale, NOT 0–1)
+```
+
+### 9c. Both `tokens` and `context` set (they are NOT collapsed into a single cap)
+
+```yaml
+# .pi/hive/hive-config.yaml
+budgets:
+  per-worker:
+    tokens:
+      cap: 3500
+      include: [input, output]
+    context:
+      tokens: 100_000
+```
+
+When both are set, the worker is blocked when EITHER fires. The `include` list does NOT apply to `context` (the SDK's `getContextUsage().tokens` is a single coherent number — including the `include` list would be double-counting).
+
+### 9d. Per-dimension exhaustion strategies
+
+By default `onExhaustion.action` applies to BOTH dimensions (the global default). To set different strategies for tokens and context, use `onTokenExhaustion` and `onContextExhaustion` as overrides:
+
+```yaml
+# .pi/hive/hive-config.yaml
+budgets:
+  per-worker:
+    tokens: { cap: 3500 }
+    context: { tokens: 100_000 }
+  strategies:
+    on-approaching-limit:
+      action: wrap-up
+      threshold: 0.20
+      hint: "Wrap up your work; call summarize_progress when done."
+    on-exhaustion:
+      action: abort          # global default
+    on-token-exhaustion:
+      action: abort          # explicit override for tokens
+    on-context-exhaustion:
+      action: compact        # auto-compact when context fills
+    summary:
+      max-tokens: 2000
+```
+
+The `interventionAvailable` flag is computed per-dimension: a worker in `tokens: abort, context: compact` mode has `interventionAvailable: true` for the token warning (operator can still rescue on the token side) and `false` for the context warning (system handles it). Each `budget_warning` event payload carries the flag for the dimension that fired.
+
+### 9e. Additive guarantee (no breaking changes)
+
+A config WITHOUT `context:` keeps working unchanged. The validator accepts the pre-wave shape; the resolver returns a policy without `worker.context` / `team.context`; the pre-flight gate and tool-call handler skip the context check when the field is absent. The existing `tokens` cap is untouched.
+
+```yaml
+# .pi/hive/hive-config.yaml (pre-wave config — still valid, no migration needed)
+budgets:
+  per-worker:
+    tokens: { cap: 3500 }
+  # no `context:` → no context constraint
+```
+
 ## Example 8: `worker-budgets.queue` removed (per §2.15)
 
 If you previously set `worker-budgets.queue`, remove it from your config. Queue depth is now visible via the SDK's `queue_update` event. It is no longer tracked as a budget resource.
@@ -349,6 +432,10 @@ This is a **hard cutover** (per gap-decision G-16 in the refactor review):
 - **No telemetry deprecation event.** Nothing is emitted to telemetry to alert you that you have old keys. Config-load just fails with a structured error pointing at the offending path.
 
 If your config has any old key (`worker-budgets:`, `team-budgets:`, `governance:`, `token-budget:`, `token-budget-scope:`, `cost-budget-usd:`, `max-runs:`, `max-delegation-depth:`, `budget-strategy:`, `progress-summary-token-limit:`, or `queue:`), the config-load throws and the project does not start. Fix the config and reload. There's no other path.
+
+## What this example adds (and what it does NOT change)
+
+The `context` cap is **purely additive**. The pre-existing `tokens` cap is untouched, and configs that don't set `context:` keep working unchanged. Do not consolidate `tokens` and `context` into a single "spend" cap — they measure different resources (cumulative cost vs LLM current view) and the user explicitly wants them as separate constraints.
 
 ## Rollback instructions
 
@@ -430,6 +517,12 @@ For quick lookup, here is every field in the new `budgets:` block:
 | `budgets.per-team.cost-usd.cap` | number ≥ 0 | team | Per-team USD cap |
 | `budgets.per-team.cost-usd.window` | enum | team | `per-team-lifetime` (default) or `per-session` |
 | `budgets.per-team.runs.cap` | number ≥ 0 | team | Max runs per team |
+| `budgets.per-worker.context.tokens` | number ≥ 0 | worker | Nominal cap on the LLM's current context (the SDK's `getContextUsage().tokens`); stop when fill >= cap |
+| `budgets.per-worker.context.percent` | 0 ≤ n ≤ 100 | worker | Percentage cap on the context window; stop when `(ctx.tokens / ctx.contextWindow) * 100 >= percent` |
+| `budgets.per-team.context.tokens` | number ≥ 0 | team | Nominal cap on team-level context (resolver passes through; enforcement is per-worker) |
+| `budgets.per-team.context.percent` | 0 ≤ n ≤ 100 | team | Percentage cap on team-level context |
+| `budgets.strategies.on-token-exhaustion.action` | enum | strategies | `compact`, `abort`, or `none` (overrides `on-exhaustion.action` for tokens) |
+| `budgets.strategies.on-context-exhaustion.action` | enum | strategies | `compact`, `abort`, or `none` (overrides `on-exhaustion.action` for context) |
 | `budgets.strategies.on-approaching-limit.action` | enum | strategies | `wrap-up`, `compact`, or `none` |
 | `budgets.strategies.on-approaching-limit.threshold` | 0 ≤ n ≤ 1 | strategies | Fraction of remaining budget that triggers the warning |
 | `budgets.strategies.on-approaching-limit.hint` | string | strategies | Text injected into the worker's prompt on warning |
