@@ -1721,9 +1721,19 @@ Agent 2 handles F2 (`delegateAgent`): T2.1, T2.2, T2.3. This is the integration 
 | 5B F10 reviews | T10.1-T10.4 | Three sequential review rounds in one agent (multi-round review can lose context per HANDOFF pitfall #32) |
 | 5C F11 merge | T11.1-T11.3 | User-driven (no auto-merge per AGENTS.md). F11 enumerates T11.1-T11.3 only — the §11.7 row's "T11.1-T11.4" range is a stale placeholder carried over from earlier drafts. |
 
-### 11.8 Out-of-band — F13 dashboard (1 agent, parallel)
+### 11.8 F13 — dashboard intervention UI (REQUIRED)
 
-Agent 6 handles F13 (T13.1, T13.2, T13.3) in `ui/web/src/**`. Can run anytime after Wave 0; recommended after Wave 3 ships so the engine can serve real responses.
+F13 was originally described as out-of-band in earlier drafts of this plan, but has been **promoted to REQUIRED** as part of the local refactor work. It is no longer optional; the 11-button intervention strip + `interventionAvailable` flag + context fill display must work end-to-end before the refactor is considered complete.
+
+F13 implements the dashboard intervention UI (T13.1, T13.2, T13.3) in `ui/web/src/**`. The chain as of `refactor/budget @ 940ebcc`:
+
+- `refactor/budget-f13-dashboard` — T13.0 (sunset legacy `fresh` param) + T13.1 (engine half) + T13.2 (engine + dashboard halves) + T13.3 (mode-independence). FF-merged into `refactor/budget`.
+- `refactor/budget-f13-fixes` (Wave 7) — production wiring: engine `budget_warning` / `budget_exhausted` now emit to the parent telemetry log (so the dashboard sees them), and the parent-pi pickup consumer drains `operator-command-pickup.jsonl` and invokes the operator commands. FF-merged.
+- `refactor/budget-f13-fixes-7-5` (Wave 7.5) — scoped-agents row lookup aligned with the Wave 7 worker-keyed reducer (without this, `interventionAvailable` was `undefined` on every Agents table row). FF-merged.
+
+See `docs/plans/budget-refactor/wave-f13-dashboard.md` for the original brief, and `docs/plans/budget-refactor/agent-reports/wave-f13-after-action.md`, `wave-f13-fixes-after-action.md`, `wave-f13-fixes-7-5-after-action.md` for the per-wave after-action reports.
+
+**T13.3 mode-independence gate is partially unmet** (structural contract test only; runtime smoke in 4 modes is a follow-up). All other F13 gates are met.
 
 ### 11.9 When to use this strategy
 
