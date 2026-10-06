@@ -66,6 +66,15 @@ function makeScriptedSession(opts: ScriptedSessionOpts = {}): ScriptedSession {
   let triggerFn: ((event: any) => void) | undefined;
   const appendedEntries: Array<{ customType: string; data?: unknown }> = [];
   const appendedMessages: Array<{ customType: string; content: string; display: boolean; details?: unknown }> = [];
+  // Wave-budget-include-filter: distribute initialCumulative.tokens across
+  // input + output so the include-scoped comparison in events.ts (which sums
+  // input + output via tokensForInclude) sees the same number as the pre-fix
+  // `stats.tokens.total` path. Without this, fake sessions would report
+  // input=0, output=0 (with total=15134) and the new gate would let the
+  // tool through even when the cumulative is over cap. The fake mirrors
+  // the SDK contract: tokens.input + tokens.output + tokens.cacheRead +
+  // tokens.cacheWrite = tokens.total.
+  const initialTokens = opts.initialCumulative?.tokens ?? 0;
   let stats: SessionStats = {
     sessionFile: undefined,
     sessionId: "race-session",
@@ -74,7 +83,7 @@ function makeScriptedSession(opts: ScriptedSessionOpts = {}): ScriptedSession {
     toolCalls: 0,
     toolResults: 0,
     totalMessages: 0,
-    tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: opts.initialCumulative?.tokens ?? 0 },
+    tokens: { input: initialTokens, output: 0, cacheRead: 0, cacheWrite: 0, total: initialTokens },
     cost: opts.initialCumulative?.costUsd ?? 0,
   };
   // Use a real in-memory SessionManager so the recording ledger's

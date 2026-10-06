@@ -10,18 +10,74 @@
 // downstream dispatcher can refuse with a structured error rather than
 // silently misclassifying scope.
 
-import type { AgentSession, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, SessionEntry, SessionStats } from "@earendil-works/pi-coding-agent";
 import type { BudgetLedger } from "./ledger";
 import { isLedgerEntry } from "./ledger";
-import type { AgentRuntime, BudgetBlock, HiveState, IncludeKeys, WorkerBudgetPolicy, WorkerGovernance } from "../../core/types";
+import type { AgentRuntime, BudgetBlock, HiveState, IncludeKey, IncludeKeys, WorkerBudgetPolicy, WorkerGovernance } from "../../core/types";
+
+// Sum the token dimensions named in `include` from a SessionStats snapshot.
+// Pure — no I/O, no SDK. Used by checkBudgetPolicy and buildBudgetToolCallHandler
+// so the pre-flight gate and the mid-run tool-call gate both honor the
+// resolved policy's `include` list (default: ["input", "output"]) instead of
+// comparing the cumulative `tokens.total` (which folds cacheRead / cacheWrite
+// in per the SDK contract).
+//
+// Limitation: `reasoning` lives on the runtime (`runtime.reasoningTokens`),
+// not on `SessionStats.tokens`, so this helper cannot sum reasoning from
+// SessionStats alone. The caller is expected to have access to reasoning via
+// the runtime when reasoning is part of the include list — until that seam
+// is wired, `reasoning` contributes 0 from this seam. The helper accepts the
+// dimension in its signature so future code can plumb a reasoning source
+// without changing call sites.
+export function tokensForInclude(stats: SessionStats, include: IncludeKeys): number {
+  // Defensive: if `include` is undefined or empty, default to input + output
+  // (matches the policy.ts §2.13/C2 documented behavior — the F13 dashboard's
+  // `tokenBudgetScope: "input_output"` default). The check is up front so a
+  // caller that passes an empty list never gets back a stale accumulator
+  // value from a prior default run.
+  const list = include ?? [];
+  if (list.length === 0) {
+    return (Number(stats.tokens.input) || 0) + (Number(stats.tokens.output) || 0);
+  }
+  let sum = 0;
+  if (list.includes("input")) sum += Number(stats.tokens.input) || 0;
+  if (list.includes("output")) sum += Number(stats.tokens.output) || 0;
+  if (list.includes("cacheRead")) sum += Number(stats.tokens.cacheRead) || 0;
+  if (list.includes("cacheWrite")) sum += Number(stats.tokens.cacheWrite) || 0;
+  // reasoning is NOT in SessionStats.tokens (per dispatch-lifecycle.ts).
+  // The helper accepts it in the include list for future-proofing, but it
+  // cannot be summed from stats alone — see the limitation note above.
+  // (Explicit comment instead of silent no-op so a future reader sees why
+  // reasoning is treated as 0 here.)
+  if (list.includes("reasoning")) {
+    // Intentionally no-op: reasoning tokens are not on SessionStats. The
+    // runtime's reasoningTokens field is the source of truth (see
+    // dispatch-lifecycle.ts:148-167) but is not plumbed into this helper.
+    // When the gate fires on the `reasoning` dimension, the helper returns
+    // the sum of the other four — which may underreport. Pin this in the
+    // gap report and fix in a follow-up that threads runtime through.
+    void stats;
+  }
+  return sum;
+}
 
 // Pre-flight gate: returns a BudgetBlock describing the first violated cap
 // (worker or team scope; tokens/costUsd/runs/depth), or undefined when the
 // ledger + branch are under every configured cap. Pure — no I/O, no SDK.
+//
+// `stats` is optional — when supplied, the worker-tokens comparison uses
+// `tokensForInclude(stats, include)` so the gate honors the policy's
+// `include` list (the wave-budget-include-filter fix). When absent, the gate
+// falls back to `ledger.cumulative.tokens` (the legacy behavior, which
+// folds cacheRead / cacheWrite in). The fallback is used at delegation-time
+// pre-flight in worker-tools.ts:278 because no AgentSession is open yet at
+// that point — the mid-run gate (events.ts buildBudgetToolCallHandler) is
+// where the include-aware comparison fires during the run.
 export function checkBudgetPolicy(
   ledger: BudgetLedger,
   policy: WorkerBudgetPolicy,
   branch: SessionEntry[],
+  stats?: SessionStats,
 ): BudgetBlock | undefined {
   // G-29 boundary check: a structurally-malformed policy (missing the
   // required `worker` field) raises TypeError so the dispatcher refuses with
@@ -42,12 +98,20 @@ export function checkBudgetPolicy(
   const teamCaps = policy.team;
 
   // Worker scope (in documented evaluation order: tokens → costUsd → runs).
+  // Wave-budget-include-filter: when `stats` is supplied, the comparison
+  // uses tokensForInclude(stats, include) so cacheRead / cacheWrite are
+  // excluded from the comparison when the policy's include list says so.
+  // Without stats, the legacy ledger.cumulative.tokens fallback is used.
+  const workerTokensInclude: IncludeKeys = workerCaps.tokens?.include ?? ["input", "output"];
+  const workerTokensUsed = stats
+    ? tokensForInclude(stats, workerTokensInclude)
+    : ledger.cumulative.tokens;
   if (
     workerCaps.tokens?.cap !== undefined &&
-    ledger.cumulative.tokens >= workerCaps.tokens.cap
+    workerTokensUsed >= workerCaps.tokens.cap
   ) {
     return {
-      reason: `Worker token budget exhausted: ${ledger.cumulative.tokens}/${workerCaps.tokens.cap}`,
+      reason: `Worker token budget exhausted: ${workerTokensUsed}/${workerCaps.tokens.cap}`,
       scope: "worker",
       resource: "tokens",
       remaining: { tokens: 0 },

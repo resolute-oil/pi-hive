@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import type { AgentSession, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, SessionEntry, SessionStats } from "@earendil-works/pi-coding-agent";
 import {
   checkBudgetPolicy,
   workerConsumedTokens,
@@ -18,6 +18,7 @@ import {
   ratioRemaining,
   crossedThreshold,
   budgetRemaining,
+  tokensForInclude,
 } from "../src/engine/budget/policy.ts";
 import { BudgetLedger } from "../src/engine/budget/ledger.ts";
 import type { AgentRuntime, BudgetLedgerEntry, HiveState, WorkerBudgetPolicy } from "../src/core/types.ts";
@@ -373,4 +374,299 @@ test("budgetRemaining: input_output scope ignores cache + reasoning tokens", () 
   const { worker: rem } = budgetRemaining(state, worker);
   // scope=input_output: only input + output = 800 counts toward tokens used.
   assert.equal(rem.tokens, 1000 - 800, "input_output scope ignores cache and reasoning");
+});
+
+// =====================================================================
+// Wave budget-include-filter — fix(budget): honor include list in pre-flight
+// gate and tool-call handler. Tests cover the new `tokensForInclude` helper
+// and the include-aware `checkBudgetPolicy` overload that takes a 4th
+// `stats?: SessionStats` argument. The legacy 3-arg overload falls back to
+// `ledger.cumulative.tokens` (the documented behavior at delegation-time
+// pre-flight, where no AgentSession is open yet).
+// =====================================================================
+
+// Helper to build a SessionStats-shaped value with explicit per-dimension
+// counts. Mirrors the SDK's contract: `total = input + output + cacheRead +
+// cacheWrite` (reasoning is on the runtime, not stats).
+function statsOf(input: number, output: number, cacheRead = 0, cacheWrite = 0) {
+  return { input, output, cacheRead, cacheWrite, total: input + output + cacheRead + cacheWrite };
+}
+
+// ── T1: tokensForInclude helper sums the requested dimensions ──────────────
+
+test("tokensForInclude: sums only the dimensions named in include", () => {
+  const stats = {
+    sessionFile: undefined as undefined,
+    sessionId: "test",
+    userMessages: 0,
+    assistantMessages: 0,
+    toolCalls: 0,
+    toolResults: 0,
+    totalMessages: 0,
+    tokens: statsOf(100, 50, 200_000, 80_000), // total = 280150
+    cost: 1.0,
+  };
+  assert.equal(tokensForInclude(stats, ["input"]), 100, "include=[input] → 100");
+  assert.equal(tokensForInclude(stats, ["output"]), 50, "include=[output] → 50");
+  assert.equal(tokensForInclude(stats, ["input", "output"]), 150, "include=[input,output] → 150");
+  assert.equal(tokensForInclude(stats, ["cacheRead"]), 200_000, "include=[cacheRead] → 200_000");
+  assert.equal(tokensForInclude(stats, ["cacheWrite"]), 80_000, "include=[cacheWrite] → 80_000");
+  assert.equal(
+    tokensForInclude(stats, ["input", "output", "cacheRead", "cacheWrite"]),
+    280150,
+    "include=all-four → 280150",
+  );
+});
+
+test("tokensForInclude: empty / undefined include list falls back to input + output (the policy.ts §2.13 default)", () => {
+  const stats = {
+    sessionFile: undefined as undefined,
+    sessionId: "test",
+    userMessages: 0,
+    assistantMessages: 0,
+    toolCalls: 0,
+    toolResults: 0,
+    totalMessages: 0,
+    tokens: statsOf(100, 50, 999_999, 888_888), // total includes lots of cache
+    cost: 1.0,
+  };
+  // Empty include list → default to input + output (per the helper's
+  // documented behavior; matches the policy's include default).
+  assert.equal(tokensForInclude(stats, []), 150, "include=[] defaults to [input,output] → 150");
+});
+
+// ── T2: checkBudgetPolicy 4-arg overload — include filter on worker tokens ─
+
+test("checkBudgetPolicy 4-arg overload: include=[input,output] ignores cacheRead/write when stats supplied", async () => {
+  // The user's 350,000-token scenario: a session that has burned huge cache hits
+  // but only ~10K of input+output. With cap=20K and include=[input,output],
+  // the gate MUST NOT fire even though stats.tokens.total is 350K.
+  const { sm, ledger } = await ledgerWith([
+    // The ledger's cumulative.tokens reflects the prior cumulative. We don't
+    // pass it to the gate here — the 4-arg overload uses stats instead.
+    { cumulative: { tokens: 350_000, costUsd: 5.0, runs: 5 } },
+  ]);
+  const policy: WorkerBudgetPolicy = {
+    worker: { tokens: { cap: 20_000, window: "per-session", include: ["input", "output"] } },
+    team: {},
+  };
+  const branch = sm.getBranch();
+  // Session has 10K input + 5K output = 15K; cacheRead=200K; cacheWrite=135K
+  // (total = 350K). include=[input,output] → 15K. 15K < 20K → no block.
+  const stats = {
+    sessionFile: undefined as undefined,
+    sessionId: "user-scenario",
+    userMessages: 0,
+    assistantMessages: 0,
+    toolCalls: 0,
+    toolResults: 0,
+    totalMessages: 0,
+    tokens: statsOf(10_000, 5_000, 200_000, 135_000),
+    cost: 5.0,
+  } as const;
+  const block = checkBudgetPolicy(ledger, policy, branch, stats as unknown as SessionStats);
+  assert.equal(block, undefined, "include=[input,output] gate lets through when cache is huge but input+output is under cap (the user's bug)");
+});
+
+test("checkBudgetPolicy 4-arg overload: include=[input,output] fires when input+output exceeds cap (cache alone doesn't push it over)", async () => {
+  const { sm, ledger } = await ledgerWith([
+    { cumulative: { tokens: 100, costUsd: 1, runs: 1 } },
+  ]);
+  const policy: WorkerBudgetPolicy = {
+    worker: { tokens: { cap: 20_000, window: "per-session", include: ["input", "output"] } },
+    team: {},
+  };
+  const branch = sm.getBranch();
+  // input+output = 25K > cap=20K. The cache dimension contributes 1M but
+  // is excluded by include. Gate MUST fire on the include-scoped sum.
+  const stats = {
+    sessionFile: undefined as undefined,
+    sessionId: "x",
+    userMessages: 0,
+    assistantMessages: 0,
+    toolCalls: 0,
+    toolResults: 0,
+    totalMessages: 0,
+    tokens: statsOf(15_000, 10_000, 1_000_000, 500_000), // total = 1.5M
+    cost: 1.0,
+  } as const;
+  const block = checkBudgetPolicy(ledger, policy, branch, stats as unknown as SessionStats);
+  assert.ok(block !== undefined, "gate fires when include-scoped sum exceeds cap");
+  assert.equal(block!.scope, "worker");
+  assert.equal(block!.resource, "tokens");
+  assert.equal(block!.limit.tokens, 20_000);
+  // The reason string reflects the include-scoped count, not the total.
+  assert.match(block!.reason, /Worker token budget exhausted: 25000\/20000/, "reason shows include-scoped usage (25K), not the total (1.5M)");
+});
+
+test("checkBudgetPolicy 4-arg overload: include=all-four sums every dimension (matches the pre-fix behavior)", async () => {
+  const { sm, ledger } = await ledgerWith([
+    { cumulative: { tokens: 100, costUsd: 1, runs: 1 } },
+  ]);
+  const policy: WorkerBudgetPolicy = {
+    worker: { tokens: { cap: 1000, window: "per-session", include: ["input", "output", "cacheRead", "cacheWrite"] } },
+    team: {},
+  };
+  const branch = sm.getBranch();
+  const stats = {
+    sessionFile: undefined as undefined,
+    sessionId: "x",
+    userMessages: 0,
+    assistantMessages: 0,
+    toolCalls: 0,
+    toolResults: 0,
+    totalMessages: 0,
+    tokens: statsOf(200, 300, 400, 500), // total = 1400
+    cost: 1.0,
+  } as const;
+  const block = checkBudgetPolicy(ledger, policy, branch, stats as unknown as SessionStats);
+  assert.ok(block !== undefined, "include=all-four fires when total = 1400 > cap = 1000");
+  assert.equal(block!.limit.tokens, 1000);
+});
+
+test("checkBudgetPolicy 4-arg overload: include=undefined defaults to input+output (per policy.ts §2.13/C2)", async () => {
+  // The policy's tokens.include is optional; when omitted, the gate defaults
+  // to ["input", "output"] — matching the policy resolver's documented
+  // default. Verify the default flow lets a large cache-only session through.
+  const { sm, ledger } = await ledgerWith([
+    { cumulative: { tokens: 100, costUsd: 1, runs: 1 } },
+  ]);
+  const policy: WorkerBudgetPolicy = {
+    worker: { tokens: { cap: 20_000, window: "per-session" } }, // no include
+    team: {},
+  };
+  const branch = sm.getBranch();
+  const stats = {
+    sessionFile: undefined as undefined,
+    sessionId: "x",
+    userMessages: 0,
+    assistantMessages: 0,
+    toolCalls: 0,
+    toolResults: 0,
+    totalMessages: 0,
+    tokens: statsOf(5_000, 1_000, 800_000, 100_000), // total = 906K, but input+output = 6K
+    cost: 1.0,
+  } as const;
+  const block = checkBudgetPolicy(ledger, policy, branch, stats as unknown as SessionStats);
+  assert.equal(block, undefined, "include=undefined → default [input,output] → 6K < 20K → no block");
+});
+
+test("checkBudgetPolicy 4-arg overload: include includes reasoning → reasoning contributes 0 (limitation: not on SessionStats)", async () => {
+  // Documented limitation: reasoning tokens are on the runtime, not on
+  // SessionStats. The helper accepts reasoning in the include list for
+  // future-proofing, but cannot sum it from stats alone. This test pins
+  // the current behavior (other dimensions still summed correctly) so a
+  // future fix that wires reasoning through is caught by the diff.
+  const { sm, ledger } = await ledgerWith([
+    { cumulative: { tokens: 100, costUsd: 1, runs: 1 } },
+  ]);
+  const policy: WorkerBudgetPolicy = {
+    worker: { tokens: { cap: 1000, window: "per-session", include: ["input", "output", "cacheRead", "cacheWrite", "reasoning"] } },
+    team: {},
+  };
+  const branch = sm.getBranch();
+  // input+output+cacheRead+cacheWrite = 800; reasoning contributes 0.
+  const stats = {
+    sessionFile: undefined as undefined,
+    sessionId: "x",
+    userMessages: 0,
+    assistantMessages: 0,
+    toolCalls: 0,
+    toolResults: 0,
+    totalMessages: 0,
+    tokens: statsOf(200, 200, 200, 200), // total = 800 (reasoning is on runtime)
+    cost: 0,
+  } as const;
+  const block = checkBudgetPolicy(ledger, policy, branch, stats as unknown as SessionStats);
+  assert.equal(block, undefined, "include with reasoning still gates on the 4 stats-tracked dimensions (sum=800 < cap=1000)");
+  // Bump input+output to push over cap and confirm the gate fires despite
+  // the reasoning contribution being 0.
+  const statsOver = {
+    sessionFile: undefined as undefined,
+    sessionId: "x",
+    userMessages: 0,
+    assistantMessages: 0,
+    toolCalls: 0,
+    toolResults: 0,
+    totalMessages: 0,
+    tokens: statsOf(600, 600, 200, 200), // total = 1600
+    cost: 0,
+  } as const;
+  const blockOver = checkBudgetPolicy(ledger, policy, branch, statsOver as unknown as SessionStats);
+  assert.ok(blockOver !== undefined, "gate fires when stats-tracked dimensions exceed cap");
+  assert.equal(blockOver!.limit.tokens, 1000);
+});
+
+// ── T3: legacy 3-arg overload falls back to ledger.cumulative.tokens ─────
+
+test("checkBudgetPolicy 3-arg overload (no stats): falls back to ledger.cumulative.tokens (legacy behavior)", async () => {
+  // The legacy call site (worker-tools.ts:278 pre-flight) does not pass
+  // stats because no session is open at delegation start. It uses the
+  // ledger's cumulative.tokens as the comparison value. This is the
+  // documented fallback — pin it so a future refactor doesn't silently
+  // change the comparison semantics at the call site.
+  const { sm, ledger } = await ledgerWith([
+    { cumulative: { tokens: 5000, costUsd: 1, runs: 1 } }, // cumulative.tokens = 5000
+  ]);
+  const policy: WorkerBudgetPolicy = {
+    worker: { tokens: { cap: 1000, window: "per-session", include: ["input", "output"] } },
+    team: {},
+  };
+  const branch = sm.getBranch();
+  // No stats passed → legacy fallback. cumulative.tokens (5000) > cap (1000)
+  // → gate fires even though the include-scoped sum might be different.
+  const block = checkBudgetPolicy(ledger, policy, branch);
+  assert.ok(block !== undefined, "3-arg overload fires on cumulative.tokens when no stats supplied");
+  assert.equal(block!.limit.tokens, 1000);
+  // reason string shows the cumulative value, not the include-scoped value.
+  assert.match(block!.reason, /5000\/1000/, "reason reflects the cumulative.tokens fallback path");
+});
+
+// ── T4: the user's exact 350,000-token scenario now respects include ──
+
+test("user's 350,000-token scenario: cache hits do not push include=[input,output] gate over", async () => {
+  // The bug report: user set include=[input,output] expecting only those
+  // dimensions to count toward the cap, but the gate was comparing the full
+  // stats.tokens.total (input + output + cacheRead + cacheWrite). When
+  // cache is large, the gate fired earlier than expected. With the
+  // include-aware gate, the user can configure cache-heavy sessions
+  // without the gate misfiring.
+  const { sm, ledger } = await ledgerWith([
+    // The ledger writes a single cumulative entry reflecting prior spend.
+    // This emulates a worker that has been running for a while; the
+    // pre-flight gate reads the cumulative to decide whether to admit
+    // the new dispatch.
+    { cumulative: { tokens: 350_000, costUsd: 5.0, runs: 5 } },
+  ]);
+  const policy: WorkerBudgetPolicy = {
+    worker: { tokens: { cap: 20_000, window: "per-session", include: ["input", "output"] } },
+    team: {},
+  };
+  const branch = sm.getBranch();
+  // Live stats from the worker session: input=10K, output=5K, cacheRead=200K,
+  // cacheWrite=135K. total = 350K, but include=[input,output] → 15K < 20K.
+  const stats = {
+    sessionFile: undefined as undefined,
+    sessionId: "user-scenario",
+    userMessages: 0,
+    assistantMessages: 0,
+    toolCalls: 0,
+    toolResults: 0,
+    totalMessages: 0,
+    tokens: statsOf(10_000, 5_000, 200_000, 135_000),
+    cost: 5.0,
+  } as const;
+  const block = checkBudgetPolicy(ledger, policy, branch, stats as unknown as SessionStats);
+  assert.equal(block, undefined, "350,000-token scenario with include=[input,output] does NOT block when input+output < cap");
+
+  // Negative control: same scenario but include=all-four → block fires
+  // because total = 350K >> cap = 20K. Pin that the include filter is
+  // what prevents the false positive, not a bug in the comparison itself.
+  const allFourPolicy: WorkerBudgetPolicy = {
+    worker: { tokens: { cap: 20_000, window: "per-session", include: ["input", "output", "cacheRead", "cacheWrite"] } },
+    team: {},
+  };
+  const blockAllFour = checkBudgetPolicy(ledger, allFourPolicy, branch, stats as unknown as SessionStats);
+  assert.ok(blockAllFour !== undefined, "include=all-four DOES block when total = 350K >> cap = 20K (negative control)");
+  assert.match(blockAllFour!.reason, /350000\/20000/);
 });

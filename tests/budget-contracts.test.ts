@@ -28,7 +28,13 @@ test("BudgetPolicy exports the six pure functions with pinned arities", () => {
   assert.equal(typeof policy.ratioRemaining, "function", "ratioRemaining must be exported");
   assert.equal(typeof policy.crossedThreshold, "function", "crossedThreshold must be exported");
   // Arities pin the signature so Wave 1 cannot drop parameters.
-  assert.equal(policy.checkBudgetPolicy.length, 3, "checkBudgetPolicy takes (ledger, policy, branch)");
+  // Wave-budget-include-filter: checkBudgetPolicy gained an optional
+  // 4th `stats?: SessionStats` parameter. JS Function.length counts
+  // the optional parameter (TS `?` is a type-only annotation), so the
+  // arity is now 4. Pin it here so a future refactor that drops the
+  // parameter (or adds a default value, which would shrink length)
+  // breaks here before reaching runtime.
+  assert.equal(policy.checkBudgetPolicy.length, 4, "checkBudgetPolicy takes (ledger, policy, branch, stats?) — arity is 4");
   assert.equal(policy.workerConsumedTokens.length, 2, "workerConsumedTokens takes (session, scope)");
   assert.equal(policy.workerConsumedCost.length, 1, "workerConsumedCost takes (session)");
   assert.equal(policy.teamUsage.length, 1, "teamUsage takes (branch)");

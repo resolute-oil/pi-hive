@@ -1358,3 +1358,130 @@ test("Wave 3 fixup Issue 3 / T4.1: agent_end followed by agent_settled yields ex
   assert.equal(ledgersAfterAgentSettled[0].data.marker, "checkpoint", "the written entry's marker is 'checkpoint'");
   __resetBudgetContextsForTests();
 });
+
+// =====================================================================
+// Wave budget-include-filter — fix(budget): buildBudgetToolCallHandler
+// honors the policy's `include` list. The pre-fix code compared
+// `stats.tokens.total` (which folds cacheRead / cacheWrite in) against
+// the cap, so a worker with high cache hits would get blocked mid-run
+// even when the include-scoped usage was well under cap. The new code
+// uses `tokensForInclude(stats, include)` so the comparison reflects the
+// same dimensions the dashboard's `tokenBudgetScope: "input_output"`
+// display honors.
+// =====================================================================
+
+// Helper: build an AgentSession whose getSessionStats returns the supplied
+// per-dimension breakdown (mirrors the SDK contract: total = input +
+// output + cacheRead + cacheWrite; reasoning is on the runtime, not stats).
+function sessionOfStats(input: number, output: number, cacheRead = 0, cacheWrite = 0) {
+  return {
+    subscribe: () => () => {},
+    getSessionStats: () => ({
+      sessionFile: undefined as undefined,
+      sessionId: "include-filter-test",
+      userMessages: 0,
+      assistantMessages: 0,
+      toolCalls: 0,
+      toolResults: 0,
+      totalMessages: 0,
+      tokens: { input, output, cacheRead, cacheWrite, total: input + output + cacheRead + cacheWrite },
+      cost: 0,
+    }),
+    sessionManager: { appendCustomMessageEntry() {}, appendCustomEntry() {} },
+  } as unknown as AgentSession;
+}
+
+// ── T5: tool_call handler respects include=[input,output] — lets through when only cache is large ──
+
+test("buildBudgetToolCallHandler respects include=[input,output]: bash NOT blocked when only cacheRead is large", async () => {
+  __resetBudgetContextsForTests();
+  // cap=1000; stats have input=100, output=50, cacheRead=200_000, cacheWrite=80_000.
+  // Pre-fix: stats.tokens.total = 200150 → block. Post-fix: input+output = 150 < 1000 → no block.
+  const session = sessionOfStats(100, 50, 200_000, 80_000);
+  installBudgetEventHooks(
+    session,
+    makeStubLedger("tester"),
+    { worker: { tokens: { cap: 1000, window: "per-session", include: ["input", "output"] } }, team: {} },
+    new AbortController(),
+  );
+  const handler = buildBudgetToolCallHandler("tester");
+  const result = await handler({ toolName: "bash", input: { command: "ls" } }, {} as any);
+  assert.equal(result, undefined, "include=[input,output] → bash passes through even with 280K total when input+output < cap");
+  __resetBudgetContextsForTests();
+});
+
+test("buildBudgetToolCallHandler respects include=[input,output]: bash BLOCKED when input+output exceeds cap", async () => {
+  __resetBudgetContextsForTests();
+  // cap=1000; input=600, output=500 → input+output = 1100 > 1000. Cache alone doesn't push over.
+  const session = sessionOfStats(600, 500, 10_000, 5_000); // total = 16100
+  installBudgetEventHooks(
+    session,
+    makeStubLedger("tester"),
+    { worker: { tokens: { cap: 1000, window: "per-session", include: ["input", "output"] } }, team: {} },
+    new AbortController(),
+  );
+  const handler = buildBudgetToolCallHandler("tester");
+  const result = await handler({ toolName: "bash", input: { command: "ls" } }, {} as any);
+  assert.ok(result, "include=[input,output] fires when input+output > cap");
+  assert.equal(result!.block, true);
+  // reason shows the include-scoped usage (1100), not the total (16100).
+  assert.match(result!.reason ?? "", /tokens 1100\/1000/, "reason reflects include-scoped usage, not total");
+  __resetBudgetContextsForTests();
+});
+
+test("buildBudgetToolCallHandler respects include=all-four: bash BLOCKED when total exceeds cap", async () => {
+  __resetBudgetContextsForTests();
+  // cap=1000; total = 200+300+100+200 = 800. To force block, push over cap.
+  // input=400, output=400, cacheRead=300, cacheWrite=300 → total = 1400 > 1000.
+  const session = sessionOfStats(400, 400, 300, 300);
+  installBudgetEventHooks(
+    session,
+    makeStubLedger("tester"),
+    { worker: { tokens: { cap: 1000, window: "per-session", include: ["input", "output", "cacheRead", "cacheWrite"] } }, team: {} },
+    new AbortController(),
+  );
+  const handler = buildBudgetToolCallHandler("tester");
+  const result = await handler({ toolName: "bash", input: { command: "ls" } }, {} as any);
+  assert.ok(result, "include=all-four fires when total > cap");
+  assert.equal(result!.block, true);
+  assert.match(result!.reason ?? "", /tokens 1400\/1000/, "reason shows the all-four sum");
+  __resetBudgetContextsForTests();
+});
+
+test("buildBudgetToolCallHandler respects include=undefined (defaults to [input,output])", async () => {
+  __resetBudgetContextsForTests();
+  // cap=1000; input=200, output=200 → input+output = 400 < 1000. cacheRead=1M.
+  // Default include=[input,output] → no block.
+  const session = sessionOfStats(200, 200, 1_000_000, 500_000);
+  installBudgetEventHooks(
+    session,
+    makeStubLedger("tester"),
+    { worker: { tokens: { cap: 1000, window: "per-session" } }, team: {} }, // no include
+    new AbortController(),
+  );
+  const handler = buildBudgetToolCallHandler("tester");
+  const result = await handler({ toolName: "bash", input: { command: "ls" } }, {} as any);
+  assert.equal(result, undefined, "include=undefined → defaults to [input,output] → no block when only cache is large");
+  __resetBudgetContextsForTests();
+});
+
+test("buildBudgetToolCallHandler applies the include filter to all 4 BLOCKED tools (bash, edit, write, read)", async () => {
+  __resetBudgetContextsForTests();
+  // input=600, output=600 → input+output = 1200 > cap=1000. cache is 0 so all four
+  // include lists should fire — but the test specifically checks that the
+  // include=[input,output] path applies to all four tools uniformly.
+  const session = sessionOfStats(600, 600);
+  installBudgetEventHooks(
+    session,
+    makeStubLedger("tester"),
+    { worker: { tokens: { cap: 1000, window: "per-session", include: ["input", "output"] } }, team: {} },
+    new AbortController(),
+  );
+  const handler = buildBudgetToolCallHandler("tester");
+  for (const toolName of ["bash", "edit", "write", "read"]) {
+    const result = await handler({ toolName, input: { command: "x", path: "x" } }, {} as any);
+    assert.ok(result, `block returned for ${toolName} when include-scoped usage > cap`);
+    assert.equal(result!.block, true, `block.block=true for ${toolName}`);
+  }
+  __resetBudgetContextsForTests();
+});
