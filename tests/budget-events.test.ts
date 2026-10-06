@@ -216,6 +216,96 @@ test("message_end calls ledger.maybeSnapshot with the same cumulative + policy +
   assert.strictEqual(calls.maybeSnapshot[0].signal, controller.signal, "maybeSnapshot receives the supplied signal");
 });
 
+// ── T3: message_end refreshes the runtime's context-window fields (cadence) ─
+
+test("message_end refreshes runtime.contextTokens / contextPct / contextWindow at every event (T3 cadence)", () => {
+  // Pre-fix: getContextUsage() only fired at run end
+  // (dispatch-lifecycle.ts:127-130), so the runtime's context fields were
+  // stale during the run. Post-fix: the events.ts message_end handler
+  // updates them within one event of message_end so the mid-run tool-call
+  // gate (T5) and the formatContextFill display (T6) see current values.
+  const { session } = makeSession();
+  const controller = new AbortController();
+  // The T3 handler keys the runtime lookup by ledger.agentName, so the
+  // stub ledger must carry an agentName that matches the runtime's slug.
+  const ledger = makeStubLedger("agent") as unknown as ReturnType<typeof makeLedger>["ledger"];
+
+  // Fake session: getContextUsage returns the documented ContextUsage shape
+  // (tokens: number | null, contextWindow: number, percent: number | null).
+  // The session also exposes a setter so the test can change the value
+  // across multiple message_end events.
+  let currentUsage = { tokens: 50_000, contextWindow: 200_000, percent: 0.25 };
+  const sessionWithUsage = {
+    ...session,
+    getContextUsage: () => currentUsage,
+  } as unknown as AgentSession & { fire: (event: AppSubscriptionSessionEvent) => void };
+
+  // Fake state with a runtime keyed by the ledger's agent slug ("agent" —
+  // matches the base ledger's agentName). contextPct=0 is the initial value
+  // so we can prove the handler overwrote it (the agent-default initial
+  // state would have contextPct=0 from a fresh dispatch).
+  const runtime = {
+    config: { name: "agent", slug: "agent", role: "member" as const },
+    contextPct: 0,
+    contextTokens: undefined,
+    contextWindow: undefined,
+  };
+  const fakeState = {
+    runtimes: new Map([["agent", runtime]]),
+  } as unknown as import("../src/core/types.ts").HiveState;
+
+  installBudgetEventHooks(sessionWithUsage, ledger, basePolicy, controller, fakeState);
+
+  // First message_end: 50K/200K = 25% — well below the original 0%
+  // baseline, so the runtime fields should update.
+  sessionWithUsage.fire({ type: "message_end", message: { usage: {} as any, role: "assistant" } } as AppSubscriptionSessionEvent);
+  assert.equal(runtime.contextTokens, 50_000, "contextTokens updated to 50K after first message_end");
+  assert.equal(runtime.contextWindow, 200_000, "contextWindow updated to 200K after first message_end");
+  assert.equal(runtime.contextPct, 0.25, "contextPct updated to 0.25 after first message_end");
+
+  // Bump usage to 75% and fire again — the runtime should reflect the new
+  // value (proves the update is "every message_end", not "first only").
+  currentUsage = { tokens: 150_000, contextWindow: 200_000, percent: 0.75 };
+  sessionWithUsage.fire({ type: "message_end", message: { usage: {} as any, role: "assistant" } } as AppSubscriptionSessionEvent);
+  assert.equal(runtime.contextTokens, 150_000, "contextTokens updated to 150K after second message_end");
+  assert.equal(runtime.contextPct, 0.75, "contextPct updated to 0.75 after second message_end");
+});
+
+test("message_end gracefully handles getContextUsage() returning null tokens (T3 null safety)", () => {
+  // SDK contract: tokens can be null when "right after compaction, before
+  // next LLM response." The handler must NOT overwrite the runtime's
+  // last-known values with null (would flash to 0 in the dashboard).
+  // Mirrors the orchestrator's behavior in src/integration/hooks.ts:360.
+  const { session } = makeSession();
+  const controller = new AbortController();
+  const ledger = makeStubLedger("agent") as unknown as ReturnType<typeof makeLedger>["ledger"];
+
+  // First call returns a real value; second returns null tokens (post-compaction).
+  const usageQueue: Array<{ tokens: number | null; contextWindow: number; percent: number | null }> = [
+    { tokens: 80_000, contextWindow: 200_000, percent: 0.40 },
+    { tokens: null, contextWindow: 200_000, percent: null },
+  ];
+  const sessionWithUsage = {
+    ...session,
+    getContextUsage: () => usageQueue.shift() ?? { tokens: 80_000, contextWindow: 200_000, percent: 0.40 },
+  } as unknown as AgentSession & { fire: (event: AppSubscriptionSessionEvent) => void };
+
+  const runtime = { config: { name: "agent", slug: "agent", role: "member" as const }, contextPct: 0, contextTokens: undefined as number | undefined, contextWindow: undefined as number | undefined };
+  const fakeState = { runtimes: new Map([["agent", runtime]]) } as unknown as import("../src/core/types.ts").HiveState;
+
+  installBudgetEventHooks(sessionWithUsage, ledger, basePolicy, controller, fakeState);
+
+  // First message_end: real value lands.
+  sessionWithUsage.fire({ type: "message_end", message: { usage: {} as any, role: "assistant" } } as AppSubscriptionSessionEvent);
+  assert.equal(runtime.contextTokens, 80_000, "first message_end sets contextTokens");
+
+  // Second message_end: null tokens. The handler must skip the update
+  // (the "last known" 80K stays).
+  sessionWithUsage.fire({ type: "message_end", message: { usage: {} as any, role: "assistant" } } as AppSubscriptionSessionEvent);
+  assert.equal(runtime.contextTokens, 80_000, "contextTokens preserves last-known value when SDK returns null tokens");
+  assert.equal(runtime.contextPct, 0.40, "contextPct preserves last-known value when SDK returns null percent");
+});
+
 // ── Test 4: budget_warning emitted at 20% remaining (default) ─────────────
 
 test("message_end emits budget_warning when remaining ≤ 20% (default threshold; no strategies block)", () => {

@@ -114,7 +114,7 @@ Tasks must complete in order (T1 → T2 → T3 → T4 → T5 → T6 → T7 → T
 |---|---|
 | [x] T1 | Type + schema additions for `ContextConstraint`. Gate: `just typecheck` clean; `grep -rn "ContextConstraint" src/core/types.ts` returns the new type |
 | [x] T2 | Policy resolver surfaces `context`. Gate: `just typecheck` clean; unit test asserts a config with `context: { tokens: 100_000 }` resolves to the expected policy shape |
-| [ ] T3 | Context update cadence — `getContextUsage()` at every `message_end`. Gate: existing tests still pass; new test asserts `runtime.contextTokens` updates within one event of `message_end` |
+| [x] T3 | Context update cadence — `getContextUsage()` at every `message_end`. Gate: existing tests still pass; new test asserts `runtime.contextTokens` updates within one event of `message_end` |
 | [ ] T4 | Pre-flight gate context check. Gate: 3 new tests in `budget-policy.test.ts` — nominal cap, percentage cap, both-cap (tokens + context) |
 | [ ] T5 | Tool-call handler context check. Gate: 2 new tests in `budget-events.test.ts` — nominal + percentage |
 | [ ] T6 | Display — `budgetRemaining` exposes context state. Gate: existing dashboard tests still pass; new test asserts `budgetRemaining` returns the context fields |
