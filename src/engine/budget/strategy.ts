@@ -12,6 +12,7 @@
 
 import type {
   AgentConfig,
+  ContextConstraint,
   HiveConfig,
   WorkerBudgetPolicy,
   WorkerBudgetStrategy,
@@ -174,6 +175,15 @@ export function resolveWorkerBudgetPolicy(
   } else if (globalWorker.depth?.cap !== undefined) {
     worker.depth = { cap: globalWorker.depth.cap };
   }
+  // Worker.context (wave context-constraint). The ContextConstraint is
+  // passed through verbatim — the schema-level `enforceContextConstraint`
+  // already validated "exactly one of tokens/percent is set," so the
+  // resolver can carry the object as-is. Per-agent governance does not
+  // currently expose a context override; if a future frontmatter key is
+  // added, this branch would extend to honor it. For now: global only.
+  if (globalWorker.context !== undefined) {
+    worker.context = globalWorker.context;
+  }
 
   // Team.tokens — global only; teams don't carry per-agent overrides.
   if (globalTeam.tokens?.cap !== undefined) {
@@ -186,6 +196,13 @@ export function resolveWorkerBudgetPolicy(
   // Team.runs
   if (globalTeam.runs?.cap !== undefined) {
     team.runs = { cap: globalTeam.runs.cap };
+  }
+  // Team.context (wave context-constraint). Per the brief, the include list
+  // does NOT apply to context (getContextUsage().tokens is a single coherent
+  // number from the SDK; including the include list would be double-counting).
+  // Pass through verbatim, same as worker.context above.
+  if (globalTeam.context !== undefined) {
+    team.context = globalTeam.context;
   }
 
   // Strategies block (C5 conditional). Propagate from the canonical nested
