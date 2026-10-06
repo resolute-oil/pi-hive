@@ -253,6 +253,30 @@ export function installBudgetEventHooks(
       ledger.recordEvent("message_end", cumulative, controller.signal);
       ledger.maybeSnapshot(cumulative, policy, controller.signal);
 
+      // Wave context-constraint (T3) — refresh the runtime's live context
+      // fields at every message_end so the mid-run tool-call gate
+      // (T5) and the `formatContextFill` display (T6) see current values
+      // instead of the run-end-only snapshot from
+      // `dispatch-lifecycle.ts:127-130`. `getContextUsage()` is best-effort:
+      // the SDK can return null tokens (right after compaction, before next
+      // LLM response) — we skip the update in that case so the runtime
+      // keeps its last-known value rather than flashing to 0. Mirrors the
+      // orchestrator's own context poll in `src/integration/hooks.ts:360`.
+      // The runtime is keyed by the agent slug in `state.runtimes`; when
+      // `state` is undefined (e.g., unit tests), this update is a no-op
+      // because there is no live runtime to mutate.
+      try {
+        const usage = session.getContextUsage?.();
+        if (usage && state) {
+          const runtime = state.runtimes.get(agentSlug);
+          if (runtime) {
+            if (usage.percent != null) runtime.contextPct = usage.percent;
+            if (usage.tokens != null) runtime.contextTokens = usage.tokens;
+            if (usage.contextWindow != null) runtime.contextWindow = usage.contextWindow;
+          }
+        }
+      } catch { /* capability probe is best-effort; matches hooks.ts:365 */ }
+
       // Warning at warningThreshold remaining (default 0.20).
       const workerTokensCap = policy.worker.tokens?.cap;
       if (workerTokensCap !== undefined && workerTokensCap > 0) {
