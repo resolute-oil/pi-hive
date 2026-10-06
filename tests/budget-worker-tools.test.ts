@@ -18,7 +18,7 @@ import type { ExtensionContext, AgentSession, SessionManager, SessionEntry } fro
 import type { BudgetLedger } from "../src/engine/budget/ledger.ts";
 import type { WorkerBudgetPolicy } from "../src/core/types.ts";
 import type { HiveState } from "../src/core/types.ts";
-import { delegateAgent, delegateAgentWithInternals, BudgetExhaustedError } from "../src/engine/budget/worker-tools.ts";
+import { delegateAgentWithInternals, BudgetExhaustedError } from "../src/engine/budget/worker-tools.ts";
 
 // ── Test fixtures ─────────────────────────────────────────────────────────
 
@@ -290,7 +290,7 @@ test("delegateAgent calls installBudgetEventHooks(session, ledger, policy, contr
     "task",
     ctx,
     {
-      resolveWorkerBudgetPolicy: ((cfg: unknown) => { order.push("resolvePolicy"); return noCapPolicy; }) as never,
+      resolveWorkerBudgetPolicy: ((_cfg: unknown) => { order.push("resolvePolicy"); return noCapPolicy; }) as never,
       restoreLedger: (async () => { order.push("restore"); return ledger; }) as never,
       checkBudgetPolicy: (() => { order.push("check"); return undefined; }) as never,
       installBudgetEventHooks: ((s: any, l: any, p: any, c: any) => {

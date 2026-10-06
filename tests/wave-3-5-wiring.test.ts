@@ -36,11 +36,7 @@ import { dispatchAgent } from "../src/engine/dispatch.ts";
 import {
   buildWorkerOnlyTools,
   populateWorkerOnlyBindings,
-  type WorkerOnlyBindings,
 } from "../src/engine/budget/worker-only-tools.ts";
-import {
-  buildSummarizeProgressTool,
-} from "../src/agents/tools/summarize-progress.ts";
 import {
   buildRequestCompactionTool,
   buildRequestEndSessionTool,

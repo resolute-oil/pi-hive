@@ -132,7 +132,7 @@ function writeRows(dir: string, rows: Array<{ id: string; agent: string; command
   assert.equal(dirname(queuePath), dir);
 }
 
-function readQueue(dir: string): string {
+function readQueue(_dir: string): string {
   const queuePath = operatorCommandQueuePath();
   try {
     return readFileSync(queuePath, "utf8");

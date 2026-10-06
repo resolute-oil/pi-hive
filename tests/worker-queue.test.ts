@@ -13,7 +13,7 @@ import {
   releaseWorkerSlot,
 } from "../src/engine/worker-queue.ts";
 
-function runtime(name: string, overrides: Partial<AgentRuntime> = {}): AgentRuntime {
+function _runtime(name: string, overrides: Partial<AgentRuntime> = {}): AgentRuntime {
   return {
     config: { name, path: `${name}.md`, role: "member", governance: undefined },
     systemPrompt: "", status: "idle", task: "", lastWork: "", toolCount: 0, elapsedMs: 0,

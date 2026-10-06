@@ -674,7 +674,7 @@ function makeFakeLedger() {
     recordCompaction(savings: number, signal: AbortSignal) {
       calls.recordCompaction.push({ savings, signal });
     },
-    snapshot(stats: SessionStats, policy: any, marker: string, signal: AbortSignal) {
+    snapshot(stats: SessionStats, policy: any, marker: string, _signal: AbortSignal) {
       calls.snapshot.push({ stats, policy, marker });
     },
   } as unknown as BudgetLedger;
@@ -960,7 +960,7 @@ test("T5.6 (integration): restore destination has source's ledger CustomEntries 
 
   // Inject the real source SM as the sourceSessionManager. The seam lets
   // us pass createBranchedSession that delegates to the real SDK call.
-  const { session, sessionManager: fakeSM } = makeFakeRespawnSession({ sessionId: "fake" });
+  const { session, sessionManager: _fakeSM } = makeFakeRespawnSession({ sessionId: "fake" });
   // Use the real source as the source for createBranchedSession.
   const realSource = sourceSM;
 
@@ -969,7 +969,7 @@ test("T5.6 (integration): restore destination has source's ledger CustomEntries 
   // Spy on installBudgetEventHooksFn by stubbing the createAgentSessionFn
   // to return a fake AgentSession whose installBudgetEventHooksFn is captured.
   // (We assert the hooks were installed by verifying the listener registered.)
-  let hooksInstalled = false;
+  let _hooksInstalled = false;
   const fakeRestoredSession = {
     sessionId: "restored-session",
     getSessionStats(): SessionStats {
@@ -982,7 +982,7 @@ test("T5.6 (integration): restore destination has source's ledger CustomEntries 
       };
     },
     sessionManager: null as any, // set after open
-    subscribe(_listener: any) { hooksInstalled = true; return () => {}; },
+    subscribe(_listener: any) { _hooksInstalled = true; return () => {}; },
     dispose() {},
   } as unknown as AgentSession;
 

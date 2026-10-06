@@ -70,7 +70,7 @@ test("T7.8.a (integration): abort-then-`getSessionStats()` race against real Ses
   // restore (read). No `await` between write and read — the SDK's
   // appendCustomEntry is synchronous in the in-memory SM.
   const startMs = Date.now();
-  let iterations = 100;
+  const iterations = 100;
   for (let i = 0; i < iterations; i++) {
     // Simulate abort: the SDK's `getBranch()` should reflect all prior
     // writes regardless of how many "abort cycles" have passed.
