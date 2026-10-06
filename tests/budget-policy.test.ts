@@ -670,3 +670,114 @@ test("user's 350,000-token scenario: cache hits do not push include=[input,outpu
   assert.ok(blockAllFour !== undefined, "include=all-four DOES block when total = 350K >> cap = 20K (negative control)");
   assert.match(blockAllFour!.reason, /350000\/20000/);
 });
+
+// =====================================================================
+// Wave context-constraint — T4: pre-flight gate context check.
+//
+// 3 new tests pin the worker.context branch in checkBudgetPolicy:
+//   1. Nominal tokens cap: gate fires when ctx.tokens >= cap
+//   2. Percentage cap: gate fires when (ctx.tokens / ctx.contextWindow) * 100 >= percent
+//   3. Both tokens and context apply: worker is blocked by either
+// Plus one null-safety test (mirrors T3): tokens=null means skip, not block.
+// =====================================================================
+
+// Build a ContextUsageLike payload for the test (matches the SDK's
+// `getContextUsage()` return type — see src/engine/budget/policy.ts).
+function ctxUsageOf(tokens: number | null, contextWindow: number, percent?: number | null): { tokens: number | null; contextWindow: number; percent: number | null } {
+  return { tokens, contextWindow, percent: percent ?? (tokens != null ? tokens / contextWindow : null) };
+}
+
+test("checkBudgetPolicy 5-arg overload: worker.context tokens cap fires when ctx.tokens >= cap (T4 nominal)", async () => {
+  // A worker whose LLM is at 100K tokens of context, with a configured
+  // nominal cap of 100K. The gate must fire (>=, not >, so the boundary
+  // is exhausted). include is intentionally irrelevant — the brief says
+  // include does NOT apply to context (the SDK returns a single coherent
+  // number, double-counting would be wrong).
+  const { sm, ledger } = await ledgerWith([{ cumulative: { tokens: 50, costUsd: 0.001, runs: 1 } }]);
+  const policy: WorkerBudgetPolicy = {
+    worker: {
+      tokens: { cap: 1_000_000, window: "per-session", include: ["input", "output"] },
+      context: { tokens: 100_000 },
+    },
+    team: {},
+  };
+  const branch = sm.getBranch();
+  const ctx = ctxUsageOf(100_000, 200_000);
+  const block = checkBudgetPolicy(ledger, policy, branch, undefined, ctx);
+  assert.ok(block !== undefined, "context cap fires when ctx.tokens (100K) >= nominal cap (100K)");
+  assert.equal(block!.scope, "worker", "scope is worker");
+  assert.equal(block!.resource, "context", "resource is context");
+  assert.equal(block!.limit.context?.tokens, 100_000, "limit carries the violated cap (100K)");
+  assert.equal(block!.remaining.context?.tokens, 0, "remaining.context.tokens is 0 when exhausted");
+});
+
+test("checkBudgetPolicy 5-arg overload: worker.context percent cap fires at the configured 0–100 fill (T4 percent)", async () => {
+  // A worker whose LLM is at 80% of a 200K context window (160K tokens),
+  // with a configured cap of 80%. Gate must fire (>= at the boundary).
+  const { sm, ledger } = await ledgerWith([{ cumulative: { tokens: 50, costUsd: 0.001, runs: 1 } }]);
+  const policy: WorkerBudgetPolicy = {
+    worker: { context: { percent: 80 } },
+    team: {},
+  };
+  const branch = sm.getBranch();
+  const ctx = ctxUsageOf(160_000, 200_000); // 80% of 200K
+  const block = checkBudgetPolicy(ledger, policy, branch, undefined, ctx);
+  assert.ok(block !== undefined, "context percent cap fires at 80% fill with 80% cap");
+  assert.equal(block!.resource, "context", "resource is context");
+  assert.equal(block!.limit.context?.percent, 80, "limit carries the violated percent (80)");
+  assert.equal(block!.remaining.context?.percent, 80, "remaining.context.percent is 80 when the cap is 80% and fill is at the cap");
+});
+
+test("checkBudgetPolicy 5-arg overload: BOTH tokens and context apply — worker blocked by either (T4 both)", async () => {
+  // Worker has both `tokens:` (cumulative) and `context:` (current view)
+  // caps. The brief is explicit: when both are set, the worker is blocked
+  // when EITHER fires. The pre-existing tokens check fires first (it's
+  // evaluated before context in the documented order).
+  const { sm, ledger } = await ledgerWith([{ cumulative: { tokens: 500, costUsd: 0.001, runs: 1 } }]);
+  // Scenario A: tokens cap fired (cumulative.tokens=500 >= cap=400); context
+  // is well under cap. The gate must report the tokens violation, NOT
+  // skip the context check (the worker is blocked regardless).
+  const tokensFired: WorkerBudgetPolicy = {
+    worker: {
+      tokens: { cap: 400, window: "per-session", include: ["input", "output"] },
+      context: { tokens: 1_000_000 }, // context is well under cap
+    },
+    team: {},
+  };
+  const branch = sm.getBranch();
+  const ctxUnder = ctxUsageOf(50_000, 200_000);
+  const blockTokens = checkBudgetPolicy(ledger, tokensFired, branch, undefined, ctxUnder);
+  assert.ok(blockTokens !== undefined, "gate fires when tokens cap is exhausted, even with context well under cap");
+  assert.equal(blockTokens!.resource, "tokens", "resource is tokens (the dimension that fired)");
+
+  // Scenario B: context cap fired (ctx.tokens=200K >= cap=100K); tokens
+  // are under cap. The gate must report the context violation.
+  const contextFired: WorkerBudgetPolicy = {
+    worker: {
+      tokens: { cap: 1_000_000, window: "per-session", include: ["input", "output"] },
+      context: { tokens: 100_000 },
+    },
+    team: {},
+  };
+  const ctxAtCap = ctxUsageOf(200_000, 400_000);
+  const blockCtx = checkBudgetPolicy(ledger, contextFired, branch, undefined, ctxAtCap);
+  assert.ok(blockCtx !== undefined, "gate fires when context cap is exhausted, even with tokens well under cap");
+  assert.equal(blockCtx!.resource, "context", "resource is context (the dimension that fired)");
+  assert.equal(blockCtx!.limit.context?.tokens, 100_000);
+});
+
+test("checkBudgetPolicy 5-arg overload: context check skipped gracefully when ctx.tokens is null (T4 null safety)", async () => {
+  // SDK contract: tokens can be null "right after compaction, before next
+  // LLM response." The gate must NOT block — the comparison has no
+  // meaningful value, so the check is a no-op. This matches the
+  // T3 (cadence) null-handling test in budget-events.test.ts.
+  const { sm, ledger } = await ledgerWith([{ cumulative: { tokens: 50, costUsd: 0.001, runs: 1 } }]);
+  const policy: WorkerBudgetPolicy = {
+    worker: { context: { tokens: 100_000 } },
+    team: {},
+  };
+  const branch = sm.getBranch();
+  const ctxNull = ctxUsageOf(null, 200_000, null);
+  const block = checkBudgetPolicy(ledger, policy, branch, undefined, ctxNull);
+  assert.equal(block, undefined, "null tokens → skip the check (no false-positive block)");
+});

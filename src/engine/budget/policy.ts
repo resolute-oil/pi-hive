@@ -13,7 +13,7 @@
 import type { AgentSession, SessionEntry, SessionStats } from "@earendil-works/pi-coding-agent";
 import type { BudgetLedger } from "./ledger";
 import { isLedgerEntry } from "./ledger";
-import type { AgentRuntime, BudgetBlock, HiveState, IncludeKey, IncludeKeys, WorkerBudgetPolicy, WorkerGovernance } from "../../core/types";
+import type { AgentRuntime, BudgetBlock, ContextConstraint, HiveState, IncludeKey, IncludeKeys, WorkerBudgetPolicy, WorkerGovernance } from "../../core/types";
 
 // Sum the token dimensions named in `include` from a SessionStats snapshot.
 // Pure — no I/O, no SDK. Used by checkBudgetPolicy and buildBudgetToolCallHandler
@@ -61,6 +61,82 @@ export function tokensForInclude(stats: SessionStats, include: IncludeKeys): num
   return sum;
 }
 
+// SDK contract for the `getContextUsage()` return value (re-declared here
+// so the policy module does not pull a heavy import from the SDK and the
+// test seam can pass a plain object). The SDK pins `tokens: number | null`
+// (null right after compaction, before next LLM response) and `percent:
+// number | null` (null when tokens is null). `contextWindow` is always
+// present once the model is resolved. Per the brief T4 / T5 graceful-handling
+// note: when tokens is null, the gate MUST skip the check (no block).
+export interface ContextUsageLike {
+  tokens: number | null;
+  contextWindow: number;
+  percent: number | null;
+}
+
+// Per-worker context-window-fill gate (wave context-constraint T4). Pure —
+// no I/O, no SDK. Compares the SDK's live `getContextUsage()` payload
+// against a `ContextConstraint` (nominal tokens or percentage of the
+// context window on the 0–100 scale). Returns a BudgetBlock describing the
+// violation, or undefined when the worker is under the cap (or when the
+// SDK has no usable value yet — tokens null / contextWindow 0).
+//
+// The 0–100 percent scale is what users write in the config: `{ percent:
+// 80 }` means "80% full," NOT 0.80. Internally we compare against
+// `(ctx.tokens / ctx.contextWindow) * 100` (which gives the same
+// percentage on the same scale). The SDK's `ctx.percent` is on the 0–1
+// scale — we do NOT use it directly here; the tokens / contextWindow
+// ratio is the source of truth.
+export function checkContextConstraint(
+  ctx: ContextUsageLike,
+  constraint: ContextConstraint,
+): BudgetBlock | undefined {
+  // Graceful handling: tokens=null means "right after compaction, before
+  // next LLM response." The gate must not false-fire. Same when the SDK
+  // has not yet resolved a context window (contextWindow=0). Both cases
+  // are the documented "skip" — the runtime keeps its last-known fill.
+  if (ctx.tokens == null || ctx.contextWindow <= 0) return undefined;
+
+  if ("tokens" in constraint && constraint.tokens !== undefined) {
+    // Nominal cap: stop when the LLM's current context equals or exceeds
+    // the configured absolute token count.
+    if (ctx.tokens >= constraint.tokens) {
+      return {
+        reason: `Worker context budget exhausted: ${ctx.tokens}/${constraint.tokens} tokens of context`,
+        scope: "worker",
+        resource: "context",
+        remaining: { context: { tokens: 0, percent: 100 } },
+        limit: { context: { tokens: constraint.tokens } },
+      };
+    }
+    return undefined;
+  }
+
+  if ("percent" in constraint && constraint.percent !== undefined) {
+    // Percentage cap (0–100 scale). Compute the current fill on the same
+    // scale and compare. The condition is `currentFill >= cap`; the
+    // warning path uses the same ratio with the warningThreshold.
+    const currentPct = (ctx.tokens / ctx.contextWindow) * 100;
+    if (currentPct >= constraint.percent) {
+      return {
+        reason: `Worker context budget exhausted: ${currentPct.toFixed(1)}% of context window (cap ${constraint.percent}%)`,
+        scope: "worker",
+        resource: "context",
+        remaining: { context: { tokens: 0, percent: constraint.percent } },
+        limit: { context: { percent: constraint.percent } },
+      };
+    }
+    return undefined;
+  }
+
+  // Schema enforces "exactly one of tokens/percent is set" — reaching
+  // here is a programming error (the constraint object is empty or both
+  // fields were set). Returning undefined matches the gate's "no cap
+  // configured → no block" outcome so a misconfigured constraint does
+  // NOT block the worker.
+  return undefined;
+}
+
 // Pre-flight gate: returns a BudgetBlock describing the first violated cap
 // (worker or team scope; tokens/costUsd/runs/depth), or undefined when the
 // ledger + branch are under every configured cap. Pure — no I/O, no SDK.
@@ -78,6 +154,7 @@ export function checkBudgetPolicy(
   policy: WorkerBudgetPolicy,
   branch: SessionEntry[],
   stats?: SessionStats,
+  contextUsage?: ContextUsageLike,
 ): BudgetBlock | undefined {
   // G-29 boundary check: a structurally-malformed policy (missing the
   // required `worker` field) raises TypeError so the dispatcher refuses with
@@ -141,6 +218,23 @@ export function checkBudgetPolicy(
       remaining: { runs: 0 },
       limit: { runs: workerCaps.runs.cap },
     };
+  }
+
+  // Worker.context (wave context-constraint T4). The pre-flight gate at
+  // delegation start has no AgentSession open, so the legacy worker-tools
+  // pre-flight (worker-tools.ts:278) calls checkBudgetPolicy without
+  // `contextUsage` — the context check is skipped in that path. The mid-
+  // run callers (events.ts message_end + buildBudgetToolCallHandler) DO
+  // pass a contextUsage, so the cap is enforced during the run. The check
+  // is graceful: when tokens is null (right after compaction, before next
+  // LLM response) or the contextWindow is 0, the gate returns undefined
+  // instead of false-firing. The `include` list does NOT apply to context
+  // (getContextUsage().tokens is a single coherent number from the SDK;
+  // including the include list would be double-counting — per the brief
+  // design decision 4).
+  if (contextUsage !== undefined && workerCaps.context !== undefined) {
+    const ctxBlock = checkContextConstraint(contextUsage, workerCaps.context);
+    if (ctxBlock !== undefined) return ctxBlock;
   }
 
   // Team scope — sum the latest CustomEntry per agentSlug from the active branch.

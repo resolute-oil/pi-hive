@@ -546,9 +546,9 @@ export interface BudgetCompactionEntry {
 export interface BudgetBlock {
   reason: string;
   scope: "worker" | "team";
-  resource: "tokens" | "costUsd" | "runs" | "depth";
-  remaining: { tokens?: number; costUsd?: number; runs?: number };
-  limit: { tokens?: number; costUsd?: number; runs?: number; depth?: number };
+  resource: "tokens" | "costUsd" | "runs" | "depth" | "context";
+  remaining: { tokens?: number; costUsd?: number; runs?: number; context?: { tokens: number; percent: number } };
+  limit: { tokens?: number; costUsd?: number; runs?: number; depth?: number; context?: { tokens?: number; percent?: number } };
 }
 
 // Slice 7 — IncludeKeys (the C2 typebox-projected shape from §2.13). The
