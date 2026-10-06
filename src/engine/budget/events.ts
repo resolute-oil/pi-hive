@@ -32,7 +32,7 @@ import type { AgentSession, AgentSessionEvent, ExtensionToolContext, SessionStat
 import type { BudgetLedger } from "./ledger";
 import type { HiveState, WorkerBudgetPolicy } from "../../core/types";
 import { emitHiveEvent } from "../observability";
-import { tokensForInclude, checkContextConstraint } from "./policy";
+import { tokensForInclude, checkContextConstraint, resolveExhaustionAction, resolveInterventionAvailable } from "./policy";
 
 // Read threshold + action from the policy's optional Strategies block (per
 // §2.13 C5 v2 wiring). Falls back to the legacy defaults (0.20 warning,
@@ -49,16 +49,28 @@ import { tokensForInclude, checkContextConstraint } from "./policy";
 // "compact" value matches the structured `onExhaustion.action === "compact"`
 // (or `onApproachingLimit.action === "compact"`), both of which are the
 // auto-recovery paths the F13 dashboard should NOT offer an "abort" /
-// "compact" / "respawn" escape hatch for. We use `onExhaustion.action` as
-// the single predicate because that is the strategy decision the flat
-// enum captures most directly.
-function resolveStrategies(policy: WorkerBudgetPolicy) {
+// "compact" / "respawn" escape hatch for.
+//
+// Wave context-constraint (T7): per-dimension strategies. The
+// `dimension` argument selects which dimension's exhaustion action to
+// resolve (`onTokenExhaustion` for tokens, `onContextExhaustion` for
+// context); both fall back to the global `onExhaustion.action` (then to
+// "abort") when their per-dimension field is absent. The
+// `interventionAvailable` flag is computed per-dimension too — a worker
+// in `tokens: abort, context: compact` mode has `interventionAvailable:
+// true` for the token warning (operator can still rescue on the token
+// side) and `false` for the context warning. The pure helpers
+// `resolveExhaustionAction` and `resolveInterventionAvailable` in
+// policy.ts are the public seam (testable in isolation); this function
+// composes them with the warning-threshold default.
+function resolveStrategies(policy: WorkerBudgetPolicy, dimension: "tokens" | "context" = "tokens") {
   const warningThreshold = policy.strategies?.onApproachingLimit?.threshold ?? 0.20;
-  const onExhaustionAction = policy.strategies?.onExhaustion?.action ?? "abort";
+  const onExhaustionAction = resolveExhaustionAction(policy, dimension);
   const onApproachingLimitAction = policy.strategies?.onApproachingLimit?.action ?? "wrap-up";
   // "default" strategy → operator may intervene. "compact" strategy → system
-  // handles recovery, so the operator buttons would be misleading.
-  const interventionAvailable = onExhaustionAction !== "compact" && onApproachingLimitAction !== "compact";
+  // handles recovery, so the operator buttons would be misleading. Per
+  // dimension (T7) so each warning event carries the right flag.
+  const interventionAvailable = resolveInterventionAvailable(policy, dimension);
   return { warningThreshold, onExhaustionAction, onApproachingLimitAction, interventionAvailable };
 }
 
@@ -253,7 +265,7 @@ export function installBudgetEventHooks(
   state?: HiveState,
   actor?: string,
 ): () => void {
-  const { warningThreshold, onExhaustionAction, interventionAvailable } = resolveStrategies(policy);
+  const { warningThreshold, onExhaustionAction, interventionAvailable } = resolveStrategies(policy, "tokens");
   const warnedKeys = new Set<string>();
   // session.sessionManager is the canonical SDK seam (agent-session.d.ts:170).
   const sessionManager = session.sessionManager;

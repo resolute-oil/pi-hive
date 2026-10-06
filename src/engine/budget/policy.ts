@@ -336,6 +336,43 @@ export function crossedThreshold(remaining: number, threshold: number): boolean 
   return remaining <= threshold;
 }
 
+// Wave context-constraint (T7) — per-dimension exhaustion action
+// resolution. The user requested independent exhaustion strategies for
+// tokens and context because the two measure different resources
+// (cumulative cost vs LLM current view). A user may want
+// `tokens: abort` (immediate) but `context: compact` (auto-compact when
+// the LLM's view fills up). Returns the dimension-specific action, or
+// the global `onExhaustion.action` as a fallback, or `"abort"` when
+// strategies are absent. Pure — no I/O, no SDK.
+export type ExhaustionDimension = "tokens" | "context";
+
+export function resolveExhaustionAction(
+  policy: WorkerBudgetPolicy,
+  dimension: ExhaustionDimension,
+): "compact" | "abort" | "none" {
+  const global = policy.strategies?.onExhaustion?.action;
+  if (dimension === "tokens") {
+    return policy.strategies?.onTokenExhaustion?.action ?? global ?? "abort";
+  }
+  return policy.strategies?.onContextExhaustion?.action ?? global ?? "abort";
+}
+
+// Per-dimension interventionAvailable flag. With per-dimension strategies,
+// the operator-facing flag must be computed per-dimension too: a worker in
+// `tokens: abort, context: compact` mode has `interventionAvailable: true`
+// for the token warning (operator can still rescue on the token side) and
+// `interventionAvailable: false` for the context warning (system handles
+// it). Mirrors the F13 `interventionAvailable` semantics, computed
+// independently for each dimension.
+export function resolveInterventionAvailable(
+  policy: WorkerBudgetPolicy,
+  dimension: ExhaustionDimension,
+): boolean {
+  const approaching = policy.strategies?.onApproachingLimit?.action;
+  const exhaustion = resolveExhaustionAction(policy, dimension);
+  return exhaustion !== "compact" && approaching !== "compact";
+}
+
 // §1.3/§1.4 replacement: the worker's remaining budget under the legacy
 // WorkerGovernance-shaped caps. The runtime now carries the SDK's
 // session-lifetime aggregates (overwritten from getSessionStats in
