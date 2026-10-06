@@ -196,8 +196,52 @@ The prior wave's deviation #3 (`team.context` resolved but not enforced) and fol
 
 **Deviations / risks remaining after the continuation:**
 
-- **events.ts wiring deferred.** The gate enforces `team.context` correctly when called with a 6th argument, but the mid-run call sites (`installBudgetEventHooks` `message_end` and `buildBudgetToolCallHandler`) still call `checkContextConstraint` (per-worker) directly rather than going through `checkBudgetPolicy` (which is a 3-arg call at pre-flight, not at the mid-run tool-call gate). Threading `state.runtimes` into both call sites is a small follow-up but not in scope for this continuation. Until wired, the team-context cap is enforced at pre-flight (where it always skips) — same effective behavior as the per-worker context check at pre-flight. The 7 new tests pin the gate-level behavior; the wiring is a separate concern.
+- ~~**events.ts wiring deferred.** The gate enforces `team.context` correctly when called with a 6th argument, but the mid-run call sites (`installBudgetEventHooks` `message_end` and `buildBudgetToolCallHandler`) still call `checkContextConstraint` (per-worker) directly rather than going through `checkBudgetPolicy` (which is a 3-arg call at pre-flight, not at the mid-run tool-call gate). Threading `state.runtimes` into both call sites is a small follow-up but not in scope for this continuation. Until wired, the team-context cap is enforced at pre-flight (where it always skips) — same effective behavior as the per-worker context check at pre-flight. The 7 new tests pin the gate-level behavior; the wiring is a separate concern.~~ **RESOLVED in `c97ea04`** — see "Wiring completion" subsection below.
 - **Smallest-window denominator is one of two valid choices.** A user with a 32K worker and many 200K workers gets the conservative interpretation (32K cap, team fires at 32K). A different design — "the percentage cap is on the team's total / sum of all windows" — would let the same team run much longer before the gate fires. The choice is documented in the helper comment and pinned by a test. No deviation from the task brief, which said "pick whichever the existing `teamUsage` walk does and follow its convention" — `teamUsage` does not model percentage (tokens/costUsd/runs are all nominal), so the choice was made for the new context case.
+
+### Wiring completion
+
+The continuation's stated risk ("events.ts wiring deferred") was the last open gap on this wave. A focused follow-up agent closed it as a small 2-call-site wiring plus 2 integration tests, all in one commit.
+
+**Commit:**
+
+- `c97ea04` — `feat(budget): wire team.context aggregate into message_end and tool-call gate`
+
+**Call sites wired (all in `src/engine/budget/events.ts`):**
+
+1. `installBudgetEventHooks` registration line (now writes `state` into the `BudgetContext` registered in `budgetContextsByAgent`) — plus an optional 5th `state?: HiveState` field on `BudgetContext` so `buildBudgetToolCallHandler` can reach `state.runtimes` when the tool-call path is exercised.
+2. `message_end` handler — new team-context block runs after the per-worker context warning block. On fire: dual-emit `budget_exhausted` (custom entry + `HiveTelemetryEvent`) and either `controller.abort()` (default / `abort` strategy) or just the marker (`compact` strategy). Reuses the per-dim `contextStrategy.onExhaustionAction` resolved by `resolveStrategies(policy, "context")`. Skipped gracefully when `state` is absent (tests that bypass `installBudgetEventHooks`) or `policy.team.context` is undefined (additive — existing configs see no behavior change).
+3. `buildBudgetToolCallHandler` — new `teamCtxBlock` computed the same way (`aggregateTeamContext` → `checkTeamContextConstraint`); added to the early-return condition (block when either per-worker or team check fires) and appended to the block reason string (`; ${teamCtxBlock.reason}`). The two checks compose: the worker is blocked if EITHER dimension fires, and the reason string carries both when both fired.
+
+**Helpers used (unchanged from commit `5120c65`):**
+
+- `aggregateTeamContext(state.runtimes.values())` — pure walk that sums `runtime.contextTokens` across non-orchestrator members with a resolved context window, returning `{ totalTokens, smallestWindow, membersCount }`.
+- `checkTeamContextConstraint(teamCtx, policy.team.context)` — pure gate (nominal or percentage) returning a `BudgetBlock` or `undefined`.
+
+**Integration tests added (2 new in `tests/budget-events.test.ts`):**
+
+- `message_end blocks a worker when team.context aggregate (sum of runtime.contextTokens) exceeds state.teamBudgets.context.tokens cap (continuation wiring)` — constructs a `HiveState` with two worker runtimes where the per-worker context (60K) is below the per-worker cap (80K) so the per-worker check is skipped, and the team aggregate (60K + 60K = 120K) exceeds the team cap (100K) so only the team path fires. Asserts `controller.signal.aborted === true` and the `budget_exhausted` entry carries `scope: "team"`, `resource: "context"`, `cap: 100_000`, `remaining: 0`.
+- `buildBudgetToolCallHandler blocks a tool call when team-context aggregate exceeds the cap, even if the per-worker check passes (continuation wiring)` — same HiveState setup, exercises the tool-call path. Asserts `result.block === true` and the reason string includes the worker count (`"2 worker"`) and the sum/cap pair (`"120000/100000"`).
+
+**Test count delta:**
+
+| Scope | Before | After | Delta |
+|---|---|---|---|
+| Total Node tests | 764 | 766 | **+2** |
+| `tests/budget-events.test.ts` | 35 | 37 | +2 (continuation wiring tests) |
+
+**Gates verified:**
+
+- `just typecheck` — clean
+- `just test` — 766 pass, 0 fail
+- `just dashboard-build` — clean
+- `npx eslint src/engine/budget/events.ts tests/budget-events.test.ts` — 10 pre-existing errors only (no new errors introduced by the wiring or the new tests; the `eol-last` error on `tests/budget-events.test.ts` was an oversight from a prior test addition and is fixed by the new test ending the file with a newline). The 10 remaining errors are the same set documented in the wave's deviation #4 (8 in `tests/budget-events.test.ts` for unused `captured` and one `let → const`; 2 across the other touched files). Not caused by the wiring or tests; out of scope for this commit.
+
+**Notes:**
+
+- The wiring follows the pattern documented in the prior continuation section (no new pure helpers, no schema changes, no test-surface change beyond the 2 new tests). The pure `aggregateTeamContext` / `checkTeamContextConstraint` helpers from commit `5120c65` are reused as-is.
+- The mid-run handler (`message_end`) and the tool-call gate (`buildBudgetToolCallHandler`) both compute the team aggregate independently. This is intentional: each call site is hot-path and a small `Map.values()` walk over runtimes is cheap; a single shared computed value would require threading state through the message_end → tool-call handoff, which the existing wiring does not do.
+- `installBudgetEventHooks` now requires the parent `HiveState` to be passed in (5th arg) for the team-context check to fire. Callers that omit `state` (the default — `state?: HiveState`) see no behavior change, matching the per-worker `contextUsage=undefined` graceful-skip pattern.
 
 ## Standards + Spec self-review
 
