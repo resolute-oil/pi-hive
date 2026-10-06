@@ -137,7 +137,7 @@ npx eslint on touched files   # 11 pre-existing errors (unrelated to this wave; 
 
 2. **Percent comparison uses tokens / contextWindow, NOT the SDK's `percent` field.** The SDK's `ContextUsage.percent` is on the 0–1 scale; the config's `percent` is on the 0–100 scale. We compare `(ctx.tokens / ctx.contextWindow) * 100 >= config.percent` directly, ignoring the SDK's percent field. The SDK's `percent` is only used for the runtime display update (T3) where the scale is consistent.
 
-3. **`team.context` is resolved but not enforced at the team tier.** `checkBudgetPolicy` evaluates `worker.context` only — the `team.context` field passes through the resolver for symmetry (and for a future team-aggregate check). The brief's test list mentions "per-team context aggregate (sum across workers)" but did not require a full team aggregate check at this gate; flagged as a follow-up.
+3. **`team.context` is resolved but not enforced at the team tier.** `checkBudgetPolicy` evaluates `worker.context` only — the `team.context` field passes through the resolver for symmetry (and for a future team-aggregate check). The brief's test list mentions "per-team context aggregate (sum across workers)" but did not require a full team aggregate check at this gate; flagged as a follow-up. **Resolved by the continuation agent — see the "Continuation" section at the bottom of this report.**
 
 4. **Pre-existing lint errors.** `npx eslint` on the touched files reports 11 errors that existed on the base branch (8 in `tests/budget-events.test.ts` for unused `captured` and one `let → const`; 2 in `tests/config-schema.test.ts` for an unused `BudgetsConfigSchema` import and a regex escape; 3 missing-newline-at-eof across the new test files). These are not caused by this wave (verified by `git stash` + eslint). A follow-up commit can clean them up; they don't block typecheck, tests, or dashboard-build.
 
@@ -145,10 +145,59 @@ npx eslint on touched files   # 11 pre-existing errors (unrelated to this wave; 
 
 ## Follow-ups (flagged but out of scope for this wave)
 
-1. **Per-team context aggregate check** — a future wave that adds a `team.context` enforcement path. The current implementation resolves the team context field but does not enforce it at `checkBudgetPolicy`. The sum-across-workers aggregate would require threading `state` (or a `Map<slug, AgentRuntime>`) into the gate, similar to the existing `teamUsage` walk on the branch.
+1. **Per-team context aggregate check** — **resolved by the continuation agent — see the "Continuation" section at the bottom of this report.**
 2. **The `hive_explain_rejection` LLM tool** — does it surface context? If not, this is a follow-up.
 3. **Lint cleanup** — the 11 pre-existing eslint errors in the touched files are unrelated to this wave; a separate hygiene commit can clean them up.
 4. **§11.7 master plan staleness** — pre-existing follow-up; not affected by this wave.
+
+## Continuation
+
+The prior wave's deviation #3 (`team.context` resolved but not enforced) and follow-up #1 (per-team context aggregate check) were the wave's main outstanding gap. A focused continuation agent resolved both as a small 2-item scope, plus a 1-line import-cleanup chore.
+
+**Commits:**
+
+- `b8b9595` — `chore(budget): remove unused ContextConstraint import from strategy.ts` (1-line fix; the named type import was only referenced in a comment block)
+- `5120c65` — `feat(budget): enforce team.context aggregate across workers` (Item 2 — team-tier context enforcement)
+
+**Item 2 design choices:**
+
+1. **Aggregate shape** — added `TeamContextUsageLike { totalTokens, smallestWindow, membersCount }` to `src/engine/budget/policy.ts`. The aggregate is caller-computed (typically via the new `aggregateTeamContext(state.runtimes.values())` helper) so `checkBudgetPolicy` stays pure and decoupled from the `HiveState` shape. This mirrors the per-worker `ContextUsageLike` shape but adds `membersCount` so the gate can distinguish "no team yet" (skip) from "team with all members at zero tokens" (compare and let the cap decide).
+2. **Aggregate walk** — `aggregateTeamContext` walks `state.runtimes.values()`, filters out orchestrators (matches the existing `teamTotals` filter in `budgetRemaining` for consistency), skips workers without a resolved `contextWindow` (graceful: a fresh dispatch has no live values yet), and returns the sum / smallest-window / count. Mirrors the existing `teamUsage(branch)` walk in spirit (pure walk over team member data) but is runtime-based instead of ledger-based — `getContextUsage().tokens` is volatile and lives on the `AgentRuntime`, not on the ledger `CustomEntry`.
+3. **Percentage denominator = smallest context window in the team** — chosen as the conservative interpretation. A team with one 32K worker and many 200K workers is constrained by the 32K worker; the team is "full" when the sum crosses that worker's cap. The choice is pinned by `checkTeamContextConstraint: percent cap uses the SMALLEST context window as the denominator (conservative)` in `tests/budget-policy.test.ts`. A different interpretation (sum of windows or average) would let a team blow past the small window before the gate fires.
+4. **Signature change** — `checkBudgetPolicy` gained an optional 6th `teamContext?: TeamContextUsageLike` parameter. The pre-flight call at `worker-tools.ts:278` does NOT pass it (no live runtimes at delegation start), so the team-context check is skipped there — same graceful pattern as the per-worker `contextUsage=undefined` skip added by the prior wave. The arity contract test in `tests/budget-contracts.test.ts` was bumped from 5 to 6.
+5. **Per-dimension exhaustion** — the gate returns a `BudgetBlock` (signals "cap hit"); the caller uses `resolveExhaustionAction(policy, "context")` to decide abort vs compact vs none. The same `resolveExhaustionAction` helper the prior wave added is reused, so the per-dimension strategy resolution (per-agent override → global `onExhaustion.action` → `"abort"`) applies identically to the team-tier context check.
+6. **`include` does not apply** — same as the per-worker context check; `getContextUsage().tokens` is a single coherent number from the SDK, the include list would be double-counting.
+7. **No wiring into `events.ts`** — out of scope. The gate is implemented and tested at the pure-function level. The mid-run call site (events.ts `message_end` and `buildBudgetToolCallHandler`) can call `checkBudgetPolicy(..., aggregateTeamContext(state.runtimes.values()))` to wire the enforcement in; this is a 2-line follow-up that does not require a new helper.
+
+**Tests added (7 new in `tests/budget-policy.test.ts`):**
+
+- `checkBudgetPolicy 6-arg overload: team.context tokens cap fires when sum of runtime.contextTokens >= cap (team nominal)` — nominal cap, sum vs cap
+- `checkBudgetPolicy 6-arg overload: team.context percent cap fires when sum / smallestWindow >= cap (team percent)` — percentage cap, smallest-window denominator
+- `checkBudgetPolicy 6-arg overload: team.context check skipped gracefully when team has no live values yet` — three sub-scenarios (teamContext=undefined, membersCount=0, totalTokens=0 with resolved window)
+- `aggregateTeamContext: walks state.runtimes and returns the per-team live aggregate` — pins the pure helper, including the orchestrator-exclusion filter
+- `aggregateTeamContext: returns membersCount=0 when no runtime has a resolved context window yet` — pins the graceful empty case (avoids `Number.POSITIVE_INFINITY` leaking out as `smallestWindow`)
+- `checkTeamContextConstraint: nominal cap fires at the boundary (>=, not >) and reason includes the worker count` — pins the boundary semantics and reason-text shape
+- `checkTeamContextConstraint: percent cap uses the SMALLEST context window as the denominator (conservative)` — pins the denominator design choice
+
+**Test count delta:**
+
+| Scope | Before | After | Delta |
+|---|---|---|---|
+| Total Node tests | 757 | 764 | **+7** |
+| `tests/budget-policy.test.ts` | 33 | 40 | +7 |
+| `tests/budget-contracts.test.ts` | 25 | 25 | 0 (arity bumped 5 → 6) |
+
+**Gates verified:**
+
+- `just typecheck` — clean
+- `just test` — 764 pass, 0 fail
+- `just dashboard-build` — clean
+- `npx eslint src/engine/budget/strategy.ts src/engine/budget/policy.ts tests/budget-policy.test.ts tests/budget-contracts.test.ts` — 0 errors
+
+**Deviations / risks remaining after the continuation:**
+
+- **events.ts wiring deferred.** The gate enforces `team.context` correctly when called with a 6th argument, but the mid-run call sites (`installBudgetEventHooks` `message_end` and `buildBudgetToolCallHandler`) still call `checkContextConstraint` (per-worker) directly rather than going through `checkBudgetPolicy` (which is a 3-arg call at pre-flight, not at the mid-run tool-call gate). Threading `state.runtimes` into both call sites is a small follow-up but not in scope for this continuation. Until wired, the team-context cap is enforced at pre-flight (where it always skips) — same effective behavior as the per-worker context check at pre-flight. The 7 new tests pin the gate-level behavior; the wiring is a separate concern.
+- **Smallest-window denominator is one of two valid choices.** A user with a 32K worker and many 200K workers gets the conservative interpretation (32K cap, team fires at 32K). A different design — "the percentage cap is on the team's total / sum of all windows" — would let the same team run much longer before the gate fires. The choice is documented in the helper comment and pinned by a test. No deviation from the task brief, which said "pick whichever the existing `teamUsage` walk does and follow its convention" — `teamUsage` does not model percentage (tokens/costUsd/runs are all nominal), so the choice was made for the new context case.
 
 ## Standards + Spec self-review
 
