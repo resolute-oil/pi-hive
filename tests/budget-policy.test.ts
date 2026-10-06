@@ -893,3 +893,186 @@ test("resolveInterventionAvailable: per-dimension flag (tokens abort + context c
   assert.equal(resolveInterventionAvailable(policy, "tokens"), true, "tokens (abort) → interventionAvailable=true (operator may rescue)");
   assert.equal(resolveInterventionAvailable(policy, "context"), false, "context (compact) → interventionAvailable=false (system auto-manages)");
 });
+
+// =====================================================================
+// Wave context-constraint continuation — team-tier context aggregate.
+//
+// The prior wave resolved `policy.team.context` for symmetry but did not
+// enforce it at `checkBudgetPolicy`. The T8 test list called for a
+// "per-team context aggregate (sum across workers)" test, and the
+// after-action flagged the gap as deviation #3. The implementation:
+//   - `aggregateTeamContext(runtimes)` walks the runtimes map and
+//     returns the team aggregate (sum of `runtime.contextTokens` across
+//     non-orchestrator members that have a resolved context window;
+//     smallest `runtime.contextWindow` as the percentage denominator).
+//   - `checkTeamContextConstraint(teamCtx, constraint)` is the pure
+//     mirror of the per-worker `checkContextConstraint` (nominal
+//     tokens OR percentage of the smallest window).
+//   - `checkBudgetPolicy` takes an optional 6th `teamContext?` param.
+//     The pre-flight gate (no live runtimes) passes undefined and the
+//     check is skipped — same graceful pattern as the per-worker
+//     `contextUsage=undefined` skip.
+//   - The per-dimension exhaustion action
+//     (`resolveExhaustionAction(policy, "context")`) is the caller's
+//     responsibility; the gate only signals that the cap was hit.
+// =====================================================================
+
+import { aggregateTeamContext, checkTeamContextConstraint } from "../src/engine/budget/policy.ts";
+
+test("checkBudgetPolicy 6-arg overload: team.context tokens cap fires when sum of runtime.contextTokens >= cap (team nominal)", async () => {
+  // Two-worker team. Worker A has 60K context tokens (window 100K);
+  // worker B has 50K context tokens (window 200K). Sum = 110K tokens
+  // across the team. Configured nominal cap = 100K. The gate must
+  // fire (>=, not >). Mirrors the per-worker nominal test, but the
+  // comparison is the team aggregate.
+  const { sm, ledger } = await ledgerWith([{ cumulative: { tokens: 50, costUsd: 0.001, runs: 1 } }]);
+  const policy: WorkerBudgetPolicy = {
+    worker: {},
+    team: { context: { tokens: 100_000 } },
+  };
+  const branch = sm.getBranch();
+  const teamCtx = {
+    totalTokens: 110_000,
+    smallestWindow: 100_000, // worker A's window is the smallest
+    membersCount: 2,
+  };
+  const block = checkBudgetPolicy(ledger, policy, branch, undefined, undefined, teamCtx);
+  assert.ok(block !== undefined, "team context cap fires when sum (110K) >= nominal cap (100K)");
+  assert.equal(block!.scope, "team", "scope is team");
+  assert.equal(block!.resource, "context", "resource is context");
+  assert.equal(block!.limit.context?.tokens, 100_000, "limit carries the violated cap (100K)");
+  assert.equal(block!.remaining.context?.tokens, 0, "remaining.context.tokens is 0 when exhausted");
+});
+
+test("checkBudgetPolicy 6-arg overload: team.context percent cap fires when sum / smallestWindow >= cap (team percent)", async () => {
+  // Two-worker team. Worker A: 80K tokens, window 100K (80% full).
+  // Worker B: 40K tokens, window 200K (20% full). Sum = 120K tokens.
+  // Smallest window = 100K (worker A). Fill vs smallest = 120% —
+  // well above the configured 80% cap. The gate must fire.
+  const { sm, ledger } = await ledgerWith([{ cumulative: { tokens: 50, costUsd: 0.001, runs: 1 } }]);
+  const policy: WorkerBudgetPolicy = {
+    worker: {},
+    team: { context: { percent: 80 } },
+  };
+  const branch = sm.getBranch();
+  const teamCtx = {
+    totalTokens: 120_000,
+    smallestWindow: 100_000,
+    membersCount: 2,
+  };
+  const block = checkBudgetPolicy(ledger, policy, branch, undefined, undefined, teamCtx);
+  assert.ok(block !== undefined, "team context percent cap fires when sum/smallest (120%) >= cap (80%)");
+  assert.equal(block!.resource, "context", "resource is context");
+  assert.equal(block!.limit.context?.percent, 80, "limit carries the violated percent (80)");
+});
+
+test("checkBudgetPolicy 6-arg overload: team.context check skipped gracefully when team has no live values yet (continuation graceful)", async () => {
+  // Three graceful-handling scenarios. All must return undefined
+  // (no false-positive block). Matches the per-worker
+  // `contextUsage=undefined` skip in T4 and the
+  // `ctx.tokens=null` skip in T4 null-safety.
+  const { sm, ledger } = await ledgerWith([{ cumulative: { tokens: 50, costUsd: 0.001, runs: 1 } }]);
+  const policy: WorkerBudgetPolicy = {
+    worker: {},
+    team: { context: { tokens: 100_000 } },
+  };
+  const branch = sm.getBranch();
+
+  // Scenario A: `teamContext=undefined` (pre-flight path; no live
+  // runtimes yet). The 6-arg overload must not crash and must skip
+  // the check.
+  const blockUndefined = checkBudgetPolicy(ledger, policy, branch, undefined, undefined, undefined);
+  assert.equal(blockUndefined, undefined, "teamContext=undefined → skip the team context check");
+
+  // Scenario B: empty team (no members yet). membersCount=0.
+  const blockEmpty = checkBudgetPolicy(ledger, policy, branch, undefined, undefined, {
+    totalTokens: 0,
+    smallestWindow: 0,
+    membersCount: 0,
+  });
+  assert.equal(blockEmpty, undefined, "membersCount=0 → skip the team context check (no team yet)");
+
+  // Scenario C: members have a resolved window but no tokens yet
+  // (fresh dispatch — no `message_end` has fired). totalTokens=0
+  // means the comparison is meaningless, so the check is skipped.
+  const blockZeroTokens = checkBudgetPolicy(ledger, policy, branch, undefined, undefined, {
+    totalTokens: 0,
+    smallestWindow: 100_000,
+    membersCount: 2,
+  });
+  assert.equal(blockZeroTokens, undefined, "totalTokens=0 with resolved window → skip (no live values yet)");
+});
+
+test("aggregateTeamContext: walks state.runtimes and returns the per-team live aggregate", () => {
+  // Two non-orchestrator workers + one orchestrator (must be skipped).
+  // Worker A: 60K tokens, window 100K. Worker B: 50K tokens, window
+  // 200K. Orchestrator: 999K tokens, window 999K (filtered out).
+  // Sum across the team = 110K; smallest window = 100K (worker A's);
+  // membersCount = 2 (the orchestrator is excluded).
+  const workerA = runtimeFor("WorkerA", "worker-a", { contextTokens: 60_000, contextWindow: 100_000 });
+  const workerB = runtimeFor("WorkerB", "worker-b", { contextTokens: 50_000, contextWindow: 200_000 });
+  const orchestrator = runtimeFor("Orchestrator", "orch", { contextTokens: 999_000, contextWindow: 999_000 });
+  orchestrator.config = { name: "Orchestrator", slug: "orch", role: "orchestrator", path: "/tmp/orch" };
+  const state = stateFor([workerA, workerB, orchestrator], {});
+  const agg = aggregateTeamContext(state.runtimes.values());
+  assert.equal(agg.totalTokens, 110_000, "totalTokens = 60K + 50K (orchestrator filtered out)");
+  assert.equal(agg.smallestWindow, 100_000, "smallestWindow = 100K (worker A's window, the smallest of the team)");
+  assert.equal(agg.membersCount, 2, "membersCount = 2 (orchestrator excluded)");
+});
+
+test("aggregateTeamContext: returns membersCount=0 when no runtime has a resolved context window yet", () => {
+  // Fresh dispatch: every runtime has contextWindow=0 (the
+  // `message_end` handler has not fired yet). The aggregate is
+  // empty and the team-context check is skipped.
+  const workerA = runtimeFor("WorkerA", "worker-a", { contextTokens: 0, contextWindow: 0 });
+  const state = stateFor([workerA], {});
+  const agg = aggregateTeamContext(state.runtimes.values());
+  assert.equal(agg.membersCount, 0, "membersCount=0 when no runtime has a resolved context window");
+  assert.equal(agg.totalTokens, 0, "totalTokens=0 in the empty-aggregate case");
+  assert.equal(agg.smallestWindow, 0, "smallestWindow=0 in the empty-aggregate case (avoid Number.POSITIVE_INFINITY leaking out)");
+});
+
+test("checkTeamContextConstraint: nominal cap fires at the boundary (>=, not >) and reason includes the worker count", () => {
+  // Direct unit test of the pure helper, no gate. Pin the boundary
+  // semantics and the reason-text shape so a future refactor that
+  // changes either is caught here.
+  const teamCtx = { totalTokens: 100_000, smallestWindow: 100_000, membersCount: 3 };
+  const block = checkTeamContextConstraint(teamCtx, { tokens: 100_000 });
+  assert.ok(block !== undefined, "fires at the boundary (sum 100K >= cap 100K)");
+  assert.equal(block!.reason.includes("3 worker"), true, "reason mentions the worker count for diagnostics");
+  assert.equal(block!.reason.includes("100000/100000"), true, "reason includes the sum/cap pair");
+});
+
+test("checkTeamContextConstraint: percent cap uses the SMALLEST context window as the denominator (conservative)", () => {
+  // Direct unit test pinning the design choice documented in
+  // `checkTeamContextConstraint`: the percentage denominator is
+  // the SMALLEST context window in the team, not the sum of
+  // windows or the average. This is the conservative interpretation
+  // — the team is "full" when the sum crosses the most-constrained
+  // worker's cap. A different interpretation (sum of windows, or
+  // average) would let a team with one tiny window and many large
+  // windows blow past the small window before the gate fires.
+  const teamCtx = {
+    totalTokens: 80_000,
+    // Worker A: window 100K, 80K used (80% fill on its own).
+    // Worker B: window 200K, 0K used.
+    // Sum = 80K; smallest window = 100K. Fill = 80% — at the 80% cap.
+    smallestWindow: 100_000,
+    membersCount: 2,
+  };
+  const blockAt80 = checkTeamContextConstraint(teamCtx, { percent: 80 });
+  assert.ok(blockAt80 !== undefined, "80% of 100K = 80K → fires at 80% cap");
+  assert.equal(blockAt80!.limit.context?.percent, 80);
+
+  // Same sum (80K) but a different team composition where the
+  // smallest window is 200K: 80K / 200K = 40% — well under the 80%
+  // cap. The gate must NOT fire (the most-constrained worker is
+  // not actually constrained at this fill).
+  const teamCtxLargerWindows = {
+    totalTokens: 80_000,
+    smallestWindow: 200_000,
+    membersCount: 2,
+  };
+  const blockUnder = checkTeamContextConstraint(teamCtxLargerWindows, { percent: 80 });
+  assert.equal(blockUnder, undefined, "80K / 200K = 40% → no block when cap is 80%");
+});
