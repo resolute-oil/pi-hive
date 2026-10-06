@@ -325,7 +325,7 @@ test("message_end emits budget_warning when remaining ≤ 20% (default threshold
 
   // Re-mount via a fresh installBudgetEventHooks against the override.
   const ctrl = new AbortController();
-  const lm = {
+  const _lm = {
     appendCustomMessageEntry: (customType: string, content: string, display: boolean, details?: unknown) => {
       appendedMessages.push({ customType, content, display, details });
     },
@@ -785,14 +785,14 @@ test("Wave 3 fixup I2: installBudgetEventHooks registers the budget context BEFO
   // regresses and calls subscribe() before budgetContextsByAgent.set(),
   // this assertion fires.
   let contextPresentAtSubscribe = false;
-  let captured: Listener | undefined;
+  let _captured: Listener | undefined;
   const session = {
     subscribe(listener: Listener) {
       // At the moment subscribe is called, the budget context must
       // already be registered for the agent slug the test supplies.
       contextPresentAtSubscribe = getBudgetContextForAgent("tester-i2") !== undefined;
-      captured = listener;
-      return () => { captured = undefined; };
+      _captured = listener;
+      return () => { _captured = undefined; };
     },
     getSessionStats: () => ({ sessionFile: undefined, sessionId: "x", userMessages: 0, assistantMessages: 0, toolCalls: 0, toolResults: 0, totalMessages: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
     sessionManager: { appendCustomMessageEntry() {}, appendCustomEntry() {} },
@@ -1013,12 +1013,12 @@ test("F3 T3.2 hard gate: worker SEES the warning in next prompt context (CustomM
 
 test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks bash when workerTokensRemaining ≤ 0", async () => {
   __resetBudgetContextsForTests();
-  let captured: Listener | undefined;
-  let tokens = 100;
+  let _captured: Listener | undefined;
+  const tokens = 100;
   const session = {
     subscribe(listener: Listener) {
-      captured = listener;
-      return () => { captured = undefined; };
+      _captured = listener;
+      return () => { _captured = undefined; };
     },
     getSessionStats: () => ({ sessionFile: undefined, sessionId: "x", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2, tokens: { input: tokens, output: 0, cacheRead: 0, cacheWrite: 0, total: tokens }, cost: 0.01 }),
     sessionManager: { appendCustomMessageEntry() {}, appendCustomEntry() {} },
@@ -1042,11 +1042,11 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks bash when workerTokensRema
 
 test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks edit when workerTokensRemaining ≤ 0", async () => {
   __resetBudgetContextsForTests();
-  let captured: Listener | undefined;
+  let _captured: Listener | undefined;
   const session = {
     subscribe(listener: Listener) {
-      captured = listener;
-      return () => { captured = undefined; };
+      _captured = listener;
+      return () => { _captured = undefined; };
     },
     getSessionStats: () => ({ sessionFile: undefined, sessionId: "x", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2, tokens: { input: 150, output: 0, cacheRead: 0, cacheWrite: 0, total: 150 }, cost: 0.01 }),
     sessionManager: { appendCustomMessageEntry() {}, appendCustomEntry() {} },
@@ -1064,11 +1064,11 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks edit when workerTokensRema
 
 test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks write when workerTokensRemaining ≤ 0", async () => {
   __resetBudgetContextsForTests();
-  let captured: Listener | undefined;
+  let _captured: Listener | undefined;
   const session = {
     subscribe(listener: Listener) {
-      captured = listener;
-      return () => { captured = undefined; };
+      _captured = listener;
+      return () => { _captured = undefined; };
     },
     getSessionStats: () => ({ sessionFile: undefined, sessionId: "x", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2, tokens: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, total: 100 }, cost: 0.01 }),
     sessionManager: { appendCustomMessageEntry() {}, appendCustomEntry() {} },
@@ -1086,11 +1086,11 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks write when workerTokensRem
 
 test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks read when workerTokensRemaining ≤ 0", async () => {
   __resetBudgetContextsForTests();
-  let captured: Listener | undefined;
+  let _captured: Listener | undefined;
   const session = {
     subscribe(listener: Listener) {
-      captured = listener;
-      return () => { captured = undefined; };
+      _captured = listener;
+      return () => { _captured = undefined; };
     },
     getSessionStats: () => ({ sessionFile: undefined, sessionId: "x", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2, tokens: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, total: 100 }, cost: 0.01 }),
     sessionManager: { appendCustomMessageEntry() {}, appendCustomEntry() {} },
@@ -1108,11 +1108,11 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks read when workerTokensRema
 
 test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks bash when workerCostUsdRemaining ≤ 0 (cost dimension)", async () => {
   __resetBudgetContextsForTests();
-  let captured: Listener | undefined;
+  let _captured: Listener | undefined;
   const session = {
     subscribe(listener: Listener) {
-      captured = listener;
-      return () => { captured = undefined; };
+      _captured = listener;
+      return () => { _captured = undefined; };
     },
     // Tokens under cap (50/100), but cost over cap ($1.00/$1.00).
     getSessionStats: () => ({ sessionFile: undefined, sessionId: "x", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2, tokens: { input: 50, output: 0, cacheRead: 0, cacheWrite: 0, total: 50 }, cost: 1.0 }),
@@ -1132,11 +1132,11 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler blocks bash when workerCostUsdRem
 
 test("F3 T3.4 G-01: buildBudgetToolCallHandler is a no-op when controller.signal.aborted (fast-path)", async () => {
   __resetBudgetContextsForTests();
-  let captured: Listener | undefined;
+  let _captured: Listener | undefined;
   const session = {
     subscribe(listener: Listener) {
-      captured = listener;
-      return () => { captured = undefined; };
+      _captured = listener;
+      return () => { _captured = undefined; };
     },
     getSessionStats: () => ({ sessionFile: undefined, sessionId: "x", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2, tokens: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, total: 100 }, cost: 0.01 }),
     sessionManager: { appendCustomMessageEntry() {}, appendCustomEntry() {} },
@@ -1158,11 +1158,11 @@ test("F3 T3.4 G-01: buildBudgetToolCallHandler is a no-op when controller.signal
 
 test("F3 T3.4 G-01: buildBudgetToolCallHandler does NOT block grep/find/ls/custom tools when tokens exhausted", async () => {
   __resetBudgetContextsForTests();
-  let captured: Listener | undefined;
+  let _captured: Listener | undefined;
   const session = {
     subscribe(listener: Listener) {
-      captured = listener;
-      return () => { captured = undefined; };
+      _captured = listener;
+      return () => { _captured = undefined; };
     },
     getSessionStats: () => ({ sessionFile: undefined, sessionId: "x", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2, tokens: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, total: 100 }, cost: 0.01 }),
     sessionManager: { appendCustomMessageEntry() {}, appendCustomEntry() {} },

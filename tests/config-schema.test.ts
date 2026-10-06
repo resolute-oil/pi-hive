@@ -8,7 +8,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  BudgetsConfigSchema,
   validateBudgetsConfig,
 } from "../src/core/schema.ts";
 
@@ -233,7 +232,7 @@ test("validateBudgetsConfig rejects perWorker.tokens.window: 'per-day' (worker-o
   };
   assert.throws(
     () => validateBudgetsConfig(config),
-    /perWorker[\/.]+tokens[\/.]+window.*per-day/,
+    /perWorker[/.]+tokens[/.]+window.*per-day/,
   );
 });
 
