@@ -427,23 +427,44 @@ export interface HiveState {
 // initial shapes match the plan §2.5 / §2.10 / §2.13 / §2.14 enough for
 // compilation. Forward-reference is fine (per the Wave 0 contract notes).
 
+// Context-window-fill constraint. A worker's "context" is the SDK's
+// `ContextUsage.tokens` — what the LLM is currently looking at — which is a
+// different concept from cumulative session tokens (the `tokens:` cap above).
+// Two flavors: a nominal cap (e.g. "stop at 100K tokens of context") or a
+// percentage of the context window (e.g. "stop at 80% full"). The schema
+// enforces "exactly one of tokens/percent is set" at config-load; the type
+// here just allows either, with the discriminator enforced by typebox
+// (`ContextConstraintSchema`) and the post-typebox `enforceContextConstraint`
+// walk in `src/core/schema.ts`. `percent` is on the 0–100 scale (NOT 0–1):
+// 80 means 80% full. This matches typical user-facing config conventions
+// and avoids the "is it 0.80 or 80?" ambiguity. See wave-context-constraint
+// brief §"Design decisions (locked)".
+export type ContextConstraint =
+  | { tokens: number; percent?: never }
+  | { percent: number; tokens?: never };
+
 // Slice 3 — WorkerBudgetPolicy (the resolved policy object). Composed of
 // worker + team blocks, each with optional tokens/costUsd/runs/depth caps
 // (per §2.10 nested shape). The WindowKind / IncludeKeys / Strategies fields
 // land in slice 7 but are forward-referenced here so the slice 3 stub
 // typechecks. `strategies` is optional because most projects will rely on
-// the global strategies default.
+// the global strategies default. The `context:` field (wave context-constraint)
+// is the new context-window-fill cap; it lives alongside the existing
+// `tokens:` cap because the two measure different resources (cumulative cost
+// vs LLM current view). The two are NOT collapsed into a single cap.
 export interface WorkerBudgetPolicy {
   worker: {
     tokens?: { cap: number; window?: WindowKind; include?: IncludeKeys };
     costUsd?: { cap: number; window?: WindowKind };
     runs?: { cap: number };
     depth?: { cap: number };
+    context?: ContextConstraint;
   };
   team: {
     tokens?: { cap: number; window?: WindowKind; include?: IncludeKeys };
     costUsd?: { cap: number; window?: WindowKind };
     runs?: { cap: number };
+    context?: ContextConstraint;
   };
   strategies?: Strategies;
 }
@@ -546,6 +567,15 @@ export type WindowKind = "per-session" | "per-run" | "per-day" | "per-team-lifet
 export interface Strategies {
   onApproachingLimit: { action: "wrap-up" | "compact" | "none"; threshold: number; hint: string };
   onExhaustion: { action: "compact" | "abort" | "none"; customInstructions?: string };
+  // Per-dimension exhaustion overrides (wave context-constraint). When set,
+  // these override `onExhaustion.action` for the specific dimension. Tokens
+  // and context measure different resources (cumulative cost vs LLM current
+  // view), so users may want different actions — e.g. `tokens: abort`
+  // (immediate) and `context: compact` (auto-compact). Absent fields fall
+  // back to `onExhaustion.action`, then to `"abort"`. The two are separate
+  // because the F13 wiring (interventionAvailable) is per-dimension too.
+  onTokenExhaustion?: { action: "compact" | "abort" | "none"; customInstructions?: string };
+  onContextExhaustion?: { action: "compact" | "abort" | "none"; customInstructions?: string };
   summary: { maxTokens: number };
 }
 
