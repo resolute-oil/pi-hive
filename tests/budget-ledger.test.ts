@@ -33,7 +33,7 @@ async function emptyLedger(agentName = "tester"): Promise<{
 // ── Test 1: restore() reduces CustomEntry history to cumulative ────────────
 
 test("restore() walks the active branch and reduces pi-hive-budget-ledger CustomEntries to cumulative", async () => {
-  const { sm, ledger } = await emptyLedger();
+  const { sm, ledger: _ledger } = await emptyLedger();
 
   // Append two budget-ledger entries (simulating prior message_end writes).
   sm.appendCustomEntry("pi-hive-budget-ledger", {
