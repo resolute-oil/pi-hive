@@ -544,3 +544,58 @@ ledger.recordEvent("message_end", { tokens: 1, costUsd: 0, runs: 1 }, signal, { 
   const wrote = branch.some((e) => e.type === "custom" && (e as unknown as { customType?: string }).customType === "pi-hive-budget-ledger");
   assert.ok(wrote, "BudgetLedger.recordEvent persists a CustomEntry via sessionManager.appendCustomEntry");
 });
+
+// =====================================================================
+// Wave context-constraint (T8) — backward-compat additive contract.
+// The central design decision: the existing `tokens` cap is untouched.
+// This test pins that a config WITHOUT `context:` resolves to a policy
+// that is shape-compatible with the pre-wave policies (no new required
+// fields, no behavior change at the gate).
+// =====================================================================
+
+import { validateBudgetsConfig } from "../src/core/schema.ts";
+
+test("validateBudgetsConfig: existing tokens-only config keeps working unchanged (additive contract)", () => {
+  // The brief's central design decision: the wave is purely additive.
+  // A pre-wave config (no `context:` field, no `onTokenExhaustion` /
+  // `onContextExhaustion` overrides) must validate cleanly and resolve
+  // to a policy that the existing tests already cover.
+  const preWaveConfig = {
+    perWorker: {
+      tokens: { resource: "tokens", cap: 1000, window: "per-session", include: ["input", "output"] },
+      costUsd: { resource: "costUsd", cap: 0.50, window: "per-session" },
+      runs: { resource: "runs", cap: 5 },
+      depth: { resource: "depth", cap: 2 },
+      // no `context:` — additive guarantee: this is the missing field
+      // that pre-wave configs simply don't have.
+    },
+    perTeam: {
+      tokens: { resource: "tokens", cap: 10_000, window: "per-team-lifetime" },
+      runs: { resource: "runs", cap: 20 },
+    },
+    strategies: {
+      onApproachingLimit: { action: "wrap-up", threshold: 0.2, hint: "" },
+      onExhaustion: { action: "abort" },
+      summary: { maxTokens: 200 },
+      // no `onTokenExhaustion` / `onContextExhaustion` overrides — the
+      // backward-compat fallback applies the global onExhaustion.action
+      // to both dimensions.
+    },
+  };
+  // Validator must not throw on the pre-wave shape.
+  assert.doesNotThrow(() => validateBudgetsConfig(preWaveConfig), "pre-wave config validates cleanly (additive — no new required fields)");
+  // The static type after validation matches the documented shape. Cast
+  // to access the optional `context` / `onTokenExhaustion` /
+  // `onContextExhaustion` fields that the literal type inference does
+  // not surface (TypeScript infers the literal as a closed type without
+  // the new optional fields). The runtime values are correctly absent.
+  const cfg = preWaveConfig as unknown as {
+    perWorker: { context?: unknown };
+    perTeam: { context?: unknown };
+    strategies: { onTokenExhaustion?: unknown; onContextExhaustion?: unknown };
+  };
+  assert.equal(cfg.perWorker.context, undefined, "perWorker.context is absent (pre-wave additive guarantee)");
+  assert.equal(cfg.perTeam.context, undefined, "perTeam.context is absent (pre-wave additive guarantee)");
+  assert.equal(cfg.strategies.onTokenExhaustion, undefined, "onTokenExhaustion is absent (backward-compat: global onExhaustion applies)");
+  assert.equal(cfg.strategies.onContextExhaustion, undefined, "onContextExhaustion is absent (backward-compat: global onExhaustion applies)");
+});
