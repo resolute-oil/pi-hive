@@ -825,3 +825,71 @@ test("budgetRemaining: worker.context returns zeros when runtime has no live val
   assert.equal(rem.context!.tokens, 0, "rem.context.tokens is 0 when runtime.contextTokens is undefined");
   assert.equal(rem.context!.percent, 0, "rem.context.percent is 0 when runtime.contextPct is 0 (default)");
 });
+
+// =====================================================================
+// Wave context-constraint — T7: per-dimension strategy interaction.
+//
+// 3 new tests pin the pure helpers in src/engine/budget/policy.ts that
+// resolve the per-dimension exhaustion action and the per-dimension
+// `interventionAvailable` flag. Backward compat: when only the global
+// `onExhaustion.action` is set, both dimensions resolve to the same
+// value (the documented fallback chain).
+// =====================================================================
+
+import { resolveExhaustionAction, resolveInterventionAvailable } from "../src/engine/budget/policy.ts";
+
+test("resolveExhaustionAction: tokens dimension falls back to global onExhaustion.action when onTokenExhaustion absent (T7 default)", () => {
+  // Backward-compat: a config that only sets the global `onExhaustion`
+  // must apply the same action to BOTH dimensions. The pre-existing
+  // `abort` default is the documented behavior for legacy configs.
+  const policy: WorkerBudgetPolicy = {
+    worker: {},
+    team: {},
+    strategies: { onApproachingLimit: { action: "wrap-up", threshold: 0.2, hint: "" }, onExhaustion: { action: "compact" }, summary: { maxTokens: 200 } },
+  };
+  assert.equal(resolveExhaustionAction(policy, "tokens"), "compact", "tokens dimension → global onExhaustion.action=compact");
+  assert.equal(resolveExhaustionAction(policy, "context"), "compact", "context dimension → global onExhaustion.action=compact");
+});
+
+test("resolveExhaustionAction: onTokenExhaustion override beats global; onContextExhaustion override beats global (T7 per-dim)", () => {
+  // Per-dim overrides must take precedence over the global. A user
+  // declaring `tokens: abort, context: compact` expects the two to
+  // resolve independently — collapsing them back to a single strategy
+  // defeats the purpose (per the brief's "per-dimension strategies
+  // rationale" note).
+  const policy: WorkerBudgetPolicy = {
+    worker: {},
+    team: {},
+    strategies: {
+      onApproachingLimit: { action: "wrap-up", threshold: 0.2, hint: "" },
+      onExhaustion: { action: "abort" }, // global
+      onTokenExhaustion: { action: "abort" }, // explicit
+      onContextExhaustion: { action: "compact" }, // explicit
+      summary: { maxTokens: 200 },
+    },
+  };
+  assert.equal(resolveExhaustionAction(policy, "tokens"), "abort", "tokens dimension → onTokenExhaustion.action=abort");
+  assert.equal(resolveExhaustionAction(policy, "context"), "compact", "context dimension → onContextExhaustion.action=compact");
+});
+
+test("resolveInterventionAvailable: per-dimension flag (tokens abort + context compact → mixed) (T7 mixed)", () => {
+  // Mixed mode: tokens allow operator intervention, context is
+  // auto-managed. The flag must be computed PER-DIMENSION so the F13
+  // dashboard renders the right intervention buttons for each warning
+  // event. A single global flag (the pre-fix behavior) would either
+  // hide the rescue button on the token side (wrong) or offer it on
+  // the context side (also wrong).
+  const policy: WorkerBudgetPolicy = {
+    worker: {},
+    team: {},
+    strategies: {
+      onApproachingLimit: { action: "wrap-up", threshold: 0.2, hint: "" },
+      onExhaustion: { action: "abort" },
+      onTokenExhaustion: { action: "abort" },
+      onContextExhaustion: { action: "compact" },
+      summary: { maxTokens: 200 },
+    },
+  };
+  assert.equal(resolveInterventionAvailable(policy, "tokens"), true, "tokens (abort) → interventionAvailable=true (operator may rescue)");
+  assert.equal(resolveInterventionAvailable(policy, "context"), false, "context (compact) → interventionAvailable=false (system auto-manages)");
+});
