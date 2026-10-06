@@ -743,3 +743,58 @@ test("T7.7: Bug 3 end-to-end regression — fresh=true delegation → budget at 
   // Avoid unused-var lint for scriptedSession by referencing it.
   void scriptedSession;
 });
+
+// =====================================================================
+// Wave context-constraint (T8) — `include` list does NOT apply to context.
+// Per the brief's design decision 4: getContextUsage().tokens is a single
+// coherent number from the SDK; including the include list would be
+// double-counting. This test pins that the `tokens.include` configured on
+// the policy is NOT consulted when comparing the context cap — a
+// cache-heavy session that would be allowed through the include-aware
+// tokens gate is still blocked at the context cap.
+// =====================================================================
+
+test("worker.context: include list does NOT apply to context (the brief's design decision 4)", () => {
+  // Build a session with huge cacheRead (200K) but small input+output
+  // (150 total), at 100% of a 150K context window. With cap=200 and
+  // include=[input,output], the tokens gate would let it through
+  // (input+output=150 < cap=200). The context cap is 150K nominal.
+  // ctx.tokens (150K) >= cap (150K) → the context gate fires, regardless
+  // of the include list.
+  const session = {
+    sessionId: "ctx-include-test",
+    getSessionStats: () => ({
+      sessionFile: undefined as undefined,
+      sessionId: "ctx-include-test",
+      userMessages: 0,
+      assistantMessages: 0,
+      toolCalls: 0,
+      toolResults: 0,
+      totalMessages: 0,
+      tokens: { input: 100, output: 50, cacheRead: 200_000, cacheWrite: 0, total: 200_150 },
+      cost: 0,
+    }),
+    getContextUsage: () => ({ tokens: 150_000, contextWindow: 200_000, percent: 0.75 }),
+  } as unknown as AgentSession;
+
+  const policy: WorkerBudgetPolicy = {
+    worker: {
+      tokens: { cap: 200, window: "per-session", include: ["input", "output"] },
+      context: { tokens: 150_000 },
+    },
+    team: {},
+  };
+
+  // 4-arg call: stats supplied; tokens gate is include-aware (input+output=150 < cap=200 → no block).
+  // 5-arg call: contextUsage supplied; context gate is NOT include-aware
+  // (ctx.tokens=150K >= cap=150K → block fires).
+  const branch: import("@earendil-works/pi-coding-agent").SessionEntry[] = [];
+  const fakeLedger = { cumulative: { tokens: 0, costUsd: 0, runs: 0 } };
+  // The include-aware tokens gate does NOT fire.
+  const tokensOnly = checkBudgetPolicy(fakeLedger as any, policy, branch, session.getSessionStats());
+  assert.equal(tokensOnly, undefined, "include=[input,output] tokens gate does NOT fire (150 < 200)");
+  // The context gate DOES fire (no include list involved).
+  const ctxBlock = checkBudgetPolicy(fakeLedger as any, policy, branch, session.getSessionStats(), session.getContextUsage());
+  assert.ok(ctxBlock !== undefined, "context gate fires (ctx.tokens=150K >= cap=150K) regardless of the tokens include list");
+  assert.equal(ctxBlock!.resource, "context", "block resource is context, not tokens");
+});
