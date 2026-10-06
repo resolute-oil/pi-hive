@@ -56,6 +56,17 @@ The user's motivation: "tokens do not line up nicely with context usage." The `t
 - T5 — **Tool-call handler.** Add a context check alongside the existing tokens check in `buildBudgetToolCallHandler`. Same logic: nominal cap OR percentage cap. Files: `src/engine/budget/events.ts`.
 - T6 — **Display.** `budgetRemaining` exposes `context.tokens` (current value) and `context.percent` (current fill). The existing `formatContextFill` helper at `src/agents/tools.ts:79` can be reused. Files: `src/engine/budget/policy.ts`, `src/agents/tools.ts`.
 - T7 — **Strategy interaction.** `onExhaustion.action` for context exhaustion — same path as tokens exhaustion. The `interventionAvailable` flag (from the F13 work) must also fire for context exhaustion. Files: `src/engine/budget/events.ts`, `src/engine/budget/policy.ts`.
+- T7.5 — **Context warning path.** Mirror the existing tokens warning block in `message_end` for the new context constraint, so the worker LLM gets advance notice before the gate aborts. Specifically:
+  - Compute `ctxUsage = session.getContextUsage()`. If `tokens == null` or `contextWindow == 0`, skip (graceful handling — same as the gate).
+  - For nominal `context.tokens`: warn at `warningThreshold` of the cap (same as tokens — `ctxUsage.tokens / context.tokens >= 1 - warningThreshold`).
+  - For percentage `context.percent` (0-100 scale): warn at `warningThreshold` of the percentage cap (`(ctxUsage.tokens / ctxUsage.contextWindow) * 100 >= context.percent * (1 - warningThreshold)`).
+  - **Dual-emit** the warning (mirrors tokens): `sessionManager.appendCustomMessageEntry("budget_warning", messageText, true, warningDetails)` so the worker LLM sees it on the next turn AND `emitHiveEvent(state, "budget_warning", warningDetails, emitActor)` for the dashboard/Orchestrator.
+  - **Dedup key:** `"worker:context"` (separate from `"worker:tokens"` so each warning fires once per session).
+  - **Warning message text:** `"Worker context at X% of cap. Consider calling summarize_progress to record completion intent, or the orchestrator may compact/respawn."` (note: `X%` is the current fill, computed once and inserted).
+  - **`budget_warning` event payload:** `{ scope: "worker", resource: "context", remaining, cap, interventionAvailable, session_id: workerSessionId }` (`cap` is the nominal tokens OR the percentage, depending on which flavor).
+  - **Exhaustion also gets the dual-emit path:** same `onExhaustion.action` dispatch (abort / compact / none) as tokens. Already covered by T7; this task extends T7's coverage to the warning emit, not just the exhaustion emit.
+  - **Edge case:** if `strategies.onExhaustion.action === "compact"`, the warning still fires (worker should know context is filling), but the abort is skipped (T7 handles this).
+  - Files: `src/engine/budget/events.ts`.
 - T8 — **Tests.** Cover all new behavior:
   - Nominal cap fires at the right threshold
   - Percentage cap fires at the right fill level
@@ -88,6 +99,7 @@ Tasks must complete in order (T1 → T2 → T3 → T4 → T5 → T6 → T7 → T
 | [ ] T5 | Tool-call handler context check. Gate: 2 new tests in `budget-events.test.ts` — nominal + percentage |
 | [ ] T6 | Display — `budgetRemaining` exposes context state. Gate: existing dashboard tests still pass; new test asserts `budgetRemaining` returns the context fields |
 | [ ] T7 | Strategy interaction — `onExhaustion.action` and `interventionAvailable` work for context. Gate: 2 new tests asserting both behaviors |
+| [ ] T7.5 | Context warning path — `message_end` emits `budget_warning` (with `resource: "context"`) when context crosses the warning threshold, with dual-emit (custom message + HiveTelemetryEvent) and dedup key `"worker:context"`. Gate: 2 new tests in `budget-events.test.ts` — nominal cap warning, percentage cap warning; both verify the worker session receives the custom message and the parent telemetry log receives the event |
 | [ ] T8 | All tests. Gate: `just test` passes; test count delta recorded in Test delta section below |
 | [ ] T9 | Migration guide update. Gate: `docs/migrations/budget-config-v2.md` has the new section; example configs compile (validated by `just typecheck` on the doc-test path if one exists) |
 
@@ -100,7 +112,7 @@ Tasks must complete in order (T1 → T2 → T3 → T4 → T5 → T6 → T7 → T
 **Modified (in `src/engine/budget/`):**
 - `strategy.ts` — `resolveWorkerBudgetPolicy` surfaces `context`
 - `policy.ts` — `checkBudgetPolicy` context branch, `budgetRemaining` exposes context, new helper `checkContextConstraint(stats, contextWindow, config)` (or inline branch)
-- `events.ts` — `buildBudgetToolCallHandler` context check, `installBudgetEventHooks` `message_end` calls `getContextUsage()` and updates `runtime.contextTokens`/`contextPct`/`contextWindow`
+- `events.ts` — `buildBudgetToolCallHandler` context check, `installBudgetEventHooks` `message_end` calls `getContextUsage()` and updates `runtime.contextTokens`/`contextPct`/`contextWindow`; **new context warning block (T7.5)** that mirrors the existing tokens warning block with the dual-emit pattern + `"worker:context"` dedup key
 
 **Modified (in `src/engine/`):**
 - `dispatch-lifecycle.ts` — `getContextUsage()` call stays at run end (or moves entirely to message_end if T3 consolidates; the brief allows either)
@@ -148,14 +160,15 @@ Single agent (`refactor/budget-context-constraint`). The 9 tasks touch 6 source 
 - **`getContextUsage()` returning `null` tokens.** Per the SDK contract, `tokens: number | null` (null when "right after compaction, before next LLM response"). The gate must skip the check gracefully — not block, not crash. The implementation must check for `null` explicitly. Tests cover this case (T8).
 - **Per-worker `getContextUsage()` may not be available in all runtimes.** If the SDK doesn't expose it for a specific mode (TUI vs RPC vs print vs JSON), the gate falls back to "no context constraint applied." Document this. Tests don't cover this — the SDK is mocked.
 - **Strategy interaction with `interventionAvailable`.** The F13 wiring uses `onExhaustionAction !== "compact" && onApproachingLimitAction !== "compact"` to set the flag. If the context constraint fires under a different code path, the flag may not be set. The T7 task explicitly tests this.
+- **Warning message text (T7.5).** The warning text mentions `summarize_progress` and "the orchestrator may compact/respawn" — these are the worker LLM's documented responses. The text must be informative without being prescriptive (different workers may have different completion semantics). The implementer should match the tone of the existing tokens warning at `events.ts` (informative, suggests `summarize_progress`, doesn't force a specific action).
 - **Backwards compat for `getContextUsage()` frequency change.** Moving the call from run-end-only to every `message_end` increases the per-event cost. Profile a long-running worker to confirm the overhead is negligible.
 - **Stale-process trap.** T3, T4, T5, T6, T7 all touch `src/engine/budget/**` and may touch `src/engine/dispatch.ts` (indirectly). Per AGENTS.md: kill the dev server before re-running.
 
 ## Test delta
 
-- New: ~12 tests across 4 test files
+- New: ~14 tests across 4 test files
 - Modified: 0 existing tests should change (additive — the existing tests don't use `context`)
-- Target: 732 + ~12 = **~744 Node tests** + 63 vitest (unchanged) + 14 bun (unchanged)
+- Target: 732 + ~14 = **~746 Node tests** + 63 vitest (unchanged) + 14 bun (unchanged)
 - Per-test breakdown:
   - T1: 0 (covered by `just typecheck`)
   - T2: 1 (resolver unit test)
@@ -164,6 +177,7 @@ Single agent (`refactor/budget-context-constraint`). The 9 tasks touch 6 source 
   - T5: 2 (nominal, percentage)
   - T6: 1 (display test)
   - T7: 2 (strategy + interventionAvailable)
+  - T7.5: 2 (nominal cap warning, percentage cap warning — both verify dual-emit)
   - T8: 1 (`include` does not apply; 1 contract test for backward compat)
   - T9: 0 (covered by `just typecheck` on the doc-test path)
 
@@ -175,6 +189,7 @@ Single agent (`refactor/budget-context-constraint`). The 9 tasks touch 6 source 
 - **Context is what the LLM sees, not what was sent.** `getContextUsage().tokens` is the SDK's estimate of what's currently in the LLM's input. Cache hits count, cache misses count, the system prompt counts, the conversation history counts. This is the "context window fill" semantic the user is asking about.
 - **Pre-flight gate at delegation start** — has no `AgentSession` open yet, so it can't call `getContextUsage()`. The gate at `worker-tools.ts:278` keeps the legacy `ledger.cumulative.tokens` fallback for the pre-flight check. The new context check applies at `message_end` (mid-run) and at the tool-call handler (also mid-run), not at pre-flight. This is a documented design choice; the user accepted it.
 - **C5 strategies.** The existing `onExhaustion.action` (`abort` / `compact` / `none`) works for context the same as tokens. The `interventionAvailable` flag (from the F13 work) also fires for context exhaustion under the same conditions.
+- **Context warning mirrors tokens warning (T7.5).** T7.5 adds the warning path for context, parallel to the existing tokens warning block in `message_end`. The worker LLM gets advance notice before the gate aborts — it can call `summarize_progress`, wrap up, or signal that the orchestrator should intervene (`hive_compact_worker`, `hive_respawn_worker`, etc.). Without this, the worker's first signal is the `controller.abort(...)` from the gate, which is too late to do anything useful. The dual-emit pattern (custom message entry + HiveTelemetryEvent) is the same as tokens, with a separate dedup key (`"worker:context"`) so each warning fires once per session.
 - **F13 dashboard.** The dashboard already exposes `formatContextFill` (in `team_status`). No dashboard work is required for this wave. The F13 `interventionAvailable` flag now also fires for context, which is automatically reflected in the dashboard.
 - **Cooperative tool trigger** (the previously skipped scope) is still out of scope. This wave doesn't add a cooperative context trigger; the operator commands cover equivalent operations.
 - **No LOC targets.** Per `HANDOFF.md` §2.1, completeness is the only driving factor.
