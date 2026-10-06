@@ -117,7 +117,7 @@ Tasks must complete in order (T1 → T2 → T3 → T4 → T5 → T6 → T7 → T
 | [x] T3 | Context update cadence — `getContextUsage()` at every `message_end`. Gate: existing tests still pass; new test asserts `runtime.contextTokens` updates within one event of `message_end` |
 | [x] T4 | Pre-flight gate context check. Gate: 3 new tests in `budget-policy.test.ts` — nominal cap, percentage cap, both-cap (tokens + context) |
 | [x] T5 | Tool-call handler context check. Gate: 2 new tests in `budget-events.test.ts` — nominal + percentage |
-| [ ] T6 | Display — `budgetRemaining` exposes context state. Gate: existing dashboard tests still pass; new test asserts `budgetRemaining` returns the context fields |
+| [x] T6 | Display — `budgetRemaining` exposes context state. Gate: existing dashboard tests still pass; new test asserts `budgetRemaining` returns the context fields |
 | [ ] T7 | Strategy interaction — `onExhaustion.action` and `interventionAvailable` work for context. Gate: 2 new tests asserting both behaviors |
 | [ ] T7.5 | Context warning path — `message_end` emits `budget_warning` (with `resource: "context"`) when context crosses the warning threshold, with dual-emit (custom message + HiveTelemetryEvent) and dedup key `"worker:context"`. Gate: 2 new tests in `budget-events.test.ts` — nominal cap warning, percentage cap warning; both verify the worker session receives the custom message and the parent telemetry log receives the event |
 | [ ] T8 | All tests. Gate: `just test` passes; test count delta recorded in Test delta section below |

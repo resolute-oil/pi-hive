@@ -781,3 +781,47 @@ test("checkBudgetPolicy 5-arg overload: context check skipped gracefully when ct
   const block = checkBudgetPolicy(ledger, policy, branch, undefined, ctxNull);
   assert.equal(block, undefined, "null tokens → skip the check (no false-positive block)");
 });
+
+// =====================================================================
+// Wave context-constraint — T6: budgetRemaining exposes the context
+// state. Tests pin the new `context: { tokens, percent }` field on the
+// worker BudgetRemaining shape, sourced from the runtime's
+// contextTokens/contextPct fields (populated at every message_end by T3).
+// =====================================================================
+
+test("budgetRemaining: worker.context reflects the runtime's live context values (T6 display)", () => {
+  // The runtime carries the live values from the SDK's getContextUsage()
+  // — see dispatch-lifecycle.ts:127-130 (run-end) and events.ts T3
+  // (message_end, post-this-wave). budgetRemaining exposes them so the
+  // dashboard's existing `formatContextFill` (src/agents/tools.ts:79)
+  // continues to render the worker status without a separate code path.
+  const worker = runtimeFor("Worker", "worker", {
+    inputTokens: 700, outputTokens: 300, cacheReadTokens: 100, cacheWriteTokens: 50, reasoningTokens: 25,
+    costUsd: 1.25, runCount: 1, distillerRunCount: 0,
+    // Wave context-constraint additions: the runtime's live context values.
+    contextPct: 0.45, // 45% on the 0–1 scale
+    contextTokens: 90_000,
+    contextWindow: 200_000,
+  });
+  const state = stateFor([worker], {
+    workerBudgets: { tokenBudget: 2000, costBudgetUsd: 5, maxRuns: 10, distillerRuns: 5 },
+  });
+  const { worker: rem } = budgetRemaining(state, worker);
+  assert.ok(rem.context !== undefined, "rem.context is defined when runtime has live values");
+  assert.equal(rem.context!.tokens, 90_000, "rem.context.tokens mirrors runtime.contextTokens (the SDK's ContextUsage.tokens)");
+  assert.equal(rem.context!.percent, 0.45, "rem.context.percent mirrors runtime.contextPct (on the 0–1 scale)");
+});
+
+test("budgetRemaining: worker.context returns zeros when runtime has no live values yet (T6 fresh dispatch)", () => {
+  // A fresh dispatch has contextPct=0 (runtime default) and
+  // contextTokens/contextWindow undefined (no message_end has fired yet).
+  // budgetRemaining returns zeros for the context fields rather than
+  // undefined so the dashboard can render a deterministic "no fill yet"
+  // view without a special-case for missing fields.
+  const worker = runtimeFor("Worker", "worker", {});
+  const state = stateFor([worker], {});
+  const { worker: rem } = budgetRemaining(state, worker);
+  assert.ok(rem.context !== undefined, "rem.context is defined (zeros) for a fresh dispatch");
+  assert.equal(rem.context!.tokens, 0, "rem.context.tokens is 0 when runtime.contextTokens is undefined");
+  assert.equal(rem.context!.percent, 0, "rem.context.percent is 0 when runtime.contextPct is 0 (default)");
+});
