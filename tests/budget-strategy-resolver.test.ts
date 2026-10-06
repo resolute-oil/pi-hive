@@ -196,3 +196,51 @@ test("resolveWorkerBudgetPolicy falls back to legacy settings.workerBudgets when
   const policy = resolveWorkerBudgetPolicy(config, "coder");
   assert.equal(policy.worker.tokens?.cap, 1234, "legacy settings.workerBudgets.tokenBudget is still honored as a fallback");
 });
+
+// ── Wave context-constraint: T2 — resolver surfaces the `context:` field ──
+
+test("resolveWorkerBudgetPolicy propagates settings.budgets.per-worker.context (nominal tokens)", () => {
+  // T2 gate: a config with `context: { tokens: 100_000 }` resolves to the
+  // expected policy shape (the constraint object passes through verbatim —
+  // the typebox schema already validated "exactly one of tokens/percent").
+  const config = buildConfig({
+    budgets: {
+      perWorker: { context: { tokens: 100_000 } },
+      perTeam: {},
+    },
+  });
+  const policy = resolveWorkerBudgetPolicy(config, "coder");
+  assert.deepEqual(policy.worker.context, { tokens: 100_000 }, "worker.context passes through verbatim (nominal tokens)");
+  assert.equal(policy.team.context, undefined, "team.context is undefined when only perWorker is set");
+});
+
+test("resolveWorkerBudgetPolicy propagates settings.budgets.per-team.context (percentage fill)", () => {
+  // Percentage flavor — same pass-through semantics. The 0–100 scale is
+  // the user's intent; the runtime converts against
+  // `ContextUsage.tokens / contextWindow * 100` at enforcement time (T4).
+  const config = buildConfig({
+    budgets: {
+      perWorker: {},
+      perTeam: { context: { percent: 80 } },
+    },
+  });
+  const policy = resolveWorkerBudgetPolicy(config, "coder");
+  assert.deepEqual(policy.team.context, { percent: 80 }, "team.context passes through verbatim (percentage fill)");
+  assert.equal(policy.worker.context, undefined, "worker.context is undefined when only perTeam is set");
+});
+
+test("resolveWorkerBudgetPolicy omits context when settings.budgets.context is absent (additive — existing configs unchanged)", () => {
+  // The additive guarantee (the central design decision): configs without
+  // `context:` keep working. The resolver must NOT synthesize an empty
+  // constraint object — `undefined` is the documented "no constraint"
+  // signal downstream consumers check.
+  const config = buildConfig({
+    budgets: {
+      perWorker: { tokens: { cap: 1000 } },
+      perTeam: {},
+    },
+  });
+  const policy = resolveWorkerBudgetPolicy(config, "coder");
+  assert.equal(policy.worker.context, undefined, "worker.context absent when user didn't set it");
+  assert.equal(policy.team.context, undefined, "team.context absent when user didn't set it");
+});
