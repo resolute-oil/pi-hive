@@ -211,10 +211,28 @@ export function loadConfig(cwd: string): HiveConfig {
 
   const { hive, planning } = resolveTeams(parsed);
 
+  // `maxParallel` and `queueSize` are deliberately `undefined` by default —
+  // leaving them unset means "no cap, no queue" (the runtime sees
+  // `state.config.settings.maxParallel === undefined` and skips the
+  // dispatcher's parallel-cap branch entirely). Setting `maxParallel`
+  // alone enables a hard cap (dispatcher rejects runs beyond the cap; see
+  // `src/engine/dispatch.ts:319-321`). Setting both `maxParallel` and
+  // `queueSize` enables fair queueing: the dispatcher queues waiting
+  // workers when `activeRuns >= maxParallel` and `queueSize` is the
+  // upper bound. The error message at `dispatch.ts:328` ("configure
+  // queue-size to enable fair waiting") already points the user at the
+  // second field when only the first is set.
   const settings = parsed.settings || ({} as HiveConfig["settings"]);
   const distiller = (settings as any).distiller || {};
   const telemetry = (settings as any).telemetry || {};
-  const distillerEnabled = distiller.enabled !== false;
+  // Distiller is opt-in: when the `distiller:` block is absent OR
+  // `enabled:` is not explicitly `true`, the distiller stays off and the
+  // model requirement below is skipped. Pre-fixup `enabled !== false`
+  // flipped the absent case to `true`, triggering the "model is required"
+  // error for users who never opted into distillation — the audit-flagged
+  // bug. Users who do set `enabled: true` still hit the model-required
+  // throw on the next line; that gate stays as-is.
+  const distillerEnabled = distiller.enabled === true;
   const distillerModel = String(distiller.model || "").trim();
   if (distillerEnabled && !distillerModel) {
     throw new Error("settings.distiller.model is required when the distiller is enabled (set a 'provider/id' model, or set distiller.enabled: false).");

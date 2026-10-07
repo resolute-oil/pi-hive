@@ -87,6 +87,39 @@ test("loadConfig normalizes settings and enriches model frontmatter", () => {
   assert.equal(config.agents[0].model, "anthropic/claude-sonnet");
 });
 
+test("loadConfig treats absent settings: block as having no default distiller (opt-in)", () => {
+  // Pre-fixup the loader inverted `distiller.enabled !== false`, treating
+  // an absent `distiller:` block as enabled-true and then throwing "model is
+  // required when the distiller is enabled" for users who never opted into
+  // distillation. Post-fix the same config (no settings: at all) loads
+  // cleanly: defaults fill in the documented fields and `distiller.enabled`
+  // is false unless the user explicitly sets `enabled: true`.
+  const cwd = fixtureProject();
+  const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
+  const yaml = readFileSync(cfgPath, "utf8").split("\n")
+    // Drop everything from the `settings:` line through the closing
+    // `    enabled: false` line (inclusive). The rest of the file
+    // (shared-context, planning, hive) stays intact.
+    .filter((_, i, lines) => {
+      const startIdx = lines.findIndex((line) => /^settings:/.test(line));
+      const endIdx = lines.findIndex((line, idx) => idx > startIdx && /^\s+enabled: false\s*$/.test(line));
+      if (startIdx < 0 || endIdx < 0) return true;
+      return i < startIdx || i > endIdx;
+    })
+    .join("\n");
+  writeFileSync(cfgPath, yaml);
+
+  const config = loadConfig(cwd);
+  assert.equal(config.settings.distiller.enabled, false, "absent distiller: defaults to enabled=false (opt-in)");
+  assert.equal(config.settings.distiller.model, "", "no model required when the distiller is off");
+  // The documented defaults still apply even without a settings: block.
+  assert.equal(config.settings.subagentOutputLimit, 12_000);
+  assert.equal(config.settings.defaultTools, "read, grep, find, ls");
+  assert.equal(config.settings.maxParallel, undefined, "no cap by default — dispatcher skips the parallel branch");
+  assert.equal(config.settings.queueSize, undefined, "no queue by default — dispatcher skips the queue branch");
+  assert.equal(config.settings.telemetry.retentionDays, 30);
+});
+
 test("worker governance is opt-in with settings defaults and per-agent overrides", () => {
   const unconstrainedCwd = fixtureProject();
   const unconstrainedPath = join(unconstrainedCwd, ".pi", "hive", "hive-config.yaml");
