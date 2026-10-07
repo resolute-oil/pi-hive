@@ -112,10 +112,18 @@ test("worker governance is opt-in with settings defaults and per-agent overrides
 });
 
 test("loadConfig rejects unsafe telemetry limits and unknown telemetry keys", () => {
-  for (const replacement of ["max-log-bytes: 0", "retention-days: 999999", "send-to-cloud: true"]) {
+  // Each case replaces a distinct target so the test never produces a
+  // duplicate-key collision (which the strict parser now rejects with a
+  // path-bearing `yaml: duplicate key …` error — pre-fixup the parser
+  // silently overwrote and the test relied on that leniency).
+  for (const [target, replacement] of [
+    ["max-log-bytes: 1048576", "max-log-bytes: 0"],
+    ["retention-days: 45", "retention-days: 999999"],
+    ["redact-sensitive-data: true", "redact-sensitive-data: true\n    send-to-cloud: true"],
+  ] as const) {
     const cwd = fixtureProject();
     const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
-    const yaml = readFileSync(cfgPath, "utf8").replace("max-log-bytes: 1048576", replacement);
+    const yaml = readFileSync(cfgPath, "utf8").replace(target, replacement);
     writeFileSync(cfgPath, yaml);
     assert.throws(() => loadConfig(cwd), /settings\.telemetry/);
   }
@@ -429,9 +437,16 @@ hive:
 function typedFixture(orchestratorFrontmatter: string, agentFrontmatter: string, agentConfigExtra = "") {
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-types-"));
   mkdirSync(join(cwd, ".pi", "hive", "agents"), { recursive: true });
-  writeFileSync(join(cwd, ".pi", "hive", "agents", "orchestrator.md"), `---\nmodel: openai/gpt-5\nthinking: off\n${orchestratorFrontmatter}\n---\nLead.`);
-  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: planner\n---\nPlan.");
-  writeFileSync(join(cwd, ".pi", "hive", "agents", "agent.md"), `---\nmodel: openai/gpt-5\nthinking: off\n${agentFrontmatter}\n---\nWork.`);
+  // Frontmatter is passed verbatim from each test — no implicit prefix is
+  // prepended, so a caller that needs `model:` / `thinking:` (or any other
+  // baseline field) must include it. Pre-fixup the template prefixed
+  // `model: openai/gpt-5\nthinking: off` and silently absorbed duplicates
+  // when the caller included those same keys; the new strict parser
+  // (commit 1: `fix(yaml): reject duplicate keys`) would hard-fail instead,
+  // so the prefix is gone and each test now owns its full frontmatter.
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "orchestrator.md"), `---\n${orchestratorFrontmatter}\n---\nLead.`);
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), "---\nagent-type: planner\n---\nPlan.");
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "agent.md"), `---\n${agentFrontmatter}\n---\nWork.`);
   writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), `
 settings:
   distiller:
