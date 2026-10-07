@@ -91,10 +91,15 @@ function effectiveList(value: string | string[] | undefined): string[] | undefin
   return list.length > 0 ? list : undefined;
 }
 
-export function normalizeStringList(value: any): string[] {
+export function normalizeStringList(value: any, label?: string): string[] {
+  if (value === undefined || value === null) return [];
   if (Array.isArray(value)) return value.map((item) => String(item)).filter(Boolean);
   if (typeof value === "string") return value.split(",").map((item) => item.trim()).filter(Boolean);
-  return [];
+  // Throw on malformed input (e.g. an object from parsed YAML frontmatter) so
+  // the typo surfaces at config-load; absent input (`null`/`undefined`) is
+  // collapsed to `[]` above to match `effectiveList`'s "absent ⇒ empty" rule.
+  const preview = value && typeof value === "object" ? Object.keys(value).slice(0, 3).join(",") : String(value).slice(0, 40);
+  throw new Error(`${label ?? "value"}: expected a string or array of strings, got ${typeof value}${preview ? ` (${preview})` : ""}.`);
 }
 
 export function normalizeKnowledgeRefs(value: any): KnowledgeRef[] {
