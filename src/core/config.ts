@@ -4,6 +4,7 @@ import type { AgentConfig, HiveConfig, HiveMode, HiveTeam } from "./types";
 import { parseYamlLite, parseFrontmatter } from "./yaml";
 import { agentSlug, configuredChildAgents, flatAgentConfig, normalizeAgentType, normalizeCommit, normalizePlanStages, safeRead, slug } from "./utils";
 import { validateAgentTypes, validateBudgetsConfig, validateHiveConfigShape } from "./schema";
+import type { BudgetsConfig } from "./schema";
 import { CONFIG_LIMITS, validateConfigSize, validateRawConfig } from "./config-validation";
 import { resolveConfiguredPath, resolveProjectPath } from "./safe-path";
 import { parseAgentBudgetsFrontmatter } from "../agents/frontmatter";
@@ -200,8 +201,14 @@ export function loadConfig(cwd: string): HiveConfig {
   // wins when both are set (mirror of the resolver's per-block precedence in
   // strategy.ts:readGlobalBudgets).
   const canonicalBudgets = parsed?.budgets ?? parsed?.settings?.budgets;
+  let validatedBudgets: BudgetsConfig | undefined;
   if (canonicalBudgets !== undefined) {
-    validateBudgetsConfig(canonicalBudgets);
+    // Commit 4: validateBudgetsConfig now returns the post-injection shape
+    // (the input is no longer mutated). Capture the returned value so the
+    // loader can pass it downstream — downstream consumers (the resolver
+    // in strategy.ts) read `resource:` on every cap, which only the
+    // validated shape carries.
+    validatedBudgets = validateBudgetsConfig(canonicalBudgets);
   }
 
   // H1 (Decision 7): allowedAgents is no longer a user config field — the
@@ -279,7 +286,7 @@ export function loadConfig(cwd: string): HiveConfig {
       // resolveWorkerBudgetPolicy on first read — surfacing invalid configs
       // at the runtime boundary instead of config-load keeps the strict
       // error message co-located with the offending field.
-      budgets: parsed.budgets ?? settings.budgets,
+      budgets: validatedBudgets ?? (parsed.budgets ?? settings.budgets),
       // Legacy flat-shape fallback (Wave 5A cleanup drops these).
       workerBudgets: settings.workerBudgets,
       teamBudgets: settings.teamBudgets,
