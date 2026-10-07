@@ -121,6 +121,48 @@ test("renderAgentRow emits one separator dash when work is empty", () => {
   assert.equal(dashes, 1);
 });
 
+// Context-window fill is rendered between the status icon and the agent name.
+// Newly dispatched agents report contextPct=0 until getContextUsage() runs;
+// runtimes constructed outside the dispatch telemetry path may omit the field
+// entirely. Both must produce a stable row layout.
+test("renderAgentRow inserts rounded contextPct between icon and name", () => {
+  const rt = runtime({
+    config: { name: "Engineering Lead", agentType: "coder" } as AgentRuntime["config"],
+    status: "running",
+    elapsedMs: 7_000,
+    toolCount: 2,
+    contextPct: 32.4,
+    lastWork: "</final_answer>",
+  });
+  const line = renderAgentRow(rt, 200, theme());
+  // Rounded to nearest integer — 32.4 → 32, not 33.
+  assert.match(line, /● 32% Engineering Lead/);
+  assert.doesNotMatch(line, /● 33%/);
+  // Full visible row: icon, percent, name, em-dash, meta, em-dash, work.
+  // The head is themed (status color), the separator and work are dim — strip
+  // ANSI escapes to assert on the underlying text.
+  // eslint-disable-next-line no-control-regex
+  const visible = line.replace(/\x1B\[\d+m/g, "");
+  assert.equal(visible, "● 32% Engineering Lead — 7s · 2 tools — </final_answer>");
+});
+
+test("renderAgentRow falls back to '—' for the context slot when contextPct is null or undefined", () => {
+  // Force contextPct to null — the != null guard in renderAgentRow must treat
+  // null the same as undefined and render the em-dash placeholder.
+  const rtNull = runtime({ status: "running", elapsedMs: 5_000, contextPct: null as never });
+  const lineNull = renderAgentRow(rtNull, 200, theme());
+  assert.match(lineNull, /● — /);
+  assert.doesNotMatch(lineNull, /● 0% /);
+
+  // Force contextPct to undefined explicitly. The runtime() default is 0, so
+  // we have to override via the partial spread — Partial<AgentRuntime>
+  // permits undefined but not null without a cast.
+  const rtUndef = runtime({ status: "running", elapsedMs: 5_000, contextPct: undefined });
+  const lineUndef = renderAgentRow(rtUndef, 200, theme());
+  assert.match(lineUndef, /● — /);
+  assert.doesNotMatch(lineUndef, /● 0% /);
+});
+
 // ── Disambiguation suffix for duplicate display names ─────────────────────
 
 test("renderAgentRow omits the suffix when displaySuffix is undefined", () => {
