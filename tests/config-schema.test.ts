@@ -214,9 +214,9 @@ test("BudgetsConfigSchema accepts `tokens.include: [input, output]` and projects
     perTeam: { tokens: { resource: "tokens", cap: 10_000, window: "per-team-lifetime" } },
   };
   assert.doesNotThrow(() => validateBudgetsConfig(config));
-  assert.deepEqual(config.perWorker.tokens?.include, ["input", "output"]);
-  assert.equal(config.perWorker.tokens?.cap, 1_000);
-  assert.equal(config.perWorker.tokens?.window, "per-session");
+  assert.deepEqual(config.perWorker?.tokens?.include, ["input", "output"]);
+  assert.equal(config.perWorker?.tokens?.cap, 1_000);
+  assert.equal(config.perWorker?.tokens?.window, "per-session");
 });
 
 test("BudgetCap discriminated union projects include keys for workerConsumedTokens inputs", () => {
@@ -224,7 +224,7 @@ test("BudgetCap discriminated union projects include keys for workerConsumedToke
   // schema must surface the `include` list verbatim so policy.ts (Wave 1 1A
   // territory) can pass it through to the session.getSessionStats().tokens
   // selector. Pin the discriminator + include ordering here.
-  const cap: BudgetsConfig["perWorker"]["tokens"] = { resource: "tokens", cap: 5_000, window: "per-run", include: ["input", "output", "cacheRead", "cacheWrite"] };
+  const cap: NonNullable<BudgetsConfig["perWorker"]>["tokens"] = { resource: "tokens", cap: 5_000, window: "per-run", include: ["input", "output", "cacheRead", "cacheWrite"] };
   assert.equal(cap.resource, "tokens");
   assert.deepEqual(cap.include, ["input", "output", "cacheRead", "cacheWrite"]);
   // typebox sanity: the discriminated union shape compiles.
@@ -248,13 +248,13 @@ test("validateBudgetsConfig accepts user YAML WITHOUT `resource:` (parent-nestin
   } as Record<string, unknown>;
   assert.doesNotThrow(() => validateBudgetsConfig(config));
   const resolved = resolveBudgetsConfig(config as Parameters<typeof resolveBudgetsConfig>[0]);
-  assert.equal(resolved.perWorker.tokens?.resource, "tokens");
-  assert.equal(resolved.perWorker.costUsd?.resource, "costUsd");
-  assert.equal(resolved.perWorker.runs?.resource, "runs");
-  assert.equal(resolved.perWorker.depth?.resource, "depth");
-  assert.equal(resolved.perTeam.tokens?.resource, "tokens");
-  assert.equal(resolved.perTeam.costUsd?.resource, "costUsd");
-  assert.equal(resolved.perTeam.runs?.resource, "runs");
+  assert.equal(resolved.perWorker?.tokens?.resource, "tokens");
+  assert.equal(resolved.perWorker?.costUsd?.resource, "costUsd");
+  assert.equal(resolved.perWorker?.runs?.resource, "runs");
+  assert.equal(resolved.perWorker?.depth?.resource, "depth");
+  assert.equal(resolved.perTeam?.tokens?.resource, "tokens");
+  assert.equal(resolved.perTeam?.costUsd?.resource, "costUsd");
+  assert.equal(resolved.perTeam?.runs?.resource, "runs");
 });
 
 test("validateBudgetsConfig rejects `resource:` that mismatches parent nesting", () => {
@@ -330,10 +330,10 @@ test("resolveBudgetsConfig applies tier defaults: perWorker.tokens.window=per-se
     perTeam: { tokens: { resource: "tokens", cap: 10_000 } },
   };
   const resolved = resolveBudgetsConfig(config);
-  assert.equal(resolved.perWorker.tokens?.window, "per-session");
-  assert.equal(resolved.perTeam.tokens?.window, "per-team-lifetime");
-  assert.equal(resolved.perWorker.tokens?.cap, 1_000);
-  assert.equal(resolved.perTeam.tokens?.cap, 10_000);
+  assert.equal(resolved.perWorker?.tokens?.window, "per-session");
+  assert.equal(resolved.perTeam?.tokens?.window, "per-team-lifetime");
+  assert.equal(resolved.perWorker?.tokens?.cap, 1_000);
+  assert.equal(resolved.perTeam?.tokens?.cap, 10_000);
 });
 
 // C6 preservation: when the user sets `window:` explicitly, resolve does
@@ -343,8 +343,8 @@ test("resolveBudgetsConfig preserves explicit window values (only fills gaps)", 
     perWorker: { tokens: { resource: "tokens", cap: 1_000, window: "per-run" } },
     perTeam: { tokens: { resource: "tokens", cap: 10_000, window: "per-day" } },
   });
-  assert.equal(resolved.perWorker.tokens?.window, "per-run", "explicit per-run is preserved");
-  assert.equal(resolved.perTeam.tokens?.window, "per-day", "explicit per-day is preserved");
+  assert.equal(resolved.perWorker?.tokens?.window, "per-run", "explicit per-run is preserved");
+  assert.equal(resolved.perTeam?.tokens?.window, "per-day", "explicit per-day is preserved");
 });
 
 // perTeam.costUsd rejects per-day (costUsd windows are per-session or
@@ -432,4 +432,82 @@ test("migration guide Example 9: rejecting neither tokens nor percent on the sam
     perTeam: {},
   };
   assert.throws(() => validateBudgetsConfig(cfg), /perWorker\.context.*must set either/, "empty context is rejected with a path-bearing error");
+});
+
+// ── Optional tiers (Txx) ─────────────────────────────────────────────────────
+//
+// Both `perWorker` and `perTeam` are OPTIONAL in `BudgetsConfigSchema`. Real
+// configs commonly declare only one tier (a worker-only project, or a planner
+// that only needs team-tier caps). The pre-fixup schema required both as
+// objects, which surfaced at config-load as `budgets.perTeam: must be object`
+// for any user who omitted the empty second tier. These tests pin that the
+// one-tier and zero-tier shapes now validate cleanly.
+
+test("validateBudgetsConfig accepts the user's own one-tier YAML (per-worker only, no per-team)", () => {
+  // The user's own config from earlier in this session. Block-style YAML
+  // is intentional — the YAML flow-style fix is in a separate worktree.
+  // Parsed through parseYamlLite to exercise the full parser + kebab→
+  // camel + schema chain (matches the convention used for the canonical
+  // config above), then passed to validateBudgetsConfig via the
+  // settings.budgets path the loader actually takes (canonical budget
+  // loading accepts both top-level and settings.budgets; this is the
+  // legacy position the loader still supports).
+  const yaml = `
+settings:
+  subagent-output-limit: 12000
+  default-tools: read, grep, find, ls
+  budgets:
+    defaults-enabled: true
+    per-worker:
+      runs:    { cap: 100 }
+      depth:   { cap: 4 }
+      context:
+        percent: 35
+    strategies:
+      on-token-exhaustion:   { action: abort }
+      on-context-exhaustion: { action: compact }
+      summary:
+        max-tokens: 5000
+`;
+  const parsed = parseYamlLite(yaml);
+  const budgets = parsed.settings.budgets;
+  assert.doesNotThrow(() => validateBudgetsConfig(budgets), "one-tier (per-worker only) YAML validates cleanly");
+});
+
+test("validateBudgetsConfig accepts per-team only (no per-worker)", () => {
+  // The mirror case: a planner-only project that declares team-tier caps
+  // but no per-worker caps (e.g., delegations don't need individual worker
+  // budgets, only the team aggregate). Mirrors the user config above.
+  const yaml = `
+budgets:
+  defaults-enabled: true
+  per-team:
+    tokens:
+      resource: tokens
+      cap: 100000
+      window: per-team-lifetime
+    runs:
+      resource: runs
+      cap: 200
+`;
+  const parsed = parseYamlLite(yaml);
+  const budgets = parsed.budgets;
+  assert.doesNotThrow(() => validateBudgetsConfig(budgets), "one-tier (per-team only) YAML validates cleanly");
+});
+
+test("validateBudgetsConfig accepts an empty budgets block (no per-worker, no per-team)", () => {
+  // The minimal valid budgets config — just the defaults-enabled flag and
+  // nothing else. Pre-fixup this failed because both tier objects were
+  // required; post-fixup both are optional. Useful for projects that opt
+  // in to the budgets feature but don't yet have caps to declare.
+  const cfg = { defaultsEnabled: true };
+  assert.doesNotThrow(() => validateBudgetsConfig(cfg), "empty budgets block (just defaults-enabled) validates cleanly");
+});
+
+test("validateBudgetsConfig rejects an explicitly-null tier (object expected when present)", () => {
+  // Optional means "absent" not "present-and-null". A user who sets
+  // `per-worker: null` is making a config mistake (likely a typo for an
+  // empty object) and should still get a path-bearing error.
+  const cfg = { perWorker: null };
+  assert.throws(() => validateBudgetsConfig(cfg), /perWorker/, "explicit null on a tier is rejected, not silently accepted");
 });

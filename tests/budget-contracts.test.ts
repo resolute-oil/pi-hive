@@ -361,7 +361,7 @@ test("BudgetsConfigSchema is the typebox runtime validator", () => {
     },
   };
   assert.ok(sample);
-  assert.equal(sample.perWorker.tokens?.cap, 1000);
+  assert.equal(sample.perWorker?.tokens?.cap, 1000);
 });
 
 // ── Slice 8 — BudgetLedgerEntry schema + BudgetLedgerKind (14 values) ────────
