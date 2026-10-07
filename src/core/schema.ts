@@ -231,29 +231,44 @@ export type BudgetCap = Static<typeof BudgetCap>;
 
 export const BudgetsConfigSchema = Type.Object({
   defaultsEnabled: Type.Optional(Type.Boolean()),
-  perWorker: Type.Object({
+  // Both `perWorker` and `perTeam` are OPTIONAL — real user configs commonly
+  // declare only one tier (e.g., a worker-only project that doesn't need
+  // team-tier caps, or a planner-only project that only declares team
+  // policies). Required-objects here would fail schema validation with the
+  // generic "must be object" message and force users to include both
+  // blocks; the documented "one tier is enough" path is now first-class.
+  // Consumers (resolveBudgetsConfig, enforceContextConstraint,
+  // enforceResourceDiscriminator, enforceWindowByTier, plus the resolver
+  // in strategy.ts) handle the `undefined` case — see each call site.
+  perWorker: Type.Optional(Type.Object({
     tokens: Type.Optional(TokensCap),
     costUsd: Type.Optional(CostUsdCap),
     runs: Type.Optional(RunsCap),
     depth: Type.Optional(DepthCap),
     context: Type.Optional(ContextConstraintSchema),
-  }),
-  perTeam: Type.Object({
+  })),
+  perTeam: Type.Optional(Type.Object({
     tokens: Type.Optional(TokensCap),
     costUsd: Type.Optional(CostUsdCap),
     runs: Type.Optional(RunsCap),
     context: Type.Optional(ContextConstraintSchema),
-  }),
+  })),
   strategies: Type.Optional(Type.Object({
-    onApproachingLimit: Type.Object({
+    // Both global strategy blocks are OPTIONAL so a user who declares only
+    // the per-dimension `onTokenExhaustion` / `onContextExhaustion`
+    // overrides (the documented escape hatch for context-constraint-aware
+    // configs) doesn't have to invent a placeholder for the global fields
+    // they don't need. The resolver falls back to documented defaults when
+    // a field is absent (see the per-dimension comment below).
+    onApproachingLimit: Type.Optional(Type.Object({
       action: Type.Union([Type.Literal("wrap-up"), Type.Literal("compact"), Type.Literal("none")]),
       threshold: Type.Number({ minimum: 0, maximum: 1 }),
       hint: Type.String(),
-    }),
-    onExhaustion: Type.Object({
+    })),
+    onExhaustion: Type.Optional(Type.Object({
       action: Type.Union([Type.Literal("compact"), Type.Literal("abort"), Type.Literal("none")]),
       customInstructions: Type.Optional(Type.String()),
-    }),
+    })),
     // Per-dimension exhaustion overrides (wave context-constraint). Optional
     // so existing configs without these fields keep working unchanged. The
     // resolver falls back to `onExhaustion.action` (then `"abort"`) when the
@@ -405,20 +420,28 @@ export function resolveBudgetsConfig(config: BudgetsConfig): BudgetsConfig {
     if (!cap) return cap;
     return { ...cap, resource: cap.resource ?? expectedResource, window: cap.window ?? defaultWindow };
   };
+  // Both perWorker and perTeam are optional on the schema (real configs
+  // commonly declare one tier only). Spreading `undefined` would throw, so
+  // fall back to an empty tier that the resolver leaves untouched — every
+  // cap below is itself optional and resolveCap returns its input
+  // unchanged when it's undefined, so a missing tier resolves to an empty
+  // resolved tier rather than silently dropping user data.
+  const perWorker = config.perWorker ?? {};
+  const perTeam = config.perTeam ?? {};
   return {
     ...config,
     perWorker: {
-      ...config.perWorker,
-      tokens: resolveCap(config.perWorker.tokens, WORKER_DEFAULT_WINDOW, "tokens"),
-      costUsd: resolveCap(config.perWorker.costUsd, WORKER_DEFAULT_WINDOW, "costUsd"),
-      runs: resolveCap(config.perWorker.runs, WORKER_DEFAULT_WINDOW, "runs"),
-      depth: resolveCap(config.perWorker.depth, WORKER_DEFAULT_WINDOW, "depth"),
+      ...perWorker,
+      tokens: resolveCap(perWorker.tokens, WORKER_DEFAULT_WINDOW, "tokens"),
+      costUsd: resolveCap(perWorker.costUsd, WORKER_DEFAULT_WINDOW, "costUsd"),
+      runs: resolveCap(perWorker.runs, WORKER_DEFAULT_WINDOW, "runs"),
+      depth: resolveCap(perWorker.depth, WORKER_DEFAULT_WINDOW, "depth"),
     },
     perTeam: {
-      ...config.perTeam,
-      tokens: resolveCap(config.perTeam.tokens, TEAM_DEFAULT_WINDOW, "tokens"),
-      costUsd: resolveCap(config.perTeam.costUsd, TEAM_DEFAULT_WINDOW, "costUsd"),
-      runs: resolveCap(config.perTeam.runs, TEAM_DEFAULT_WINDOW, "runs"),
+      ...perTeam,
+      tokens: resolveCap(perTeam.tokens, TEAM_DEFAULT_WINDOW, "tokens"),
+      costUsd: resolveCap(perTeam.costUsd, TEAM_DEFAULT_WINDOW, "costUsd"),
+      runs: resolveCap(perTeam.runs, TEAM_DEFAULT_WINDOW, "runs"),
     },
   };
 }
@@ -463,13 +486,15 @@ function enforceResourceDiscriminator(config: BudgetsConfig): void {
       throw new Error(`budgets.${tier}.${key}.resource: expected "${expected}" (from parent nesting), got "${cap.resource}".`);
     }
   };
-  check("perWorker", "tokens", config.perWorker.tokens, "tokens");
-  check("perWorker", "costUsd", config.perWorker.costUsd, "costUsd");
-  check("perWorker", "runs", config.perWorker.runs, "runs");
-  check("perWorker", "depth", config.perWorker.depth, "depth");
-  check("perTeam", "tokens", config.perTeam.tokens, "tokens");
-  check("perTeam", "costUsd", config.perTeam.costUsd, "costUsd");
-  check("perTeam", "runs", config.perTeam.runs, "runs");
+  // Optional chaining through the now-optional tier — `check` short-circuits
+  // on undefined caps so a missing whole tier is silently accepted.
+  check("perWorker", "tokens", config.perWorker?.tokens, "tokens");
+  check("perWorker", "costUsd", config.perWorker?.costUsd, "costUsd");
+  check("perWorker", "runs", config.perWorker?.runs, "runs");
+  check("perWorker", "depth", config.perWorker?.depth, "depth");
+  check("perTeam", "tokens", config.perTeam?.tokens, "tokens");
+  check("perTeam", "costUsd", config.perTeam?.costUsd, "costUsd");
+  check("perTeam", "runs", config.perTeam?.runs, "runs");
 }
 
 // Wave context-constraint: the `context:` field on perWorker/perTeam must
@@ -489,8 +514,10 @@ function enforceContextConstraint(config: BudgetsConfig): void {
       throw new Error(`budgets.${tier}.context: must set either \`tokens:\` or \`percent:\`.`);
     }
   };
-  check("perWorker", config.perWorker.context);
-  check("perTeam", config.perTeam.context);
+  // Optional chaining through the now-optional tier — `check` returns
+  // silently when the whole tier (or just the context block) is missing.
+  check("perWorker", config.perWorker?.context);
+  check("perTeam", config.perTeam?.context);
 }
 function enforceWindowByTier(config: BudgetsConfig): void {
   const check = (tier: "perWorker" | "perTeam", block: { tokens?: BudgetCap; costUsd?: BudgetCap } | undefined, allowed: ReadonlySet<string>): void => {
