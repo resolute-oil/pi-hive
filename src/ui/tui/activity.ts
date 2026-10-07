@@ -81,11 +81,20 @@ function workOf(runtime: AgentRuntime): string {
 // distinguish them at a glance. Pass empty/undefined for the common case.
 function renderAgentRow(runtime: AgentRuntime, width: number, theme: any, displaySuffix?: string): string {
   const icon = statusIcon(runtime.status);
+  // Context-window fill sits between the status icon and the agent name so
+  // operators see at a glance which worker is closest to truncation. Newly
+  // dispatched agents report 0 until getContextUsage() has run; for the rare
+  // case where contextPct is absent (e.g. a runtime constructed by a test or
+  // by code that bypasses the dispatch telemetry path), fall back to an
+  // em-dash placeholder so the row layout stays stable. Same `!= null`
+  // pattern as the dashboard at ui/web/src/tabs/Agents.tsx:222 and
+  // ui/web/src/tabs/Activity.tsx:282.
+  const pct = runtime.contextPct != null ? `${Math.round(runtime.contextPct)}%` : "—";
   const name = runtime.config.name || "agent";
   const suffix = displaySuffix ? theme.fg("dim", ` (${displaySuffix})`) : "";
   const meta = metaOf(runtime);
   const work = workOf(runtime);
-  const head = `${icon} ${name}${suffix} — ${meta}`;
+  const head = `${icon} ${pct} ${name}${suffix} — ${meta}`;
   const sep = work ? " — " : "";
   const line = `${theme.fg(statusColorKey(runtime.status), head)}${sep}${theme.fg("dim", work)}`;
   return truncateToWidth(line, width, theme.fg("dim", "…"));
