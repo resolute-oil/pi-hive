@@ -110,25 +110,14 @@ function enrichFromFrontmatter(cwd: string, agent: AgentConfig | undefined): voi
         agent.network = attrs.network as unknown as boolean;
       }
       if (agent.commit === undefined) agent.commit = normalizeCommit(attrs.commit);
-      // Wave 2 F2 C6 follow-up: per-agent `budgets:` block in agent.md
-      // frontmatter is parsed by parseAgentBudgetsFrontmatter (Wave 1 1B,
-      // src/agents/frontmatter.ts) and projected onto agent.governance here
-      // so the per-agent override reaches WorkerBudgetPolicy resolution.
-      // The legacy `governance:` alias is handled inside
-      // parseAgentBudgetsFrontmatter (canonical `budgets:` wins).
-      //
-      // N-I4 fixup: write ONLY the legacy flat aliases (tokenBudget,
-      // costBudgetUsd). The new nested fields (governance.tokens,
-      // governance.costUsd, governance.runs, governance.depth) are read by
-      // resolveWorkerBudgetPolicy but are NOT consumed by the legacy
-      // `effectiveWorkerGovernance` enforcement path (which read them
-      // from engine/governance.ts:18 — now removed in the Wave 5A
-      // cleanup). Writing both shapes here would leave a quiet seam that
-      // nothing reads at runtime until the enforcement migration lands.
-      // The resolver's per-agent path falls back to the flat fields when
-      // the nested shape is absent, so dropping the nested writes is a
-      // no-op behaviorally; we restore them when the enforcement path
-      // migrates to read them (tracked in the Wave 5A follow-up).
+      // Project per-agent `budgets:` block from agent.md frontmatter onto
+      // agent.governance so the override reaches WorkerBudgetPolicy
+      // resolution. Both the canonical nested shape (governance.tokens,
+      // governance.costUsd) AND the legacy flat aliases (tokenBudget,
+      // costBudgetUsd) are written — the resolver at strategy.ts:135 reads
+      // both, and the nested writes now let any code path that reads
+      // `governance.tokens` directly see the same value without falling
+      // back through the flat alias.
       const parsedBudgets = parseAgentBudgetsFrontmatter(raw);
       if (parsedBudgets.budgets) {
         agent.governance = agent.governance ?? {};
@@ -138,6 +127,12 @@ function enrichFromFrontmatter(cwd: string, agent: AgentConfig | undefined): voi
         }
         if (pb.costUsd !== undefined && agent.governance.costBudgetUsd === undefined) {
           agent.governance.costBudgetUsd = pb.costUsd.cap;
+        }
+        if (pb.tokens !== undefined && agent.governance.tokens === undefined) {
+          agent.governance.tokens = { cap: pb.tokens.cap, window: "per-session", include: ["input", "output"] };
+        }
+        if (pb.costUsd !== undefined && agent.governance.costUsd === undefined) {
+          agent.governance.costUsd = { cap: pb.costUsd.cap, window: "per-session" };
         }
       }
     }

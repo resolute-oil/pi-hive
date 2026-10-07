@@ -120,3 +120,39 @@ test("normalizeStringList: array input returns mapped string array", () => {
 test("normalizeStringList: string input splits on commas and trims", () => {
   assert.deepEqual(normalizeStringList("a, b ,c"), ["a", "b", "c"]);
 });
+
+// Lenient-seam fix: malformed shapes (object, number, boolean) used to
+// silently fall through to `[]` — the same shape as the YAML parseScalar
+// bug. Callers now throw so a typo in frontmatter surfaces at config-load
+// instead of becoming an empty list at runtime. Absent input
+// (`undefined`/`null`) still returns `[]` to match `effectiveList`'s
+// "absent ⇒ empty" convention.
+test("normalizeStringList: object input throws with label in message", () => {
+  assert.throws(
+    () => normalizeStringList({ items: ["plan"] }, "routingTags"),
+    /routingTags: expected a string or array of strings, got object/,
+  );
+});
+
+test("normalizeStringList: number input throws with label in message", () => {
+  assert.throws(
+    () => normalizeStringList(42, "responsibilities"),
+    /responsibilities: expected a string or array of strings, got number/,
+  );
+});
+
+test("normalizeStringList: throws even when label is omitted (default 'value')", () => {
+  assert.throws(
+    () => normalizeStringList(true),
+    /value: expected a string or array of strings, got boolean/,
+  );
+});
+
+test("normalizeStringList: undefined input returns [] (absent, not malformed)", () => {
+  assert.deepEqual(normalizeStringList(undefined), []);
+  assert.deepEqual(normalizeStringList(undefined, "routingTags"), []);
+});
+
+test("normalizeStringList: null input returns [] (absent, not malformed)", () => {
+  assert.deepEqual(normalizeStringList(null), []);
+});
