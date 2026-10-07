@@ -87,6 +87,38 @@ test("loadConfig normalizes settings and enriches model frontmatter", () => {
   assert.equal(config.agents[0].model, "anthropic/claude-sonnet");
 });
 
+test("loadConfig: settings.defaultTools accepts YAML list form (matches normalizeStringList)", () => {
+  // Pre-fixup the validator hard-rejected list-form configs with
+  // "settings.defaultTools must be a non-empty string" while the runtime
+  // normalizer (`src/core/normalize.ts:normalizeStringList`) happily
+  // accepted them — the two layers disagreed. The fix widens the
+  // validator to accept either a comma-separated string OR a YAML list
+  // of strings; the normalizer still produces the same canonical
+  // comma-joined output downstream.
+  const cwd = fixtureProject();
+  const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(cfgPath, readFileSync(cfgPath, "utf8").replace("  default-tools: read, grep", "  default-tools:\n    - read\n    - grep"));
+  const config = loadConfig(cwd);
+  assert.deepEqual(config.settings.defaultTools, ["read", "grep"], "YAML list form is preserved verbatim at config-load (normalizer joins it downstream)");
+});
+
+test("loadConfig rejects malformed settings.defaultTools (number, object) with a clear error", () => {
+  // Regression net for the array-form fix: non-string non-list values
+  // (e.g., a number or an object) still fail with a path-bearing
+  // message that names the offending field. Pre-fixup the validator
+  // returned a generic "must be a non-empty string" — silently treating
+  // these as the same mistake as an empty string.
+  const cwd = fixtureProject();
+  const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(cfgPath, readFileSync(cfgPath, "utf8").replace("  default-tools: read, grep", "  default-tools: 42"));
+  assert.throws(() => loadConfig(cwd), /settings\.defaultTools must be a string or an array of strings\./);
+
+  const cwd2 = fixtureProject();
+  const cfgPath2 = join(cwd2, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(cfgPath2, readFileSync(cfgPath2, "utf8").replace("  default-tools: read, grep", "  default-tools:\n    - read\n    - 7"));
+  assert.throws(() => loadConfig(cwd2), /settings\.defaultTools\[1\] must be a non-empty string\./);
+});
+
 test("loadConfig treats absent settings: block as having no default distiller (opt-in)", () => {
   // Pre-fixup the loader inverted `distiller.enabled !== false`, treating
   // an absent `distiller:` block as enabled-true and then throwing "model is
