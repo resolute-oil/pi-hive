@@ -313,7 +313,7 @@ function formatPath(path: string): string {
     .replace(/\.([^.]+)$/, "/$1");
 }
 
-export function validateBudgetsConfig(value: unknown): asserts value is BudgetsConfig {
+export function validateBudgetsConfig(value: unknown): BudgetsConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("budgets must be an object.");
   }
@@ -322,16 +322,23 @@ export function validateBudgetsConfig(value: unknown): asserts value is BudgetsC
   // the plan §2.13 examples — inject the discriminator from the parent
   // nesting position BEFORE typebox runs so the validator accepts both
   // forms without losing the discriminated-union contract end-to-end.
-  // injectResourceDiscriminators returns a new (post-injection) object;
-  // we apply its per-tier branches back onto `value` so the assertion
-  // signature still narrows `value` to BudgetsConfig (Block 4 contract:
-  // downstream consumers — resolveBudgetsConfig, the resolver — read
-  // `resource:` on every cap). The mutation is explicit here at the
-  // validator boundary, not hidden inside the helper.
+  //
+  // This validator is now pure: it builds a fresh post-injection object,
+  // validates that fresh object, runs the tier-aware post-checks, and
+  // returns the validated shape. The `asserts value is BudgetsConfig`
+  // contract the previous version provided is dropped in favor of an
+  // explicit return type — callers MUST use the returned value because
+  // the input is never mutated. Four `value as BudgetsConfig` casts
+  // elsewhere in the file disappear because the return type IS the
+  // narrowed shape, and frozen `HiveConfig` literals can now be passed
+  // in without breaking the typebox run.
   const injected = injectResourceDiscriminators(value as Record<string, unknown>);
-  (value as Record<string, unknown>).perWorker = injected.perWorker;
-  (value as Record<string, unknown>).perTeam = injected.perTeam;
-  const errors = Value.Errors(BudgetsConfigSchema, value);
+  const merged: Record<string, unknown> = {
+    ...(value as Record<string, unknown>),
+    perWorker: injected.perWorker,
+    perTeam: injected.perTeam,
+  };
+  const errors = Value.Errors(BudgetsConfigSchema, merged);
   if (errors.length > 0) {
     // Surface the most specific error (skip root-level "missing required
     // property" complaints when a deeper path also fails). Otherwise the
@@ -354,23 +361,25 @@ export function validateBudgetsConfig(value: unknown): asserts value is BudgetsC
     }
     throw new Error(`budgets.${path}: ${detail}`);
   }
+  const validated = merged as unknown as BudgetsConfig;
   // C4 tier-aware window restriction: perWorker forbids per-day and
   // per-team-lifetime; perWorker.costUsd forbids per-team-lifetime. typebox
   // doesn't enforce context-sensitive constraints, so we layer a structural
   // walk over the schema-validated value.
-  enforceWindowByTier(value as BudgetsConfig);
+  enforceWindowByTier(validated);
   // If the user DID include a `resource:` field on a nested cap, it must
   // match the parent position. Omission is fine (parent-nesting disambiguates)
   // and gets injected by `resolveBudgetsConfig`. typebox's Type.Literal
   // already rejects wrong literals, but this check documents the contract
   // and acts as a safety net if the schema is ever relaxed.
-  enforceResourceDiscriminator(value as BudgetsConfig);
+  enforceResourceDiscriminator(validated);
   // Wave context-constraint: the `context:` field is optional at the
   // perWorker/perTeam tier, but when present it must set exactly one of
   // `tokens:` or `percent:`. typebox's optional-either object can't enforce
   // "exactly one" without a discriminator tag (intrusive for users), so we
   // layer the structural check here, matching the pattern above.
-  enforceContextConstraint(value as BudgetsConfig);
+  enforceContextConstraint(validated);
+  return validated;
 }
 
 // Window values allowed per (tier, resource). Per C6 the documented matrix
