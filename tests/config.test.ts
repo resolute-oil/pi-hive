@@ -694,6 +694,36 @@ test("loadConfig wires agent.md frontmatter `budgets:` into agent.governance (Wa
   assert.equal(frontend.governance?.costBudgetUsd, 0.50, "costBudgetUsd from frontmatter budgets.costUsd");
 });
 
+// Both shapes must land in agent.governance so the resolver's nested branch
+// (strategy.ts:135) is reachable in production — not just in unit tests that
+// inject object literals. The flat aliases (tokenBudget / costBudgetUsd)
+// and the nested shape (governance.tokens / governance.costUsd) are written
+// side-by-side; the defaults mirror what the resolver would apply on its
+// own when only the flat alias is present.
+test("loadConfig writes both flat alias and nested shape from frontmatter budgets (Block 2)", () => {
+  const cwd = fixtureProject();
+  const prompt = join(cwd, ".pi", "hive", "agents", "frontend.md");
+  writeFileSync(prompt, "---\nmodel: anthropic/claude-sonnet\nagent-type: coder\nbudgets:\n  tokens: 1000\n  costUsd: 0.50\n---\nBuild UI.");
+  const config = loadConfig(cwd);
+  const frontend = config.agents.find((a) => a.name === "Frontend Dev");
+  assert.ok(frontend, "frontend agent present");
+  // Flat aliases — unchanged from the Wave 2 C6 contract.
+  assert.equal(frontend.governance?.tokenBudget, 1000, "flat tokenBudget alias from frontmatter");
+  assert.equal(frontend.governance?.costBudgetUsd, 0.50, "flat costBudgetUsd alias from frontmatter");
+  // Nested shape — newly written so resolver strategy.ts:147 / strategy.ts:155
+  // see matching values and skip their own defaulting (no behavior change).
+  assert.deepEqual(
+    frontend.governance?.tokens,
+    { cap: 1000, window: "per-session", include: ["input", "output"] },
+    "nested governance.tokens is the §2.10 shape with resolver-aligned defaults",
+  );
+  assert.deepEqual(
+    frontend.governance?.costUsd,
+    { cap: 0.50, window: "per-session" },
+    "nested governance.costUsd is the §2.10 shape with resolver-aligned defaults",
+  );
+});
+
 // Bug fix regression: docs/migrations/budget-config-v2.md documents the
 // canonical `budgets:` block at the TOP level of hive-config.yaml. The
 // validator seam (config-validation.ts) was rejecting it with
