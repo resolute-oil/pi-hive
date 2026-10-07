@@ -66,9 +66,7 @@ This rule is here because the inline-display preference and the one-question-at-
 - **Never merge a pull request without explicit user permission.** Committing, pushing, and creating PRs is allowed; merging requires the user to instruct it each time. A PR is "ready" when it is open and its checks have passed — it is not "done" until the user merges. Do not run `gh pr merge`, do not click the GitHub merge button, and do not auto-merge via branch protection or repo settings on the agent's own initiative.
 - Do not add AI attribution trailers or generated-by notices to commits, docs, package text, or release notes.
 - Prefer complete, production-ready changes: no TODO placeholders, no debug logs, and no unexplained temporary behavior.
-- **All file edits go in a git worktree, never in the main working tree.** Even single-line docs changes, chore updates, and small fixes must be done in a worktree under `APP_ROOT/.worktrees/`, not as siblings of `APP_ROOT` and not directly on `main`. The `.worktrees/` directory is gitignored so `git add .` from a parent path can't drag a sibling checkout into a commit. Create with `git worktree add .worktrees/<branch> <base>` from `APP_ROOT`, then symlink `node_modules` if the worktree needs to run tests.
-
-  **Symlink target is `../../node_modules`**, not `../node_modules`. The worktree lives at `APP_ROOT/.worktrees/<branch>/` — two levels deep from `APP_ROOT` — so the relative symlink target must be `../../node_modules` to resolve to `APP_ROOT/node_modules`. The shorter `../node_modules` resolves to the non-existent `APP_ROOT/.worktrees/node_modules` and creates a dangling symlink that breaks every test and lint command in the worktree. As an alternative, use an absolute path: `ln -s "$APP_ROOT/node_modules" "$APP_ROOT/.worktrees/<branch>/node_modules"`.
+- **All file edits go in a git worktree, never in the main working tree.** Even single-line docs changes, chore updates, and small fixes must be done in a worktree under `APP_ROOT/.worktrees/`, not as siblings of `APP_ROOT` and not directly on `main`. The `.worktrees/` directory is gitignored so `git add .` from a parent path can't drag a sibling checkout into a commit. Create with `git worktree add .worktrees/<branch> <base>` from `APP_ROOT`, then `just install` to populate a real `node_modules/` inside the worktree (do NOT symlink `node_modules` — the symlink target is brittle and the workflow itself is being phased out).
 
   Clean up with `git worktree remove .worktrees/<branch>` after the branch merges. This rule applies to every agent session that touches this repo, including the one writing this rule.
 
@@ -101,11 +99,7 @@ just pi-dev
 
 # Worktree (from APP_ROOT) — required for ALL file edits
 git worktree add .worktrees/<branch> <base>
-# Worktree is at APP_ROOT/.worktrees/<branch>/ — two levels deep — so the
-# node_modules symlink target is ../../node_modules (NOT ../node_modules,
-# which resolves to a non-existent directory and breaks every test command).
-ln -s ../../node_modules .worktrees/<branch>/node_modules
-# Or use an absolute path to avoid the relative-path trap:
-# ln -s "$APP_ROOT/node_modules" "$APP_ROOT/.worktrees/<branch>/node_modules"
+cd .worktrees/<branch>
+just install    # populates node_modules in the worktree
 git worktree remove .worktrees/<branch>   # after the branch merges
 ```
