@@ -290,16 +290,24 @@ test("Block 4: validated BudgetsConfig lands with `resource:` set on every cap (
     perWorker: { tokens: { cap: 1_000 }, costUsd: { cap: 0.5 }, runs: { cap: 5 }, depth: { cap: 2 } },
     perTeam: { tokens: { cap: 10_000 }, costUsd: { cap: 5 }, runs: { cap: 20 } },
   } as Record<string, unknown>;
-  validateBudgetsConfig(config);
+  // Post-commit-4 (refactor: make validateBudgetsConfig pure) the input is
+  // no longer mutated — `validateBudgetsConfig` returns the
+  // discriminated-union-narrowed shape and the caller uses the return
+  // value. The input stays in its pre-shape so frozen / shared literals
+  // remain intact.
+  const validated = validateBudgetsConfig(config);
   // After validation (which injects the discriminator), every cap carries
   // the literal `resource:` tag. A downstream `switch (cap.resource)` is
   // now exhaustive without a fallback — which is exactly the contract the
   // post-fixup comment at schema.ts:341 originally claimed.
-  const cw = config as { perWorker: { tokens: { resource: string }; costUsd: { resource: string }; runs: { resource: string }; depth: { resource: string } } };
+  const cw = validated as { perWorker: { tokens: { resource: string }; costUsd: { resource: string }; runs: { resource: string }; depth: { resource: string } } };
   assert.equal(cw.perWorker.tokens.resource, "tokens");
   assert.equal(cw.perWorker.costUsd.resource, "costUsd");
   assert.equal(cw.perWorker.runs.resource, "runs");
   assert.equal(cw.perWorker.depth.resource, "depth");
+  // The input object is untouched — callers can pass a shared literal
+  // without the validator erasing data on the next read.
+  assert.equal((config.perWorker as { tokens: { resource?: string } }).tokens.resource, undefined, "input `resource:` was not injected into the caller's object");
 });
 
 // ── Cycle 4 (T6.7, C4) — discriminated union + tier-aware window rejection ─
