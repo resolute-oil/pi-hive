@@ -13,7 +13,7 @@ export function stripComment(line: string): string {
   return line;
 }
 
-export function parseScalar(raw: string): any {
+export function parseScalar(raw: string): unknown {
   const value = raw.trim();
   if (value === "") return "";
   if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
@@ -81,7 +81,7 @@ export function findUnquotedColon(text: string): number {
   return -1;
 }
 
-export function parseKeyValue(text: string): [string, any, boolean] {
+export function parseKeyValue(text: string): [string, unknown, boolean] {
   const idx = findUnquotedColon(text);
   if (idx < 0) return [text.trim(), "", false];
   const rawKey = text.slice(0, idx).trim();
@@ -130,7 +130,7 @@ function setKeyOrThrow(
   obj[key] = value;
 }
 
-export function parseYamlLite(raw: string): any {
+export function parseYamlLite(raw: string): unknown {
   // Capture the 1-based source line number BEFORE stripping/filtering so the
   // parser can point users at the original line of a duplicate key. Lines
   // that are blank, comments, or `---` document markers never reach the
@@ -147,13 +147,13 @@ export function parseYamlLite(raw: string): any {
     });
   });
 
-  function parseBlock(index: number, indent: number): [any, number] {
+  function parseBlock(index: number, indent: number): [unknown, number] {
     if (index >= lines.length) return [{}, index];
     return lines[index].text.startsWith("- ") ? parseArray(index, indent) : parseObject(index, indent);
   }
 
-  function parseArray(index: number, indent: number): [any[], number] {
-    const output: any[] = [];
+  function parseArray(index: number, indent: number): [unknown[], number] {
+    const output: unknown[] = [];
     while (index < lines.length && lines[index].indent === indent && lines[index].text.startsWith("- ")) {
       const rest = lines[index].text.slice(2).trim();
       index++;
@@ -238,5 +238,9 @@ export function parseYamlLite(raw: string): any {
 export function parseFrontmatter(raw: string): { attrs: JsonRecord; body: string } {
   const match = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
   if (!match) return { attrs: {}, body: raw.trim() };
-  return { attrs: parseYamlLite(match[1]) || {}, body: match[2].trim() };
+  // `parseYamlLite` returns `unknown`; the contract is that the parser
+  // produces JSON-compatible values, so we trust the parser here. The
+  // downstream consumers (parseAgentBudgetsFrontmatter, normalizeStringList,
+  // etc.) use `typeof` / `Array.isArray` guards to narrow before reading.
+  return { attrs: (parseYamlLite(match[1]) || {}) as JsonRecord, body: match[2].trim() };
 }

@@ -34,7 +34,9 @@ export interface AgentBudgetFrontmatter {
 export function parseAgentBudgetsFrontmatter(raw: string): AgentBudgetFrontmatter {
   const { attrs } = parseFrontmatter(raw);
   // Canonical key wins over deprecated alias when both are present.
-  const rawBudgets = (attrs as Record<string, unknown>).budgets ?? (attrs as Record<string, unknown>).governance;
+  // `attrs` is already typed as JsonRecord by parseFrontmatter, so the
+  // historical `(attrs as Record<string, unknown>)` casts disappear.
+  const rawBudgets = attrs.budgets ?? attrs.governance;
   if (rawBudgets === undefined || rawBudgets === null) return {};
   if (typeof rawBudgets !== "object" || Array.isArray(rawBudgets)) {
     throw new Error(`agent.md frontmatter: 'budgets' must be an object; got ${Array.isArray(rawBudgets) ? "array" : typeof rawBudgets}.`);
