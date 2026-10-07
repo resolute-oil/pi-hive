@@ -90,8 +90,8 @@ export function loadAgentRuntime(state: HiveState, ctx: ExtensionContext, cfg: H
     thinking,
     color: String(attrs.color || agent.color || ""),
     consultWhen: String(attrs.consultWhen || attrs.description || agent.consultWhen || ""),
-    routingTags: normalizeStringList(attrs.routingTags || (agent as any).routingTags),
-    responsibilities: normalizeStringList(attrs.responsibilities || (agent as any).responsibilities),
+    routingTags: normalizeStringList(attrs.routingTags || (agent as any).routingTags, "routingTags"),
+    responsibilities: normalizeStringList(attrs.responsibilities || (agent as any).responsibilities, "responsibilities"),
     // Delegation permissions are derived from the team hierarchy, not from
     // per-agent prompt files: orchestrator -> leads -> members.
     allowedAgents: agent.allowedAgents,
