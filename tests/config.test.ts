@@ -87,6 +87,71 @@ test("loadConfig normalizes settings and enriches model frontmatter", () => {
   assert.equal(config.agents[0].model, "anthropic/claude-sonnet");
 });
 
+test("loadConfig: settings.defaultTools accepts YAML list form (matches normalizeStringList)", () => {
+  // Pre-fixup the validator hard-rejected list-form configs with
+  // "settings.defaultTools must be a non-empty string" while the runtime
+  // normalizer (`src/core/normalize.ts:normalizeStringList`) happily
+  // accepted them — the two layers disagreed. The fix widens the
+  // validator to accept either a comma-separated string OR a YAML list
+  // of strings; the normalizer still produces the same canonical
+  // comma-joined output downstream.
+  const cwd = fixtureProject();
+  const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(cfgPath, readFileSync(cfgPath, "utf8").replace("  default-tools: read, grep", "  default-tools:\n    - read\n    - grep"));
+  const config = loadConfig(cwd);
+  assert.deepEqual(config.settings.defaultTools, ["read", "grep"], "YAML list form is preserved verbatim at config-load (normalizer joins it downstream)");
+});
+
+test("loadConfig rejects malformed settings.defaultTools (number, object) with a clear error", () => {
+  // Regression net for the array-form fix: non-string non-list values
+  // (e.g., a number or an object) still fail with a path-bearing
+  // message that names the offending field. Pre-fixup the validator
+  // returned a generic "must be a non-empty string" — silently treating
+  // these as the same mistake as an empty string.
+  const cwd = fixtureProject();
+  const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(cfgPath, readFileSync(cfgPath, "utf8").replace("  default-tools: read, grep", "  default-tools: 42"));
+  assert.throws(() => loadConfig(cwd), /settings\.defaultTools must be a string or an array of strings\./);
+
+  const cwd2 = fixtureProject();
+  const cfgPath2 = join(cwd2, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(cfgPath2, readFileSync(cfgPath2, "utf8").replace("  default-tools: read, grep", "  default-tools:\n    - read\n    - 7"));
+  assert.throws(() => loadConfig(cwd2), /settings\.defaultTools\[1\] must be a non-empty string\./);
+});
+
+test("loadConfig treats absent settings: block as having no default distiller (opt-in)", () => {
+  // Pre-fixup the loader inverted `distiller.enabled !== false`, treating
+  // an absent `distiller:` block as enabled-true and then throwing "model is
+  // required when the distiller is enabled" for users who never opted into
+  // distillation. Post-fix the same config (no settings: at all) loads
+  // cleanly: defaults fill in the documented fields and `distiller.enabled`
+  // is false unless the user explicitly sets `enabled: true`.
+  const cwd = fixtureProject();
+  const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
+  const yaml = readFileSync(cfgPath, "utf8").split("\n")
+    // Drop everything from the `settings:` line through the closing
+    // `    enabled: false` line (inclusive). The rest of the file
+    // (shared-context, planning, hive) stays intact.
+    .filter((_, i, lines) => {
+      const startIdx = lines.findIndex((line) => /^settings:/.test(line));
+      const endIdx = lines.findIndex((line, idx) => idx > startIdx && /^\s+enabled: false\s*$/.test(line));
+      if (startIdx < 0 || endIdx < 0) return true;
+      return i < startIdx || i > endIdx;
+    })
+    .join("\n");
+  writeFileSync(cfgPath, yaml);
+
+  const config = loadConfig(cwd);
+  assert.equal(config.settings.distiller.enabled, false, "absent distiller: defaults to enabled=false (opt-in)");
+  assert.equal(config.settings.distiller.model, "", "no model required when the distiller is off");
+  // The documented defaults still apply even without a settings: block.
+  assert.equal(config.settings.subagentOutputLimit, 12_000);
+  assert.equal(config.settings.defaultTools, "read, grep, find, ls");
+  assert.equal(config.settings.maxParallel, undefined, "no cap by default — dispatcher skips the parallel branch");
+  assert.equal(config.settings.queueSize, undefined, "no queue by default — dispatcher skips the queue branch");
+  assert.equal(config.settings.telemetry.retentionDays, 30);
+});
+
 test("worker governance is opt-in with settings defaults and per-agent overrides", () => {
   const unconstrainedCwd = fixtureProject();
   const unconstrainedPath = join(unconstrainedCwd, ".pi", "hive", "hive-config.yaml");
@@ -112,10 +177,18 @@ test("worker governance is opt-in with settings defaults and per-agent overrides
 });
 
 test("loadConfig rejects unsafe telemetry limits and unknown telemetry keys", () => {
-  for (const replacement of ["max-log-bytes: 0", "retention-days: 999999", "send-to-cloud: true"]) {
+  // Each case replaces a distinct target so the test never produces a
+  // duplicate-key collision (which the strict parser now rejects with a
+  // path-bearing `yaml: duplicate key …` error — pre-fixup the parser
+  // silently overwrote and the test relied on that leniency).
+  for (const [target, replacement] of [
+    ["max-log-bytes: 1048576", "max-log-bytes: 0"],
+    ["retention-days: 45", "retention-days: 999999"],
+    ["redact-sensitive-data: true", "redact-sensitive-data: true\n    send-to-cloud: true"],
+  ] as const) {
     const cwd = fixtureProject();
     const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
-    const yaml = readFileSync(cfgPath, "utf8").replace("max-log-bytes: 1048576", replacement);
+    const yaml = readFileSync(cfgPath, "utf8").replace(target, replacement);
     writeFileSync(cfgPath, yaml);
     assert.throws(() => loadConfig(cwd), /settings\.telemetry/);
   }
@@ -429,9 +502,16 @@ hive:
 function typedFixture(orchestratorFrontmatter: string, agentFrontmatter: string, agentConfigExtra = "") {
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-types-"));
   mkdirSync(join(cwd, ".pi", "hive", "agents"), { recursive: true });
-  writeFileSync(join(cwd, ".pi", "hive", "agents", "orchestrator.md"), `---\nmodel: openai/gpt-5\nthinking: off\n${orchestratorFrontmatter}\n---\nLead.`);
-  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: planner\n---\nPlan.");
-  writeFileSync(join(cwd, ".pi", "hive", "agents", "agent.md"), `---\nmodel: openai/gpt-5\nthinking: off\n${agentFrontmatter}\n---\nWork.`);
+  // Frontmatter is passed verbatim from each test — no implicit prefix is
+  // prepended, so a caller that needs `model:` / `thinking:` (or any other
+  // baseline field) must include it. Pre-fixup the template prefixed
+  // `model: openai/gpt-5\nthinking: off` and silently absorbed duplicates
+  // when the caller included those same keys; the new strict parser
+  // (commit 1: `fix(yaml): reject duplicate keys`) would hard-fail instead,
+  // so the prefix is gone and each test now owns its full frontmatter.
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "orchestrator.md"), `---\n${orchestratorFrontmatter}\n---\nLead.`);
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), "---\nagent-type: planner\n---\nPlan.");
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "agent.md"), `---\n${agentFrontmatter}\n---\nWork.`);
   writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), `
 settings:
   distiller:

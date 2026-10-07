@@ -333,6 +333,7 @@ export interface OrchestratorRuntime {
 }
 
 export interface YamlLine {
+  line: number;
   indent: number;
   text: string;
 }

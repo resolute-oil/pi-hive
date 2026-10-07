@@ -4,6 +4,7 @@ import type { AgentConfig, HiveConfig, HiveMode, HiveTeam } from "./types";
 import { parseYamlLite, parseFrontmatter } from "./yaml";
 import { agentSlug, configuredChildAgents, flatAgentConfig, normalizeAgentType, normalizeCommit, normalizePlanStages, safeRead, slug } from "./utils";
 import { validateAgentTypes, validateBudgetsConfig, validateHiveConfigShape } from "./schema";
+import type { BudgetsConfig } from "./schema";
 import { CONFIG_LIMITS, validateConfigSize, validateRawConfig } from "./config-validation";
 import { resolveConfiguredPath, resolveProjectPath } from "./safe-path";
 import { parseAgentBudgetsFrontmatter } from "../agents/frontmatter";
@@ -200,8 +201,14 @@ export function loadConfig(cwd: string): HiveConfig {
   // wins when both are set (mirror of the resolver's per-block precedence in
   // strategy.ts:readGlobalBudgets).
   const canonicalBudgets = parsed?.budgets ?? parsed?.settings?.budgets;
+  let validatedBudgets: BudgetsConfig | undefined;
   if (canonicalBudgets !== undefined) {
-    validateBudgetsConfig(canonicalBudgets);
+    // Commit 4: validateBudgetsConfig now returns the post-injection shape
+    // (the input is no longer mutated). Capture the returned value so the
+    // loader can pass it downstream — downstream consumers (the resolver
+    // in strategy.ts) read `resource:` on every cap, which only the
+    // validated shape carries.
+    validatedBudgets = validateBudgetsConfig(canonicalBudgets);
   }
 
   // H1 (Decision 7): allowedAgents is no longer a user config field — the
@@ -211,10 +218,28 @@ export function loadConfig(cwd: string): HiveConfig {
 
   const { hive, planning } = resolveTeams(parsed);
 
+  // `maxParallel` and `queueSize` are deliberately `undefined` by default —
+  // leaving them unset means "no cap, no queue" (the runtime sees
+  // `state.config.settings.maxParallel === undefined` and skips the
+  // dispatcher's parallel-cap branch entirely). Setting `maxParallel`
+  // alone enables a hard cap (dispatcher rejects runs beyond the cap; see
+  // `src/engine/dispatch.ts:319-321`). Setting both `maxParallel` and
+  // `queueSize` enables fair queueing: the dispatcher queues waiting
+  // workers when `activeRuns >= maxParallel` and `queueSize` is the
+  // upper bound. The error message at `dispatch.ts:328` ("configure
+  // queue-size to enable fair waiting") already points the user at the
+  // second field when only the first is set.
   const settings = parsed.settings || ({} as HiveConfig["settings"]);
   const distiller = (settings as any).distiller || {};
   const telemetry = (settings as any).telemetry || {};
-  const distillerEnabled = distiller.enabled !== false;
+  // Distiller is opt-in: when the `distiller:` block is absent OR
+  // `enabled:` is not explicitly `true`, the distiller stays off and the
+  // model requirement below is skipped. Pre-fixup `enabled !== false`
+  // flipped the absent case to `true`, triggering the "model is required"
+  // error for users who never opted into distillation — the audit-flagged
+  // bug. Users who do set `enabled: true` still hit the model-required
+  // throw on the next line; that gate stays as-is.
+  const distillerEnabled = distiller.enabled === true;
   const distillerModel = String(distiller.model || "").trim();
   if (distillerEnabled && !distillerModel) {
     throw new Error("settings.distiller.model is required when the distiller is enabled (set a 'provider/id' model, or set distiller.enabled: false).");
@@ -261,7 +286,7 @@ export function loadConfig(cwd: string): HiveConfig {
       // resolveWorkerBudgetPolicy on first read — surfacing invalid configs
       // at the runtime boundary instead of config-load keeps the strict
       // error message co-located with the offending field.
-      budgets: parsed.budgets ?? settings.budgets,
+      budgets: validatedBudgets ?? (parsed.budgets ?? settings.budgets),
       // Legacy flat-shape fallback (Wave 5A cleanup drops these).
       workerBudgets: settings.workerBudgets,
       teamBudgets: settings.teamBudgets,

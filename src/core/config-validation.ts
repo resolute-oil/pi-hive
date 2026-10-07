@@ -216,7 +216,24 @@ export function validateRawConfig(cwd: string, raw: string, parsed: unknown): vo
       stringEnum<TokenBudgetScope>(settings.teamBudgets.tokenBudgetScope, "settings.teamBudgets.tokenBudgetScope", TOKEN_BUDGET_SCOPES);
       positiveNumber(settings.teamBudgets.costBudgetUsd, "settings.teamBudgets.costBudgetUsd", 1_000_000_000);
     }
-    if (settings.defaultTools !== undefined) string(settings.defaultTools, "settings.defaultTools");
+    if (settings.defaultTools !== undefined) {
+      // Accept both `default-tools: read, grep` (comma string) and
+      // `default-tools: [read, grep]` (YAML list). The runtime
+      // normalizer (`src/core/normalize.ts:normalizeStringList`) handles
+      // both shapes, so the validator's job is to reject malformed
+      // input — not to impose a single YAML syntax. Pre-fixup this hard-
+      // rejected list-form configs with the cryptic "must be a non-empty
+      // string" error and contradicted the documented normalizer.
+      if (typeof settings.defaultTools === "string") {
+        string(settings.defaultTools, "settings.defaultTools");
+      } else if (Array.isArray(settings.defaultTools)) {
+        settings.defaultTools.forEach((entry: unknown, index: number) =>
+          string(entry, `settings.defaultTools[${index}]`),
+        );
+      } else {
+        throw new Error("settings.defaultTools must be a string or an array of strings.");
+      }
+    }
     stringList(settings.secretPaths, "settings.secretPaths");
     if (settings.distiller !== undefined) {
       object(settings.distiller, "settings.distiller");
