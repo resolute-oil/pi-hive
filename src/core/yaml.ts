@@ -26,7 +26,49 @@ export function parseScalar(raw: string): any {
     const inner = value.slice(1, -1).trim();
     return inner ? inner.split(",").map((part) => parseScalar(part)) : [];
   }
+  if (value.startsWith("{") && value.endsWith("}")) {
+    return parseInlineObject(value);
+  }
   return value;
+}
+
+function findUnquotedComma(text: string): number {
+  let quote: string | null = null;
+  let bracketDepth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if ((ch === '"' || ch === "'") && text[i - 1] !== "\\") quote = quote === ch ? null : quote || ch;
+    if (quote) continue;
+    if (ch === "[" || ch === "{") bracketDepth++;
+    else if (ch === "]" || ch === "}") bracketDepth--;
+    else if (ch === "," && bracketDepth === 0) return i;
+  }
+  return -1;
+}
+
+function parseInlineObject(raw: string): JsonRecord {
+  const inner = raw.trim().slice(1, -1).trim();
+  if (!inner) return {};
+  const result: JsonRecord = {};
+  let cursor = 0;
+  while (cursor <= inner.length) {
+    const idx = findUnquotedComma(inner.slice(cursor));
+    if (idx < 0) {
+      const part = inner.slice(cursor).trim();
+      if (part) {
+        const [key, value] = parseKeyValue(part);
+        result[key] = value;
+      }
+      break;
+    }
+    const part = inner.slice(cursor, cursor + idx).trim();
+    if (part) {
+      const [key, value] = parseKeyValue(part);
+      result[key] = value;
+    }
+    cursor += idx + 1;
+  }
+  return result;
 }
 
 export function findUnquotedColon(text: string): number {
