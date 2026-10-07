@@ -197,13 +197,13 @@ export function validateConfigSize(raw: string): void {
 export function validateRawConfig(cwd: string, raw: string, parsed: unknown): void {
   validateConfigSize(raw);
   object(parsed, "hive-config.yaml");
-  keys(parsed, ["settings", "sharedContext", "shared_context", "planning", "hive", "orchestrator", "agents"], "hive-config.yaml");
+  keys(parsed, ["settings", "sharedContext", "shared_context", "budgets", "planning", "hive", "orchestrator", "agents"], "hive-config.yaml");
   if (parsed.sharedContext !== undefined && parsed.shared_context !== undefined) throw new Error("Define only one of shared-context or shared_context.");
 
   const settings = parsed.settings;
   if (settings !== undefined) {
     object(settings, "settings");
-    keys(settings, ["subagentOutputLimit", "defaultTools", "maxParallel", "queueSize", "workerBudgets", "teamBudgets", "secretPaths", "distiller", "telemetry"], "settings");
+    keys(settings, ["subagentOutputLimit", "defaultTools", "maxParallel", "queueSize", "workerBudgets", "teamBudgets", "budgets", "secretPaths", "distiller", "telemetry"], "settings");
     positiveInteger(settings.subagentOutputLimit, "settings.subagentOutputLimit", CONFIG_LIMITS.subagentOutputLimit);
     positiveInteger(settings.maxParallel, "settings.maxParallel", CONFIG_LIMITS.maxParallel);
     positiveInteger(settings.queueSize, "settings.queueSize", 100_000);

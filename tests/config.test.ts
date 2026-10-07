@@ -693,3 +693,74 @@ test("loadConfig wires agent.md frontmatter `budgets:` into agent.governance (Wa
   assert.equal(frontend.governance?.tokenBudget, 1000, "tokenBudget from frontmatter budgets.tokens");
   assert.equal(frontend.governance?.costBudgetUsd, 0.50, "costBudgetUsd from frontmatter budgets.costUsd");
 });
+
+// Bug fix regression: docs/migrations/budget-config-v2.md documents the
+// canonical `budgets:` block at the TOP level of hive-config.yaml. The
+// validator seam (config-validation.ts) was rejecting it with
+// "hive-config.yaml.budgets is not a recognized configuration key", and the
+// loader was reading from `parsed.settings.budgets` so the value was silently
+// dropped. The fix (a) adds `budgets` to the top-level + settings keys
+// allow-lists, and (b) makes the loader read top-level first then settings
+// (legacy fallback). Top-level wins when both are set so a migration in
+// progress doesn't get clobbered by a leftover `settings.budgets:` block.
+test("loadConfig accepts top-level budgets: from the migration guide (G-16 canonical path)", () => {
+  const cwd = fixtureProject();
+  const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
+  const base = readFileSync(cfgPath, "utf8");
+  const yaml = base.replace(
+    "shared-context:\n  - README.md",
+    `budgets:\n  per-worker:\n    tokens:\n      cap: 3500\n      include: [input, output]\n    runs:\n      cap: 3\n    depth:\n      cap: 2\n  per-team:\n    tokens:\n      cap: 50000\n      include: [input, output, cacheRead, cacheWrite, reasoning]\n    runs:\n      cap: 20\n  strategies:\n    on-approaching-limit:\n      action: wrap-up\n      threshold: 0.2\n      hint: "wrap up"\n    on-exhaustion:\n      action: compact\n    summary:\n      max-tokens: 2000\nshared-context:\n  - README.md`,
+  );
+  writeFileSync(cfgPath, yaml);
+
+  // Must NOT throw "budgets is not a recognized configuration key".
+  const loaded = loadConfig(cwd);
+
+  // The loader populates settings.budgets from parsed.budgets so the resolver
+  // (strategy.ts:readGlobalBudgets) finds the value without churn downstream.
+  assert.ok(loaded.settings.budgets, "settings.budgets is populated from top-level budgets:");
+  assert.equal(loaded.settings.budgets?.perWorker.tokens?.cap, 3500, "per-worker.tokens.cap read from top-level");
+  assert.equal(loaded.settings.budgets?.perWorker.runs?.cap, 3, "per-worker.runs.cap read from top-level");
+  assert.equal(loaded.settings.budgets?.perWorker.depth?.cap, 2, "per-worker.depth.cap read from top-level");
+  assert.equal(loaded.settings.budgets?.perTeam.tokens?.cap, 50_000, "per-team.tokens.cap read from top-level");
+  assert.equal(loaded.settings.budgets?.perTeam.runs?.cap, 20, "per-team.runs.cap read from top-level");
+  assert.equal(loaded.settings.budgets?.strategies?.onExhaustion.action, "compact", "strategies.onExhaustion read from top-level");
+  assert.equal(loaded.settings.budgets?.strategies?.onApproachingLimit.threshold, 0.2, "strategies.onApproachingLimit.threshold read from top-level");
+  assert.equal(loaded.settings.budgets?.strategies?.summary.maxTokens, 2000, "strategies.summary.maxTokens read from top-level");
+});
+
+test("loadConfig: top-level budgets: wins when both top-level and settings.budgets: are set", () => {
+  const cwd = fixtureProject();
+  const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
+  const base = readFileSync(cfgPath, "utf8");
+  // Both positions are set; the canonical top-level position wins.
+  const yaml = base.replace(
+    "shared-context:\n  - README.md",
+    `budgets:\n  per-worker:\n    tokens:\n      cap: 7777\n  per-team:\n    runs:\n      cap: 1\nshared-context:\n  - README.md`,
+  ).replace(
+    "settings:\n  default-tools: read, grep",
+    "settings:\n  default-tools: read, grep\n  budgets:\n    per-worker:\n      tokens:\n        cap: 1234",
+  );
+  writeFileSync(cfgPath, yaml);
+  const loaded = loadConfig(cwd);
+  assert.equal(loaded.settings.budgets?.perWorker.tokens?.cap, 7777, "top-level budgets: wins over settings.budgets:");
+});
+
+test("loadConfig: settings.budgets: still loads as a legacy fallback (pre-migration code)", () => {
+  // G-16 hard-cutover is forward-only; existing configs that put `budgets:`
+  // under `settings:` (the prior code's position) keep loading so a
+  // mid-migration project doesn't crash. The previous "settings.budgets is
+  // not a recognized configuration key" error was the seam bug, not the
+  // user's config.
+  const cwd = fixtureProject();
+  const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
+  const base = readFileSync(cfgPath, "utf8");
+  const yaml = base.replace(
+    "settings:\n  default-tools: read, grep",
+    `settings:\n  default-tools: read, grep\n  budgets:\n    per-worker:\n      tokens:\n        cap: 999\n    per-team:\n      runs:\n        cap: 7`,
+  );
+  writeFileSync(cfgPath, yaml);
+  const loaded = loadConfig(cwd);
+  assert.equal(loaded.settings.budgets?.perWorker.tokens?.cap, 999, "settings.budgets.per-worker.tokens.cap still loads");
+  assert.equal(loaded.settings.budgets?.perTeam.runs?.cap, 7, "settings.budgets.per-team.runs.cap still loads");
+});

@@ -198,8 +198,15 @@ export function loadConfig(cwd: string): HiveConfig {
   // restored (TS B1). User-authored YAML commonly omits the `resource:`
   // discriminator; the validator injects it from the parent nesting before
   // typebox runs (see schema.ts injectResourceDiscriminators).
-  if (parsed?.settings?.budgets !== undefined) {
-    validateBudgetsConfig(parsed.settings.budgets);
+  // The canonical position for `budgets:` per docs/migrations/budget-config-v2.md
+  // is the TOP level of hive-config.yaml (the migration guide's "AFTER" shape).
+  // `settings.budgets:` is the prior code's position and remains accepted as a
+  // legacy fallback so configs that haven't migrated still load; top-level
+  // wins when both are set (mirror of the resolver's per-block precedence in
+  // strategy.ts:readGlobalBudgets).
+  const canonicalBudgets = parsed?.budgets ?? parsed?.settings?.budgets;
+  if (canonicalBudgets !== undefined) {
+    validateBudgetsConfig(canonicalBudgets);
   }
 
   // H1 (Decision 7): allowedAgents is no longer a user config field — the
@@ -259,7 +266,7 @@ export function loadConfig(cwd: string): HiveConfig {
       // resolveWorkerBudgetPolicy on first read — surfacing invalid configs
       // at the runtime boundary instead of config-load keeps the strict
       // error message co-located with the offending field.
-      budgets: settings.budgets,
+      budgets: parsed.budgets ?? settings.budgets,
       // Legacy flat-shape fallback (Wave 5A cleanup drops these).
       workerBudgets: settings.workerBudgets,
       teamBudgets: settings.teamBudgets,
