@@ -10,9 +10,69 @@ import { test } from "node:test";
 import {
   validateBudgetsConfig,
 } from "../src/core/schema.ts";
+import { parseYamlLite } from "../src/core/yaml.ts";
 
 // ── Cycle 1 (T6.1) — Nested config schema parses + rejects malformed ────────
 
+// Convention: feed validators parsed YAML, not object literals, so the parser
+// path stays covered. This test exercises the YAML → kebab→camel → schema
+// chain end-to-end (the object-literal version of the same assertion is
+// below).
+test("validateBudgetsConfig accepts the canonical nested config (parsed from YAML)", () => {
+  const yaml = `
+defaults-enabled: true
+per-worker:
+  tokens:
+    resource: tokens
+    cap: 1000
+    window: per-session
+    include:
+      - input
+      - output
+  cost-usd:
+    resource: costUsd
+    cap: 0.5
+    window: per-session
+  runs:
+    resource: runs
+    cap: 5
+  depth:
+    resource: depth
+    cap: 2
+per-team:
+  tokens:
+    resource: tokens
+    cap: 10000
+    window: per-team-lifetime
+    include:
+      - input
+      - output
+      - cacheRead
+      - cacheWrite
+  cost-usd:
+    resource: costUsd
+    cap: 5
+    window: per-team-lifetime
+  runs:
+    resource: runs
+    cap: 20
+strategies:
+  on-approaching-limit:
+    action: wrap-up
+    threshold: 0.2
+    hint: wrap up
+  on-exhaustion:
+    action: abort
+  summary:
+    max-tokens: 2000
+`;
+  const config = parseYamlLite(yaml);
+  assert.doesNotThrow(() => validateBudgetsConfig(config));
+});
+
+// Object-literal variant for fast iteration on shape changes. Kept beside
+// the YAML-parsed variant above so a regression in the parser path is
+// isolated to the test above.
 test("validateBudgetsConfig accepts the canonical nested config", () => {
   const config = {
     defaultsEnabled: true,
@@ -34,6 +94,29 @@ test("validateBudgetsConfig accepts the canonical nested config", () => {
     },
   };
   assert.doesNotThrow(() => validateBudgetsConfig(config));
+});
+
+// Convention: feed validators parsed YAML, not object literals, so the parser
+// path stays covered. The negative-cap / unknown-resource / wrong-window
+// cases below exercise the same error paths an object literal would, but
+// they reach the validator through parseYamlLite first — so a parser bug
+// (e.g. swallowed type coercion) is caught alongside the schema bug.
+test("validateBudgetsConfig rejects malformed nested configs (parsed from YAML)", () => {
+  // Negative cap (typebox minimum: 0).
+  assert.throws(
+    () => validateBudgetsConfig(parseYamlLite("per-worker:\n  tokens:\n    resource: tokens\n    cap: -1\n")),
+    /tokens\/cap/,
+  );
+  // Unknown resource discriminator.
+  assert.throws(
+    () => validateBudgetsConfig(parseYamlLite("per-worker:\n  tokens:\n    resource: wat\n    cap: 1\n")),
+    /resource/,
+  );
+  // Window outside the resource's allowed set — costUsd.window does not accept "per-day".
+  assert.throws(
+    () => validateBudgetsConfig(parseYamlLite("per-worker:\n  cost-usd:\n    resource: costUsd\n    cap: 1\n    window: per-day\n")),
+    /window/,
+  );
 });
 
 test("validateBudgetsConfig rejects malformed nested configs", () => {
@@ -96,10 +179,9 @@ test("parseAgentBudgetsFrontmatter accepts the nested { cap: N } shape from the 
   const nested = parseAgentBudgetsFrontmatter(
     "---\nbudgets:\n  tokens:\n    cap: 1000\n  cost-usd:\n    cap: 0.25\n  runs:\n    cap: 1\n  depth:\n    cap: 1\n---\n",
   );
-  // YAML kebab/camel is normalized at parse time; both keys arrive as
-  // `costUsd` (or `cost-usd` depending on the loader). The parser accepts
-  // either; we assert on whichever the loader surfaces.
+  // costUsd now pinned here so a future regression in kebab→camel is caught.
   assert.equal(nested.budgets?.tokens?.cap, 1000, "nested tokens parses to { cap }");
+  assert.equal(nested.budgets?.costUsd?.cap, 0.25, "nested cost-usd kebab key normalizes to { cap }");
   assert.equal(nested.budgets?.runs?.cap, 1, "nested runs parses to { cap }");
   assert.equal(nested.budgets?.depth?.cap, 1, "nested depth parses to { cap }");
 });
