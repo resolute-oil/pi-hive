@@ -111,7 +111,7 @@ No new tests. Wave 5C is a decision-recording wave, not a code-writing wave.
 - **Local-only verification commands:**
 
   ```bash
-  cd /Users/cgrant/code/pi-hive  # APP_ROOT
+  cd /Users/cgrant/.pi/agent/git/github.com/demetere/pi-hive  # APP_ROOT
   git branch -vv | grep refactor/budget
   # All entries should show no upstream (no [origin/...] suffix)
   ```
@@ -120,7 +120,7 @@ No new tests. Wave 5C is a decision-recording wave, not a code-writing wave.
 
   ```bash
   # After the user instructs:
-  cd /Users/cgrant/code/pi-hive
+  cd /Users/cgrant/.pi/agent/git/github.com/demetere/pi-hive
   git status  # precheck — must be clean
   git worktree remove .worktrees/refactor-budget-f0-contracts
   git worktree remove .worktrees/refactor-budget-f1-primitives
