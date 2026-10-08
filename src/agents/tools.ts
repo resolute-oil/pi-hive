@@ -223,7 +223,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       };
     },
     renderCall(args: unknown, theme: Theme) {
-      const a = (args as any) || {};
+      const a = (args || {}) as { agent?: string; task?: string; isReadOnly?: boolean };
       const agent = a.agent || "?";
       const task = String(a.task || "");
       // Surface any flag the caller explicitly set, using `hasOwnProperty` so
@@ -255,14 +255,14 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       return boundedToolRender(lines, theme.fg("dim", "…"));
     },
     renderResult(result: any, options: ToolRenderOptions, theme: Theme) {
-      const details = result.details as any;
-      const agent = details?.agent || "agent";
+      const details = (result.details || {}) as { agent?: string; status?: string; elapsed?: number; outputPreview?: string };
+      const agent = details.agent || "agent";
       // While a delegation is running, the persistent Hive activity widget is
       // the single source of live progress. Rendering "working..." for every
       // nested delegate_agent call creates the repeated rows seen above the
       // editor, so keep the tool call line but suppress this interim result row.
-      if (options.isPartial || details?.status === "running") return emptyToolRender();
-      const ok = details?.status === "done";
+      if (options.isPartial) return emptyToolRender();
+      const ok = details.status === "done";
       const header = theme.fg(ok ? "success" : "error", `${ok ? "✓" : "✗"} `) + agentColored(agent, theme) + theme.fg("dim", ` ${Math.round((details?.elapsed || 0) / 1000)}s`);
       if (options.expanded && details?.outputPreview) {
         const preview = theme.fg("muted", truncateMiddle(details.outputPreview, 4000));
