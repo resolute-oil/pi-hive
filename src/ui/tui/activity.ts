@@ -1,5 +1,6 @@
 import type { AgentRuntime, HiveState } from "../../core/types";
 import { truncateToWidth } from "@earendil-works/pi-tui";
+import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { agentSlug } from "../../core/agent-tree";
 
 // Widget id and size caps. The widget is a normal full-width pi panel — one
@@ -33,7 +34,7 @@ function statusIcon(status?: AgentRuntime["status"]): string {
   return "•";
 }
 
-function statusColorKey(status?: AgentRuntime["status"]): string {
+function statusColorKey(status?: AgentRuntime["status"]): ThemeColor {
   if (status === "running") return "accent";
   if (status === "done") return "success";
   if (status === "error") return "error";
@@ -79,7 +80,7 @@ function workOf(runtime: AgentRuntime): string {
 // dim text (e.g. `(design-planner)`). The widget passes a slug for rows whose
 // display name collides with another row in the same panel, so operators can
 // distinguish them at a glance. Pass empty/undefined for the common case.
-function renderAgentRow(runtime: AgentRuntime, width: number, theme: any, displaySuffix?: string): string {
+function renderAgentRow(runtime: AgentRuntime, width: number, theme: Theme, displaySuffix?: string): string {
   const icon = statusIcon(runtime.status);
   // Context-window fill sits between the status icon and the agent name so
   // operators see at a glance which worker is closest to truncation. Newly
@@ -116,7 +117,7 @@ function nameHistogram(runtimes: AgentRuntime[]): Map<string, number> {
 // right when the available space is odd) and the label themed dim. The
 // count uses the *map* size (caller decides), not the visible-row count,
 // so a truncated panel surfaces the real number to the operator.
-function headerLine(width: number, count: number, theme: any): string {
+function headerLine(width: number, count: number, theme: Theme): string {
   const DASH = "─";
   const noun = count === 1 ? "agent" : "agents";
   const label = ` Hive Activity · ${count} ${noun} `;
@@ -165,7 +166,7 @@ export function updateHiveActivityWidget(state: HiveState) {
   }
 
   state.activityWidgetInstalled = true;
-  ctx.ui.setWidget(WIDGET_ID, (tui: any, theme: any) => {
+  ctx.ui.setWidget(WIDGET_ID, (tui: any, theme: Theme) => {
     state.activityRender = () => tui.requestRender();
     return {
       invalidate() {},
