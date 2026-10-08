@@ -193,12 +193,16 @@ async function emitSetupFailure(opts: {
 export type CreateAgentSession = typeof createAgentSession;
 
 export function resolveWorkerSkillPaths(cwd: string, refs: unknown[] = []): string[] {
-  return normalizeWorkerSkillPaths(refs).flatMap((skillPath, index) => {
-    const raw = refs[index] as any;
-    const allowOutside = raw?.allowOutsideProject === true || raw?.path?.allowOutsideProject === true;
-    const safe = resolveConfiguredPath(cwd, skillPath, allowOutside);
-    return safe ? [safe.canonicalPath] : [];
-  });
+  return normalizeWorkerSkillPaths(refs)
+    .map((path, index): { path: string; allowOutside: boolean } => {
+      const raw = refs[index] as { allowOutsideProject?: unknown; path?: { allowOutsideProject?: unknown } } | undefined;
+      const allowOutside = raw?.allowOutsideProject === true || raw?.path?.allowOutsideProject === true;
+      return { path, allowOutside };
+    })
+    .flatMap(({ path, allowOutside }) => {
+      const safe = resolveConfiguredPath(cwd, path, allowOutside);
+      return safe ? [safe.canonicalPath] : [];
+    });
 }
 
 const ARTIFACT_REVISION_MARKERS = /\b(revise|revision|fix|address|correct|update|rewrite|repair|failed review|review failed|rejected|denied|blocker|blocking)\b/i;
