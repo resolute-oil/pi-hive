@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useHive } from "../store";
 import { loadOlderEvents, pushToast, viewAgent } from "../store/raw";
 import RelTime from "../hooks/RelTime";
@@ -151,7 +151,12 @@ export default function Activity(props: { search: string }) {
     const scoped = scopedSessions.map((s) => snapshots[s.session_id]).filter(Boolean);
     return buildAgentTeamMap(scoped);
   }, [scopedSessions, snapshots]);
-  const teamOfAgent = (name: string): "planning" | "hive" => teamByAgent.get(name) || "hive";
+  // Stable identity over `teamByAgent` so downstream memos can list it as a dep
+  // without recomputing on every render just because the closure was rebuilt.
+  const teamOfAgent = useCallback(
+    (name: string): "planning" | "hive" => teamByAgent.get(name) || "hive",
+    [teamByAgent],
+  );
 
   const [type, setType] = useState("");
   const [agent, setAgent] = useState("");
@@ -195,7 +200,7 @@ export default function Activity(props: { search: string }) {
       if (!prev.model && a.model) prev.model = a.model;
     }
     return Array.from(byName.values()).sort((a, b) => (roleRank[a.role || "member"] ?? 9) - (roleRank[b.role || "member"] ?? 9) || a.name.localeCompare(b.name));
-  }, [scopedAgents, scopedSessions, teamByAgent]);
+  }, [scopedAgents, scopedSessions, teamOfAgent]);
 
   const visibleAgents = useMemo(() => team === "all" ? agents : agents.filter((a) => a.team === team), [agents, team]);
   const agentColor = useMemo(() => {
@@ -229,10 +234,16 @@ export default function Activity(props: { search: string }) {
     for (const a of agents) if (a.role === "orchestrator") s.add(a.name);
     return s;
   }, [agents]);
-  const hasOrchestrator = (participants: Set<string>) => {
-    for (const n of orchestratorNames) if (participants.has(n)) return true;
-    return false;
-  };
+  // Stable identity over `orchestratorNames` so downstream memos can list it as
+  // a dep without recomputing on every render just because the closure was
+  // rebuilt.
+  const hasOrchestrator = useCallback(
+    (participants: Set<string>) => {
+      for (const n of orchestratorNames) if (participants.has(n)) return true;
+      return false;
+    },
+    [orchestratorNames],
+  );
 
   const filtered = useMemo(() => {
     const q = props.search.toLowerCase();
@@ -251,7 +262,7 @@ export default function Activity(props: { search: string }) {
         (selectedTeam === "all" || (a ? (teamOf.get(a) || teamOfAgent(a)) === selectedTeam : false) || (selectedTeam === "planning" && hasOrchestrator(participants))) &&
         (!q || (haystacks.get(item.id) || "").includes(q));
     });
-  }, [items, agents, agent, team, type, props.search, haystacks, teamOf, orchestratorNames]);
+  }, [items, agents, agent, team, type, props.search, haystacks, teamOf, teamOfAgent, hasOrchestrator]);
 
   const total = filtered.length;
   const pages = Math.max(1, Math.ceil(total / PAGE));
