@@ -6,7 +6,7 @@ import LiveActivity from "../components/LiveActivity";
 import CostTokensChart from "../components/CostTokensChart";
 import ModelMix from "../components/ModelMix";
 import Replay from "../components/Replay";
-import { useHive } from "../store";
+import { useHive, store } from "../store";
 import { replayTopoSource } from "../store/replay";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { absTime } from "../lib/format";
@@ -54,16 +54,28 @@ export default function Overview() {
     () => (replaying ? replay.events.slice(0, replay.cursor + 1) : undefined),
     [replaying, replay.events, replay.cursor],
   );
-  // replayTopoSource reads topologyByHash + the session summary via getState().
-  // Subscribe to both here so the memo recomputes when a late ensureTopologyDetail
-  // fetch resolves — otherwise the graph is stuck on the live fallback tree until
-  // the user scrubs (M3).
-  const replayHash = useHive((s) => (replaying ? s.sessionSummaries.get(replay.sessionId)?.topologyHash : undefined));
+  // replayTopoSource now consumes its context (topology hash, topology detail,
+  // live fallback, session id) as explicit args instead of reading them via
+  // store.getState() — see store/replay.ts:ReplayTopoContext. Subscribe to the
+  // values the function actually uses so this memo re-derives on every input
+  // change. A late ensureTopologyDetail fetch resolves by flipping replayDetail
+  // from undefined → defined, replacing the live fallback with the versioned
+  // tree (M3).
+  const replayHash = useHive((s) => (replaying ? s.sessionSummaries.get(s.replay.sessionId)?.topologyHash : undefined));
   const replayDetail = useHive((s) => (replayHash ? s.topologyByHash.get(replayHash) : undefined));
-  const replaySource = useMemo(
-    () => (replaySlice ? replayTopoSource(replaySlice) : undefined),
-    [replaySlice, replayHash, replayDetail],
-  );
+  const replaySource = useMemo(() => {
+    if (!replaySlice) return undefined;
+    return replayTopoSource(replaySlice, {
+      sessionId: replay.sessionId,
+      topologyHash: replayHash,
+      topologyDetail: replayDetail,
+      // The live fallback is read on demand at memo invocation time rather than
+      // via a subscription: the graph only cares about the fallback before the
+      // versioned detail arrives, and once it has, replayDetail is what drives
+      // the re-derivation — not the live SSE feed that updates sessionsById.
+      liveSession: store.getState().sessionsById.get(replay.sessionId),
+    });
+  }, [replaySlice, replay.sessionId, replayHash, replayDetail]);
   const replayTs = replaying ? replay.events[replay.cursor]?.ts : undefined;
 
   const topoTitle = scope.level === "session" ? "Session topology" : "Agent Topology";
@@ -200,13 +212,17 @@ function TopologyFullscreenModal(props: {
   replaying: boolean;
   replaySource: ReturnType<typeof replayTopoSource> | undefined;
 }) {
+  // Destructure the props the effect actually closes over so react-hooks/exhaustive-deps
+  // can list them as deps and the effect re-binds when the parent passes new
+  // handlers (instead of letting `props` itself trigger a re-bind on every render).
+  const { open, onClose } = props;
   const trapRef = useFocusTrap<HTMLDivElement>(props.open);
   useEffect(() => {
-    if (!props.open) return;
-    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") props.onClose(); };
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [props.open, props.onClose]);
+  }, [open, onClose]);
   if (!props.open) return null;
   return createPortal(
     <div className="modal-backdrop-fullscreen" onClick={props.onClose}>
