@@ -19,6 +19,10 @@ Use the `Agent` and `SubagentWorkflow` tools from the globally-installed `@tinti
 
 **Do not use the `subagent` tool or any skill-driven subagent from `compound-engineering-pi`.** That tool spawns skill-based subagents and is not the right delegation mechanism here. The `Agent` tool from `@tintinweb/pi-subagents` is the only subagent-spawning tool you should reach for in this project. If a request looks like it needs `subagent` (skill-driven fan-out), route it through `Agent` or `SubagentWorkflow` instead.
 
+**Always run subagents in the background.** Pass `run_in_background: true` on every `Agent` call. The orchestrator should keep moving — issuing follow-up tool calls, editing files, drafting follow-up agent prompts — while a subagent works, and only block when the next step is genuinely impossible without that subagent's output. Synchronous (`run_in_background: false`) is reserved for the rare case where the orchestrator's very next tool call depends on the result and there is literally nothing else to do in the meantime. Defaulting to synchronous wastes the whole reason agents exist; treat it as a code smell. `SubagentWorkflow` runs its child agents asynchronously by construction — the rule above applies to direct `Agent` calls, where the temptation to block is real.
+
+This rule is here because synchronous blocking slipped into a prior session — the orchestrator halted on a single long-running `Agent` call instead of staging follow-up work behind it. Subagents are how this project gets parallelism; blocking the orchestrator to wait defeats the design.
+
 ## User prompts with `ask_user`
 
 Use the `ask_user` tool to gate high-stakes or ambiguous decisions before continuing. Full decision-handshake protocol: read `/Users/cgrant/.pi/agent/npm/node_modules/pi-ask-user/skills/ask-user/references/ask-user-skill-extension-spec.md` before asking. The spec is authoritative; the summary below covers the common case.
