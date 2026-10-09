@@ -6,7 +6,7 @@ import LiveActivity from "../components/LiveActivity";
 import CostTokensChart from "../components/CostTokensChart";
 import ModelMix from "../components/ModelMix";
 import Replay from "../components/Replay";
-import { useHive } from "../store";
+import { useHive, store } from "../store";
 import { replayTopoSource } from "../store/replay";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { absTime } from "../lib/format";
@@ -54,13 +54,28 @@ export default function Overview() {
     () => (replaying ? replay.events.slice(0, replay.cursor + 1) : undefined),
     [replaying, replay.events, replay.cursor],
   );
-  // replayTopoSource reads topologyByHash + the session summary via store.getState()
-  // at call time, so caching it on `replaySlice` alone is correct — the caller has
-  // no other inputs that drive the result.
-  const replaySource = useMemo(
-    () => (replaySlice ? replayTopoSource(replaySlice) : undefined),
-    [replaySlice],
-  );
+  // replayTopoSource now consumes its context (topology hash, topology detail,
+  // live fallback, session id) as explicit args instead of reading them via
+  // store.getState() — see store/replay.ts:ReplayTopoContext. Subscribe to the
+  // values the function actually uses so this memo re-derives on every input
+  // change. A late ensureTopologyDetail fetch resolves by flipping replayDetail
+  // from undefined → defined, replacing the live fallback with the versioned
+  // tree (M3).
+  const replayHash = useHive((s) => (replaying ? s.sessionSummaries.get(s.replay.sessionId)?.topologyHash : undefined));
+  const replayDetail = useHive((s) => (replayHash ? s.topologyByHash.get(replayHash) : undefined));
+  const replaySource = useMemo(() => {
+    if (!replaySlice) return undefined;
+    return replayTopoSource(replaySlice, {
+      sessionId: replay.sessionId,
+      topologyHash: replayHash,
+      topologyDetail: replayDetail,
+      // The live fallback is read on demand at memo invocation time rather than
+      // via a subscription: the graph only cares about the fallback before the
+      // versioned detail arrives, and once it has, replayDetail is what drives
+      // the re-derivation — not the live SSE feed that updates sessionsById.
+      liveSession: store.getState().sessionsById.get(replay.sessionId),
+    });
+  }, [replaySlice, replay.sessionId, replayHash, replayDetail]);
   const replayTs = replaying ? replay.events[replay.cursor]?.ts : undefined;
 
   const topoTitle = scope.level === "session" ? "Session topology" : "Agent Topology";
