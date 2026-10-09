@@ -70,13 +70,15 @@ This rule is here because the inline-display preference and the one-question-at-
 
   Clean up with `git worktree remove .worktrees/<branch>` after the branch merges. This rule applies to every agent session that touches this repo, including the one writing this rule.
 
+- **Always use `just install` to populate `node_modules/`, never `npm install <pkg>` as a shortcut.** `just install` runs `npm install` at the repo root and in `ui/web/`, and npm 7+ auto-installs peer dependencies (`typebox`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`) by default. When a peer dep is missing, the only correct remediation is `just install` from inside the worktree — it pulls the dep from the registry and writes a real `node_modules/`. Do not run `npm install <pkg> --no-save`, `npm install --legacy-peer-deps`, or any other direct `npm install <pkg>` to fix a missing dep; doing so creates a worktree that diverges from CI and from the project's contract, and bypasses the justfile targets the rest of the project relies on. This rule applies in every worktree, every fresh clone, and every time `node_modules/` is missing or stale.
+
 - **`bash` and `edit` tool calls default to the main working tree.**
   Each `bash` invocation starts in `APP_ROOT` (the bare checkout on
   `main`); the cwd resets between calls, so prefix any in-worktree
   command with `cd APP_ROOT/.worktrees/<branch>` — `cd` does not
   persist. The `edit` tool must use the absolute worktree path; never
   pass an APP_ROOT path. Applies to every shell command (`sed`,
-  `git mv`, `rm`, `mv`, `npm install`, etc.) and to `edit`. The rule
+  `git mv`, `rm`, `mv`, etc.) and to `edit`. To install dependencies, run `just install` (see the rule above), never `npm install <pkg>`. The rule
   above is about *where* work happens; this one is about *not losing
   your place* while doing it. Failing it silently pollutes `main`'s
   working tree.
