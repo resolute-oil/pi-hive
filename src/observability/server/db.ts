@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import type { Changes, SQLQueryBindings } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -6,6 +7,18 @@ import { DB_PATH } from "./config";
 import type { HiveStateSnapshot, HiveTelemetryEvent, HiveTelemetryEventType, JsonRecord } from "../../shared/telemetry";
 import { isJsonRecord } from "../../shared/telemetry";
 import { tryResolveProjectIdentity } from "../../shared/project-identity";
+
+// Bun's `Database.run` / `.get` / `.all` typings accept only positional
+// `SQLQueryBindings[]`, but the runtime also supports the `{ $key: value }`
+// named-bindings form (see `bun:sqlite` Database.run docs). Every call site in
+// this file uses named-bindings objects so the SQL stays readable; the helpers
+// below bridge that gap. The casts are the only escape hatch — values pass
+// through unchanged, so behavior is identical to the prior `as any` usage.
+type SqlParam = string | number | bigint | boolean | null | Uint8Array;
+type SqlNamedBindings = Record<string, SqlParam>;
+function bindRun(sql: string, params: SqlNamedBindings): Changes {
+  return db.run(sql, params as unknown as SQLQueryBindings[]);
+}
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true, mode: 0o700 });
 fs.chmodSync(path.dirname(DB_PATH), 0o700);
@@ -353,11 +366,11 @@ export function backfillProjectIdentities(): void {
     const identity = tryResolveProjectIdentity(row.cwd);
     if (!identity) continue;
     const params: { $session_id: string; $project_id: string; $canonical_root: string } = { $session_id: row.session_id, $project_id: identity.projectId, $canonical_root: identity.canonicalRoot };
-    db.run(`UPDATE sessions SET project_id = $project_id, canonical_root = $canonical_root WHERE session_id = $session_id`, params);
-    db.run(`UPDATE events SET project_id = $project_id WHERE session_id = $session_id AND project_id IS NULL`, params);
-    db.run(`UPDATE states SET project_id = $project_id, canonical_root = $canonical_root WHERE session_id = $session_id AND project_id IS NULL`, params);
+    bindRun(`UPDATE sessions SET project_id = $project_id, canonical_root = $canonical_root WHERE session_id = $session_id`, params);
+    bindRun(`UPDATE events SET project_id = $project_id WHERE session_id = $session_id AND project_id IS NULL`, params);
+    bindRun(`UPDATE states SET project_id = $project_id, canonical_root = $canonical_root WHERE session_id = $session_id AND project_id IS NULL`, params);
     for (const table of ["plan_verdicts", "plan_approvals", "plan_comments"] as const) {
-      db.run(`UPDATE ${table} SET project_id = $project_id WHERE session_id = $session_id AND project_id IS NULL`, params);
+      bindRun(`UPDATE ${table} SET project_id = $project_id WHERE session_id = $session_id AND project_id IS NULL`, params);
     }
   }
 
@@ -370,10 +383,10 @@ export function backfillProjectIdentities(): void {
       const identity = tryResolveProjectIdentity(row.cwd);
       if (!identity) continue;
       const projectParams: { $project_id: string; $cwd: string } = { $project_id: identity.projectId, $cwd: row.cwd };
-      db.run(`UPDATE ${table} SET project_id = $project_id WHERE cwd = $cwd AND project_id IS NULL`, projectParams);
+      bindRun(`UPDATE ${table} SET project_id = $project_id WHERE cwd = $cwd AND project_id IS NULL`, projectParams);
       if (table === "states") {
         const rootParams: { $canonical_root: string; $cwd: string } = { $canonical_root: identity.canonicalRoot, $cwd: row.cwd };
-        db.run(`UPDATE states SET canonical_root = $canonical_root WHERE cwd = $cwd AND canonical_root IS NULL`, rootParams);
+        bindRun(`UPDATE states SET canonical_root = $canonical_root WHERE cwd = $cwd AND canonical_root IS NULL`, rootParams);
       }
     }
   }
@@ -388,14 +401,13 @@ export function backfillProjectIdentities(): void {
       if (!identity) continue;
       const existing = db.query(`SELECT rowid FROM project_overrides WHERE project_id = $project_id`).get({ $project_id: identity.projectId }) as { rowid: number } | null;
       if (existing && existing.rowid !== row.rowid) {
-        db.run(`UPDATE project_overrides SET label = $label, canonical_root = $canonical_root, updated_at = $updated_at WHERE rowid = $rowid`, {
-          $label: row.label, $canonical_root: identity.canonicalRoot, $updated_at: row.updated_at, $rowid: existing.rowid,
-        } as any);
-        db.run(`DELETE FROM project_overrides WHERE rowid = $rowid`, { $rowid: row.rowid } as any);
+        const updateParams: { $label: string; $canonical_root: string; $updated_at: string | null; $rowid: number } = { $label: row.label, $canonical_root: identity.canonicalRoot, $updated_at: row.updated_at, $rowid: existing.rowid };
+        bindRun(`UPDATE project_overrides SET label = $label, canonical_root = $canonical_root, updated_at = $updated_at WHERE rowid = $rowid`, updateParams);
+        const deleteParams: { $rowid: number } = { $rowid: row.rowid };
+        bindRun(`DELETE FROM project_overrides WHERE rowid = $rowid`, deleteParams);
       } else {
-        db.run(`UPDATE project_overrides SET project_id = $project_id, canonical_root = $canonical_root WHERE rowid = $rowid`, {
-          $project_id: identity.projectId, $canonical_root: identity.canonicalRoot, $rowid: row.rowid,
-        } as any);
+        const projectParams: { $project_id: string; $canonical_root: string; $rowid: number } = { $project_id: identity.projectId, $canonical_root: identity.canonicalRoot, $rowid: row.rowid };
+        bindRun(`UPDATE project_overrides SET project_id = $project_id, canonical_root = $canonical_root WHERE rowid = $rowid`, projectParams);
       }
     }
   }
@@ -678,8 +690,16 @@ export interface IngestSourceCursor {
   checkpoint?: string;
 }
 
+interface IngestSourceDbRow {
+  offset: number | null;
+  last_successful_ingest: string | null;
+  device: number | null;
+  inode: number | null;
+  checkpoint: string | null;
+}
+
 export function getIngestSource(sourcePath: string): IngestSourceCursor {
-  const row = db.query(`SELECT offset, last_successful_ingest, device, inode, checkpoint FROM ingest_sources WHERE path = $path`).get({ $path: sourcePath }) as any;
+  const row = db.query<IngestSourceDbRow, { $path: string }>(`SELECT offset, last_successful_ingest, device, inode, checkpoint FROM ingest_sources WHERE path = $path`).get({ $path: sourcePath });
   return {
     offset: Number(row?.offset || 0),
     updatedAt: row?.last_successful_ingest || undefined,
@@ -820,7 +840,7 @@ interface UsageProjectionInput {
   sessionId: string;
   ts: string;
   type: string;
-  payload: any;
+  payload: unknown;
 }
 
 const insertUsageEventStmt = db.query(`
@@ -852,17 +872,17 @@ function nonnegativeUsage(value: unknown): number {
 // runtime snapshots are cumulative and intentionally excluded. Returns true
 // when this event type carried a usable projection (including all-zero usage).
 export function projectUsageEvent(input: UsageProjectionInput, accounted = true): boolean {
-  const payload = input.payload && typeof input.payload === "object" ? input.payload : {};
-  let usage: any;
+  const payload: Record<string, unknown> = input.payload && typeof input.payload === "object" ? input.payload as Record<string, unknown> : {};
+  let usage: Record<string, unknown>;
   let source: string;
   if (input.type === "delegation_end") {
     const delta = payload.delta;
     if (Number(payload.delegationsSchema) < 1 || !delta || typeof delta !== "object") return false;
-    usage = delta;
+    usage = delta as Record<string, unknown>;
     source = "worker_delta";
   } else if (input.type === "orchestrator_message") {
     if (!payload.usage || typeof payload.usage !== "object") return false;
-    usage = payload.usage;
+    usage = payload.usage as Record<string, unknown>;
     source = "orchestrator_message";
   } else {
     return false;
@@ -907,28 +927,53 @@ export function projectUsageEvent(input: UsageProjectionInput, accounted = true)
 // but marked unaccounted because they may overlap the old snapshot totals. The
 // session receives the larger of the old snapshot and known-event totals as an
 // explicitly unverified floor; all post-cutover rows then add monotonically.
+interface BackfillSessionRow {
+  session_id: string;
+  event_count: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
+  reasoning_tokens: number | null;
+  cost_usd: number | null;
+}
+interface BackfillEventRow {
+  event_id: string;
+  session_id: string;
+  ts: string;
+  type: string;
+  payload_json: string | null;
+}
+interface BackfillUsageRow {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  reasoning_tokens: number;
+  cost_usd: number;
+}
 function backfillUsageProjection(): void {
-  const done = db.query(`SELECT value FROM schema_metadata WHERE key = 'usage_projection_v1'`).get() as any;
+  const done = db.query(`SELECT value FROM schema_metadata WHERE key = 'usage_projection_v1'`).get() as { value: string } | undefined;
   if (done) return;
   const tx = db.transaction(() => {
     const existingSessions = db.query(`
       SELECT session_id, event_count, input_tokens, output_tokens, cache_read_tokens,
              cache_write_tokens, reasoning_tokens, cost_usd FROM sessions
-    `).all() as any[];
+    `).all() as BackfillSessionRow[];
     const events = db.query(`
       SELECT event_id, session_id, ts, type, json(payload_json) AS payload_json
       FROM events WHERE type IN ('delegation_end', 'orchestrator_message') ORDER BY rowid
-    `).all() as any[];
+    `).all() as BackfillEventRow[];
     for (const event of events) {
-      let payload: any = {};
-      try { payload = JSON.parse(event.payload_json || "{}"); } catch { /* corrupt legacy payload: not verifiable */ }
+      let payload: Record<string, unknown> = {};
+      try { payload = JSON.parse(event.payload_json || "{}") as Record<string, unknown>; } catch { /* corrupt legacy payload: not verifiable */ }
       projectUsageEvent({
         eventId: event.event_id, sessionId: event.session_id, ts: event.ts,
         type: event.type, payload,
       }, false);
     }
     for (const session of existingSessions) {
-      const known = db.query(`
+      const known = db.query<BackfillUsageRow, { $session_id: string }>(`
         SELECT COALESCE(SUM(input_tokens),0) AS input_tokens,
                COALESCE(SUM(output_tokens),0) AS output_tokens,
                COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens,
@@ -936,15 +981,13 @@ function backfillUsageProjection(): void {
                COALESCE(SUM(reasoning_tokens),0) AS reasoning_tokens,
                COALESCE(SUM(cost_usd),0) AS cost_usd
         FROM usage_events WHERE session_id = $session_id
-      `).get({ $session_id: session.session_id }) as any;
-      db.run(`
-        UPDATE sessions SET
-          input_tokens = $input_tokens, output_tokens = $output_tokens,
-          cache_read_tokens = $cache_read_tokens, cache_write_tokens = $cache_write_tokens,
-          reasoning_tokens = $reasoning_tokens, cost_usd = $cost_usd,
-          usage_status = 'legacy-unverified'
-        WHERE session_id = $session_id
-      `, {
+      `).get({ $session_id: session.session_id });
+      const rewriteParams: {
+        $session_id: string;
+        $input_tokens: number; $output_tokens: number;
+        $cache_read_tokens: number; $cache_write_tokens: number;
+        $reasoning_tokens: number; $cost_usd: number;
+      } = {
         $session_id: session.session_id,
         $input_tokens: Math.max(nonnegativeUsage(session.input_tokens), nonnegativeUsage(known?.input_tokens)),
         $output_tokens: Math.max(nonnegativeUsage(session.output_tokens), nonnegativeUsage(known?.output_tokens)),
@@ -952,11 +995,19 @@ function backfillUsageProjection(): void {
         $cache_write_tokens: Math.max(nonnegativeUsage(session.cache_write_tokens), nonnegativeUsage(known?.cache_write_tokens)),
         $reasoning_tokens: Math.max(nonnegativeUsage(session.reasoning_tokens), nonnegativeUsage(known?.reasoning_tokens)),
         $cost_usd: Math.max(nonnegativeUsage(session.cost_usd), nonnegativeUsage(known?.cost_usd)),
-      } as any);
+      };
+      db.run(`
+        UPDATE sessions SET
+          input_tokens = $input_tokens, output_tokens = $output_tokens,
+          cache_read_tokens = $cache_read_tokens, cache_write_tokens = $cache_write_tokens,
+          reasoning_tokens = $reasoning_tokens, cost_usd = $cost_usd,
+          usage_status = 'legacy-unverified'
+        WHERE session_id = $session_id
+      `, rewriteParams as unknown as SQLQueryBindings[]);
     }
-    db.run(`INSERT INTO schema_metadata (key, value) VALUES ('usage_projection_v1', $value)`, {
+    bindRun(`INSERT INTO schema_metadata (key, value) VALUES ('usage_projection_v1', $value)`, {
       $value: new Date().toISOString(),
-    } as any);
+    });
   });
   tx();
 }
@@ -998,9 +1049,33 @@ export interface DelegationRow {
   model?: string;
 }
 
+// Raw snake_case row shape for delegations table. SELECT * returns every column;
+// each read site only projects the fields the caller actually uses, but the
+// loosest column types (nullable ints, optional text) keep the row assignable
+// everywhere. The mapper is the only place snake_case touches the type system.
+interface DelegationDbRow {
+  rowid: number;
+  session_id: string;
+  cwd?: string | null;
+  agent?: string | null;
+  parent?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+  duration_ms?: number | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_tokens?: number | null;
+  cache_write_tokens?: number | null;
+  reasoning_tokens?: number | null;
+  cost_usd?: number | null;
+  schema_version?: number | null;
+  status?: string | null;
+  stop_reason?: string | null;
+  model?: string | null;
+}
 export function queryDelegations(q: { session?: string; cwd?: string; after?: number; limit?: number; deltasOnly?: boolean }): DelegationRow[] {
   const where: string[] = ["ended_at IS NOT NULL"];
-  const params: any = { $limit: Math.min(Math.max(1, q.limit || 1000), 5000) };
+  const params: { $limit: number; $session?: string; $cwd?: string; $after?: number } = { $limit: Math.min(Math.max(1, q.limit || 1000), 5000) };
   if (q.session) { where.push(`session_id = $session`); params.$session = q.session; }
   if (q.cwd) { where.push(`cwd = $cwd`); params.$cwd = q.cwd; }
   if (q.after != null) { where.push(`rowid > $after`); params.$after = q.after; }
@@ -1008,13 +1083,13 @@ export function queryDelegations(q: { session?: string; cwd?: string; after?: nu
   // rows (schema_version 0, session-lifetime values) are never summed with the
   // per-run deltas (schema_version 1). Row-level reads (Activity feed) omit it.
   if (q.deltasOnly) where.push(`schema_version >= 1`);
-  const rows = db.query(`SELECT rowid, * FROM delegations WHERE ${where.join(" AND ")} ORDER BY rowid ASC LIMIT $limit`).all(params) as any[];
+  const rows = db.query<DelegationDbRow, typeof params>(`SELECT rowid, * FROM delegations WHERE ${where.join(" AND ")} ORDER BY rowid ASC LIMIT $limit`).all(params);
   return rows.map((r) => ({
-    cursor: Number(r.rowid), sessionId: r.session_id, cwd: r.cwd, agent: r.agent, parent: r.parent,
-    startedAt: r.started_at, endedAt: r.ended_at, durationMs: r.duration_ms,
-    inputTokens: r.input_tokens, outputTokens: r.output_tokens, cacheReadTokens: r.cache_read_tokens, cacheWriteTokens: r.cache_write_tokens,
+    cursor: Number(r.rowid), sessionId: r.session_id, cwd: r.cwd ?? undefined, agent: r.agent ?? undefined, parent: r.parent ?? undefined,
+    startedAt: r.started_at ?? undefined, endedAt: r.ended_at ?? undefined, durationMs: r.duration_ms ?? undefined,
+    inputTokens: r.input_tokens ?? 0, outputTokens: r.output_tokens ?? 0, cacheReadTokens: r.cache_read_tokens ?? 0, cacheWriteTokens: r.cache_write_tokens ?? 0,
     reasoningTokens: r.reasoning_tokens ?? 0,
-    costUsd: r.cost_usd, schemaVersion: r.schema_version ?? 0, status: r.status, stopReason: r.stop_reason, model: r.model,
+    costUsd: r.cost_usd ?? 0, schemaVersion: r.schema_version ?? 0, status: r.status ?? undefined, stopReason: r.stop_reason ?? undefined, model: r.model ?? undefined,
   }));
 }
 
@@ -1033,15 +1108,32 @@ export interface ToolCallRow {
   durationMs?: number;
 }
 
+// Raw snake_case row shape for tool_calls table. Same structure as
+// `DelegationDbRow`: SELECT * reads everything, the mapper converts to
+// camelCase fields the API contract uses.
+interface ToolCallDbRow {
+  rowid: number;
+  session_id: string;
+  cwd?: string | null;
+  agent?: string | null;
+  tool_name?: string | null;
+  tool_call_id?: string | null;
+  args_preview?: string | null;
+  result_preview?: string | null;
+  is_error?: number | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+  duration_ms?: number | null;
+}
 export function queryToolCalls(q: { session?: string; after?: number; limit?: number }): ToolCallRow[] {
   const where: string[] = [];
-  const params: any = { $limit: Math.min(Math.max(1, q.limit || 1000), 5000) };
+  const params: { $limit: number; $session?: string; $after?: number } = { $limit: Math.min(Math.max(1, q.limit || 1000), 5000) };
   if (q.session) { where.push(`session_id = $session`); params.$session = q.session; }
   if (q.after != null) { where.push(`rowid > $after`); params.$after = q.after; }
-  const rows = db.query(`SELECT rowid, * FROM tool_calls ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY rowid ASC LIMIT $limit`).all(params) as any[];
+  const rows = db.query<ToolCallDbRow, typeof params>(`SELECT rowid, * FROM tool_calls ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY rowid ASC LIMIT $limit`).all(params);
   return rows.map((r) => ({
-    cursor: Number(r.rowid), sessionId: r.session_id, cwd: r.cwd, agent: r.agent, toolName: r.tool_name, toolCallId: r.tool_call_id,
-    argsPreview: r.args_preview, resultPreview: r.result_preview, isError: !!r.is_error, startedAt: r.started_at, endedAt: r.ended_at, durationMs: r.duration_ms,
+    cursor: Number(r.rowid), sessionId: r.session_id, cwd: r.cwd ?? undefined, agent: r.agent ?? undefined, toolName: r.tool_name ?? undefined, toolCallId: r.tool_call_id ?? undefined,
+    argsPreview: r.args_preview ?? undefined, resultPreview: r.result_preview ?? undefined, isError: !!r.is_error, startedAt: r.started_at ?? undefined, endedAt: r.ended_at ?? undefined, durationMs: r.duration_ms ?? undefined,
   }));
 }
 
@@ -1086,11 +1178,12 @@ export function querySessionSummaries(options: { offset?: number; limit?: number
     : db.query(sql).all() as SessionSummaryRow[];
 }
 
+interface KnownCwdRow { cwd: string | null }
 export function knownCwds(projectId?: string): string[] {
   const rows = projectId
-    ? db.query(`SELECT DISTINCT cwd FROM sessions WHERE project_id = $project_id AND cwd IS NOT NULL`).all({ $project_id: projectId }) as any[]
-    : db.query(`SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL`).all() as any[];
-  return rows.map((r) => r.cwd);
+    ? db.query<KnownCwdRow, { $project_id: string }>(`SELECT DISTINCT cwd FROM sessions WHERE project_id = $project_id AND cwd IS NOT NULL`).all({ $project_id: projectId })
+    : db.query<KnownCwdRow, []>(`SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL`).all();
+  return rows.map((r) => r.cwd).filter((c): c is string => typeof c === "string");
 }
 
 // ── Storage breakdown (prune preview) ─────────────────────────────────────────
@@ -1118,7 +1211,7 @@ export function storageBreakdown(cwds: string[] | undefined, cutoffIso?: string)
   if (scoped) cwds!.forEach((c, i) => { cwdParams[`$c${i}`] = c; });
   const cwdWhere = scoped ? `cwd IN (${placeholders})` : "1=1";
 
-  const one = (sql: string, params: Record<string, any> = {}) => (db.query(sql).get({ ...cwdParams, ...params }) as any) || {};
+  const one = (sql: string, params: Record<string, string | number> = {}) => (db.query(sql).get({ ...cwdParams, ...params }) as unknown as Record<string, number>) || {};
 
   // Content bytes = event payloads + the text-heavy projection columns.
   const eventsAgg = one(`SELECT COUNT(*) AS n, COALESCE(SUM(length(payload_json)),0) AS b FROM events WHERE ${cwdWhere}`);
@@ -1152,15 +1245,16 @@ export function pruneOlderThan(cutoffIso: string): { events: number; sessions: n
   const sessionsToDelete: string[] = [];
   const tx = db.transaction(() => {
     // Sessions whose entire history predates the cutoff are removed outright.
-    const staleSessions = db.query(`SELECT session_id FROM sessions WHERE last_ts IS NOT NULL AND last_ts < $cutoff`).all({ $cutoff: cutoffIso }) as any[];
+    const staleSessions = db.query<{ session_id: string }, { $cutoff: string }>(`SELECT session_id FROM sessions WHERE last_ts IS NOT NULL AND last_ts < $cutoff`).all({ $cutoff: cutoffIso });
     for (const s of staleSessions) sessionsToDelete.push(s.session_id);
     // Older events in still-active sessions are trimmed with their projections.
-    const before = db.query(`SELECT COUNT(*) AS n FROM events WHERE ts < $cutoff`).get({ $cutoff: cutoffIso }) as any;
+    const before = db.query<{ n: number }, { $cutoff: string }>(`SELECT COUNT(*) AS n FROM events WHERE ts < $cutoff`).get({ $cutoff: cutoffIso });
     events = Number(before?.n || 0);
-    db.run(`DELETE FROM delegations WHERE ended_at IS NOT NULL AND ended_at < $cutoff`, { $cutoff: cutoffIso } as any);
-    db.run(`DELETE FROM tool_calls WHERE started_at IS NOT NULL AND started_at < $cutoff`, { $cutoff: cutoffIso } as any);
-    db.run(`DELETE FROM usage_events WHERE ts < $cutoff`, { $cutoff: cutoffIso } as any);
-    db.run(`DELETE FROM events WHERE ts < $cutoff`, { $cutoff: cutoffIso } as any);
+    const deleteCutoffParams: { $cutoff: string } = { $cutoff: cutoffIso };
+    bindRun(`DELETE FROM delegations WHERE ended_at IS NOT NULL AND ended_at < $cutoff`, deleteCutoffParams);
+    bindRun(`DELETE FROM tool_calls WHERE started_at IS NOT NULL AND started_at < $cutoff`, deleteCutoffParams);
+    bindRun(`DELETE FROM usage_events WHERE ts < $cutoff`, deleteCutoffParams);
+    bindRun(`DELETE FROM events WHERE ts < $cutoff`, deleteCutoffParams);
     // Prune is the one operation allowed to lower historical totals. Once old
     // rows are intentionally removed, normalize every remaining usage row into
     // the projection and rebuild session totals exactly from that retained set.
@@ -1207,7 +1301,7 @@ const updateNodeThinkingLevelsStmt = db.query(`
 `);
 
 export function topologyVersionExists(hash: string): boolean {
-  return !!(db.query(`SELECT 1 FROM topology_versions WHERE hash = $hash`).get({ $hash: hash }) as any);
+  return !!(db.query<{ 1: number }, { $hash: string }>(`SELECT 1 FROM topology_versions WHERE hash = $hash`).get({ $hash: hash }));
 }
 
 export interface TopologyNodeRow {
@@ -1241,7 +1335,7 @@ const countTopologyNodesStmt = db.query(`SELECT COUNT(*) AS n FROM topology_node
 export function upsertTopologyVersion(input: { hash: string; cwd: string; topologyJson: string; ts: string; nodes: TopologyNodeRow[] }): void {
   const tx = db.transaction(() => {
     upsertTopologyVersionStmt.run({ $hash: input.hash, $cwd: input.cwd, $topology_json: input.topologyJson, $ts: input.ts });
-    const existing = countTopologyNodesStmt.get({ $hash: input.hash }) as any;
+    const existing = countTopologyNodesStmt.get({ $hash: input.hash }) as unknown as { n: number };
     // Fast path: node tree already complete for this hash — nothing to explode.
     if (Number(existing?.n || 0) === input.nodes.length) return;
     for (const n of input.nodes) {
@@ -1312,36 +1406,55 @@ export function topologyNodes(hash: string): TopologyNodeRow[] {
   return rows.map(topologyNodeRow);
 }
 
+interface TopologyVersionListDbRow {
+  hash: string;
+  first_seen_at: string;
+  last_seen_at: string;
+  session_count: number | string;
+}
+interface TopologyVersionDbRow {
+  hash: string;
+  cwd: string;
+  topology_json: string;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+interface StateEmbeddedTopologyDbRow {
+  session_id: string;
+  cwd: string | null;
+  updated_at: string;
+  state_json: string;
+}
 export function listTopologies(cwd?: string): Array<{ hash: string; firstSeenAt: string; lastSeenAt: string; sessionCount: number }> {
-  const params: any = {};
+  const params: { $cwd?: string } = {};
   const where = cwd ? `WHERE v.cwd = $cwd` : "";
   if (cwd) params.$cwd = cwd;
-  const rows = db.query(`
+  const rows = db.query<TopologyVersionListDbRow, typeof params>(`
     SELECT v.hash, v.first_seen_at, v.last_seen_at,
       (SELECT COUNT(*) FROM sessions s WHERE s.topology_hash = v.hash) AS session_count
     FROM topology_versions v ${where}
     ORDER BY v.first_seen_at ASC
-  `).all(params) as any[];
+  `).all(params);
   return rows.map((r) => ({ hash: r.hash, firstSeenAt: r.first_seen_at, lastSeenAt: r.last_seen_at, sessionCount: Number(r.session_count || 0) }));
 }
 
 export function topologyVersion(hash: string): { hash: string; cwd: string; topologyJson: string; firstSeenAt: string; lastSeenAt: string } | null {
-  const r = db.query(`SELECT hash, cwd, json(topology_json) AS topology_json, first_seen_at, last_seen_at FROM topology_versions WHERE hash = $hash`).get({ $hash: hash }) as any;
+  const r = db.query<TopologyVersionDbRow, { $hash: string }>(`SELECT hash, cwd, json(topology_json) AS topology_json, first_seen_at, last_seen_at FROM topology_versions WHERE hash = $hash`).get({ $hash: hash });
   return r ? { hash: r.hash, cwd: r.cwd, topologyJson: r.topology_json, firstSeenAt: r.first_seen_at, lastSeenAt: r.last_seen_at } : null;
 }
 
 // States that still carry embedded topologies (pre-slim). Used by the C4 backfill.
 export function statesWithEmbeddedTopologies(): Array<{ sessionId: string; cwd?: string; updatedAt: string; stateJson: string }> {
-  const rows = db.query(`SELECT session_id, cwd, updated_at, json(state_json) AS state_json FROM states`).all() as any[];
+  const rows = db.query<StateEmbeddedTopologyDbRow, []>(`SELECT session_id, cwd, updated_at, json(state_json) AS state_json FROM states`).all();
   return rows.map((r) => ({ sessionId: r.session_id, cwd: r.cwd || undefined, updatedAt: r.updated_at, stateJson: r.state_json }));
 }
 
 export function rewriteStateJson(sessionId: string, stateJson: string): void {
-  db.run(`UPDATE states SET state_json = jsonb($json) WHERE session_id = $id`, { $json: stateJson, $id: sessionId } as any);
+  bindRun(`UPDATE states SET state_json = jsonb($json) WHERE session_id = $id`, { $json: stateJson, $id: sessionId });
 }
 
 export function stampSessionTopology(sessionId: string, hash: string): void {
-  db.run(`UPDATE sessions SET topology_hash = $hash WHERE session_id = $id AND (topology_hash IS NULL OR topology_hash != $hash)`, { $hash: hash, $id: sessionId } as any);
+  bindRun(`UPDATE sessions SET topology_hash = $hash WHERE session_id = $id AND (topology_hash IS NULL OR topology_hash != $hash)`, { $hash: hash, $id: sessionId });
 }
 
 const insertModelVersionStmt = db.query(`
@@ -1592,7 +1705,23 @@ export interface PlanVerdictRow {
   createdAt: string;
 }
 
-function verdictRow(row: any): PlanVerdictRow {
+// Raw snake_case row shape for plan_verdicts reads. Mirrors PLAN_VERDICT_COLS.
+// The mapper `verdictRow` (below) is the only place snake_case touches the
+// public PlanVerdictRow shape.
+interface PlanVerdictDbRow {
+  id: string;
+  change_id: string;
+  reviewer: string;
+  verdict: string;
+  summary: string;
+  evidence_json: string;
+  concerns_json: string;
+  blockers_json: string;
+  session_id: string | null;
+  cwd: string | null;
+  created_at: string;
+}
+function verdictRow(row: PlanVerdictDbRow): PlanVerdictRow {
   return {
     id: row.id,
     changeId: row.change_id,
@@ -1610,7 +1739,7 @@ function verdictRow(row: any): PlanVerdictRow {
 // Plan reads are project-scoped by cwd (B1). NULL cwd is treated as a wildcard
 // for one release so pre-migration rows (which have no cwd) stay visible. Pass
 // cwd = undefined to read across all projects (legacy behavior).
-function cwdFilter(cwd: string | undefined, params: any): string {
+function cwdFilter(cwd: string | undefined, params: { $id: string; $cwd?: string }): string {
   if (!cwd) return "";
   params.$cwd = cwd;
   return ` AND (cwd = $cwd OR cwd IS NULL)`;
@@ -1622,14 +1751,14 @@ const PLAN_VERDICT_COLS = `id, change_id, reviewer, verdict, summary,
   session_id, cwd, created_at`;
 
 export function listVerdicts(changeId: string, cwd?: string): PlanVerdictRow[] {
-  const params: any = { $id: changeId };
-  const rows = db.query(`SELECT ${PLAN_VERDICT_COLS} FROM plan_verdicts WHERE change_id = $id${cwdFilter(cwd, params)} ORDER BY created_at ASC`).all(params) as any[];
+  const params: { $id: string; $cwd?: string } = { $id: changeId };
+  const rows = db.query<PlanVerdictDbRow, typeof params>(`SELECT ${PLAN_VERDICT_COLS} FROM plan_verdicts WHERE change_id = $id${cwdFilter(cwd, params)} ORDER BY created_at ASC`).all(params);
   return rows.map(verdictRow);
 }
 
 export function latestVerdict(changeId: string, cwd?: string): PlanVerdictRow | null {
-  const params: any = { $id: changeId };
-  const row = db.query(`SELECT ${PLAN_VERDICT_COLS} FROM plan_verdicts WHERE change_id = $id${cwdFilter(cwd, params)} ORDER BY created_at DESC LIMIT 1`).get(params) as any;
+  const params: { $id: string; $cwd?: string } = { $id: changeId };
+  const row = db.query<PlanVerdictDbRow, typeof params>(`SELECT ${PLAN_VERDICT_COLS} FROM plan_verdicts WHERE change_id = $id${cwdFilter(cwd, params)} ORDER BY created_at DESC LIMIT 1`).get(params);
   return row ? verdictRow(row) : null;
 }
 
@@ -1678,9 +1807,19 @@ export interface PlanApprovalRow {
   createdAt: string;
 }
 
+interface PlanApprovalDbRow {
+  id: string;
+  change_id: string;
+  phase: string;
+  approved_by: string;
+  actor: string | null;
+  summary: string;
+  session_id: string | null;
+  created_at: string;
+}
 export function listApprovals(changeId: string, cwd?: string): PlanApprovalRow[] {
-  const params: any = { $id: changeId };
-  const rows = db.query(`SELECT * FROM plan_approvals WHERE change_id = $id${cwdFilter(cwd, params)} ORDER BY created_at ASC`).all(params) as any[];
+  const params: { $id: string; $cwd?: string } = { $id: changeId };
+  const rows = db.query<PlanApprovalDbRow, typeof params>(`SELECT * FROM plan_approvals WHERE change_id = $id${cwdFilter(cwd, params)} ORDER BY created_at ASC`).all(params);
   return rows.map((row) => ({
     id: row.id,
     changeId: row.change_id,
@@ -1706,9 +1845,21 @@ export interface PlanCommentRow {
   createdAt: string;
 }
 
+interface PlanCommentDbRow {
+  id: string;
+  change_id: string;
+  file: string | null;
+  anchor: string | null;
+  author: string | null;
+  body: string;
+  annotation_type: string | null;
+  original_text: string | null;
+  session_id: string | null;
+  created_at: string;
+}
 export function listComments(changeId: string, cwd?: string): PlanCommentRow[] {
-  const params: any = { $id: changeId };
-  const rows = db.query(`SELECT * FROM plan_comments WHERE change_id = $id${cwdFilter(cwd, params)} ORDER BY created_at ASC`).all(params) as any[];
+  const params: { $id: string; $cwd?: string } = { $id: changeId };
+  const rows = db.query<PlanCommentDbRow, typeof params>(`SELECT * FROM plan_comments WHERE change_id = $id${cwdFilter(cwd, params)} ORDER BY created_at ASC`).all(params);
   return rows.map((row) => ({
     id: row.id,
     changeId: row.change_id,
@@ -1742,8 +1893,14 @@ export interface ProjectOverrideRow {
   updatedAt?: string;
 }
 
+interface ProjectOverrideDbRow {
+  project_id: string;
+  canonical_root: string | null;
+  label: string;
+  updated_at: string | null;
+}
 export function listProjectOverrides(): ProjectOverrideRow[] {
-  const rows = db.query(`SELECT project_id, canonical_root, label, updated_at FROM project_overrides WHERE project_id IS NOT NULL`).all() as any[];
+  const rows = db.query<ProjectOverrideDbRow, []>(`SELECT project_id, canonical_root, label, updated_at FROM project_overrides WHERE project_id IS NOT NULL`).all();
   return rows.map((r) => ({ projectId: r.project_id, canonicalRoot: r.canonical_root || undefined, label: r.label, updatedAt: r.updated_at || undefined }));
 }
 
