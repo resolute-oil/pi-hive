@@ -54,15 +54,12 @@ export default function Overview() {
     () => (replaying ? replay.events.slice(0, replay.cursor + 1) : undefined),
     [replaying, replay.events, replay.cursor],
   );
-  // replayTopoSource reads topologyByHash + the session summary via getState().
-  // Subscribe to both here so the memo recomputes when a late ensureTopologyDetail
-  // fetch resolves — otherwise the graph is stuck on the live fallback tree until
-  // the user scrubs (M3).
-  const replayHash = useHive((s) => (replaying ? s.sessionSummaries.get(replay.sessionId)?.topologyHash : undefined));
-  const replayDetail = useHive((s) => (replayHash ? s.topologyByHash.get(replayHash) : undefined));
+  // replayTopoSource reads topologyByHash + the session summary via store.getState()
+  // at call time, so caching it on `replaySlice` alone is correct — the caller has
+  // no other inputs that drive the result.
   const replaySource = useMemo(
     () => (replaySlice ? replayTopoSource(replaySlice) : undefined),
-    [replaySlice, replayHash, replayDetail],
+    [replaySlice],
   );
   const replayTs = replaying ? replay.events[replay.cursor]?.ts : undefined;
 
@@ -200,13 +197,17 @@ function TopologyFullscreenModal(props: {
   replaying: boolean;
   replaySource: ReturnType<typeof replayTopoSource> | undefined;
 }) {
+  // Destructure the props the effect actually closes over so react-hooks/exhaustive-deps
+  // can list them as deps and the effect re-binds when the parent passes new
+  // handlers (instead of letting `props` itself trigger a re-bind on every render).
+  const { open, onClose } = props;
   const trapRef = useFocusTrap<HTMLDivElement>(props.open);
   useEffect(() => {
-    if (!props.open) return;
-    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") props.onClose(); };
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [props.open, props.onClose]);
+  }, [open, onClose]);
   if (!props.open) return null;
   return createPortal(
     <div className="modal-backdrop-fullscreen" onClick={props.onClose}>
