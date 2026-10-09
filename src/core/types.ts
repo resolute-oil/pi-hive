@@ -1,6 +1,7 @@
 // ── Types ────────────────────────────────────────────────────────────────────
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ChildProcess } from "node:child_process";
 import type { PlanStage } from "../shared/openspec-artifacts";
 export type { PlanStage } from "../shared/openspec-artifacts";
 
@@ -282,7 +283,7 @@ export interface AgentRuntime {
   thinkingLevels?: string[];
   startedAt?: number;
   timer?: ReturnType<typeof setInterval>;
-  session?: any;
+  session?: AgentSession;
   // Last budget-pre-flight rejection the dispatcher observed for
   // this agent. Populated when `delegateAgent` throws
   // `BudgetExhaustedError` (pre-flight gate refused). Cleared on
@@ -387,7 +388,7 @@ export interface HiveState {
   // adopted an already-running daemon has `proc` undefined but still records the
   // url/port for the header indicator.
   obsServer?: {
-    proc?: any;
+    proc?: ChildProcess;
     url: string;
     port: number;
     host: string;

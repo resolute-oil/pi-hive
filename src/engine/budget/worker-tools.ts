@@ -288,7 +288,7 @@ export async function delegateAgentWithInternals(
   if (effectiveInternals.createSession) {
     const created = await effectiveInternals.createSession({
       cwd: ctx.cwd,
-      model: options.model ?? {} as DelegateAgentModel<unknown>,
+      model: options.model ?? ({} as DelegateAgentModel<unknown>),
       thinkingLevel: options.thinkingLevel ?? ("medium" as DelegateAgentThinkingLevel),
       tools: options.tools ?? [],
       customTools: options.customTools ?? [],
@@ -520,10 +520,10 @@ export async function tearDownAllWorkers(reason: string, opts?: { force?: boolea
 
 // >>> region: agent-3C (T5.3, T5.5, T5.6)
 // F5 branch/clone. T5.3 order: dispose OLD → create NEW → branchWithSummary on OLD leafId (audit-trail only) → ledger kind "respawn"/"snapshot"/"restore". P3 spy test pins T5.3 order; C9 adds T5.6 SDK-chain research + integration test. First arg is `string | WorkerContext`: Wave 0 stub contract calls with an agent name (throws "not implemented"); Wave 3 caller passes a WorkerContext. The `agent` param name preserves the §2.8 signature regex at the source level.
-export interface WorkerContext { agent: string; session: AgentSession; sessionManager: SessionManager; ledger: BudgetLedger; policy: WorkerBudgetPolicy; cwd: string; internals?: { sessionManagerCreate?: (cwd: string) => SessionManager; sessionManagerOpen?: (path: string) => SessionManager; createAgentSessionFn?: (opts: CreateAgentSessionOptions) => Promise<{ session: AgentSession }>; }; }
+export interface WorkerContext { agent: string; session: AgentSession; sessionManager: SessionManager; ledger: BudgetLedger; policy: WorkerBudgetPolicy; cwd: string; internals?: { sessionManagerCreate?: (cwd: string) => SessionManager; sessionManagerOpen?: (path: string) => SessionManager; sessionManagerContinueRecent?: (cwd: string) => SessionManager; createAgentSessionFn?: (opts: CreateAgentSessionOptions) => Promise<{ session: AgentSession }>; }; }
 function writeKindLedgerEntry(sm: SessionManager, agent: string, policy: WorkerBudgetPolicy, stats: SessionStats, runs: number, kind: BudgetLedgerKind): BudgetLedgerEntry {
-  const w = policy.worker ?? {}, t = policy.team ?? {};
-  const data: BudgetLedgerEntry["data"] = { caps: { workerTokens: w.tokens?.cap, workerCostUsd: w.costUsd?.cap, workerRuns: w.runs?.cap, workerDepth: w.depth?.cap, teamTokens: t.tokens?.cap, teamCostUsd: t.costUsd?.cap, teamRuns: t.runs?.cap }, cumulative: { tokens: stats.tokens.total, costUsd: stats.cost, runs }, writtenAt: Date.now(), agentSlug: agent, marker: "checkpoint" as const, kind };
+  const worker = policy.worker ?? {}, team = policy.team ?? {};
+  const data: BudgetLedgerEntry["data"] = { caps: { workerTokens: worker.tokens?.cap, workerCostUsd: worker.costUsd?.cap, workerRuns: worker.runs?.cap, workerDepth: worker.depth?.cap, teamTokens: team.tokens?.cap, teamCostUsd: team.costUsd?.cap, teamRuns: team.runs?.cap }, cumulative: { tokens: stats.tokens.total, costUsd: stats.cost, runs }, writtenAt: Date.now(), agentSlug: agent, marker: "checkpoint" as const, kind };
   sm.appendCustomEntry("pi-hive-budget-ledger", data);
   return { type: "custom", customType: "pi-hive-budget-ledger", data };
 }

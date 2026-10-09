@@ -352,12 +352,12 @@ export function backfillProjectIdentities(): void {
   for (const row of sessions) {
     const identity = tryResolveProjectIdentity(row.cwd);
     if (!identity) continue;
-    const params = { $session_id: row.session_id, $project_id: identity.projectId, $canonical_root: identity.canonicalRoot };
-    db.run(`UPDATE sessions SET project_id = $project_id, canonical_root = $canonical_root WHERE session_id = $session_id`, params as any);
-    db.run(`UPDATE events SET project_id = $project_id WHERE session_id = $session_id AND project_id IS NULL`, params as any);
-    db.run(`UPDATE states SET project_id = $project_id, canonical_root = $canonical_root WHERE session_id = $session_id AND project_id IS NULL`, params as any);
+    const params: { $session_id: string; $project_id: string; $canonical_root: string } = { $session_id: row.session_id, $project_id: identity.projectId, $canonical_root: identity.canonicalRoot };
+    db.run(`UPDATE sessions SET project_id = $project_id, canonical_root = $canonical_root WHERE session_id = $session_id`, params);
+    db.run(`UPDATE events SET project_id = $project_id WHERE session_id = $session_id AND project_id IS NULL`, params);
+    db.run(`UPDATE states SET project_id = $project_id, canonical_root = $canonical_root WHERE session_id = $session_id AND project_id IS NULL`, params);
     for (const table of ["plan_verdicts", "plan_approvals", "plan_comments"] as const) {
-      db.run(`UPDATE ${table} SET project_id = $project_id WHERE session_id = $session_id AND project_id IS NULL`, params as any);
+      db.run(`UPDATE ${table} SET project_id = $project_id WHERE session_id = $session_id AND project_id IS NULL`, params);
     }
   }
 
@@ -369,13 +369,11 @@ export function backfillProjectIdentities(): void {
     for (const row of roots) {
       const identity = tryResolveProjectIdentity(row.cwd);
       if (!identity) continue;
-      db.run(`UPDATE ${table} SET project_id = $project_id WHERE cwd = $cwd AND project_id IS NULL`, {
-        $project_id: identity.projectId, $cwd: row.cwd,
-      } as any);
+      const projectParams: { $project_id: string; $cwd: string } = { $project_id: identity.projectId, $cwd: row.cwd };
+      db.run(`UPDATE ${table} SET project_id = $project_id WHERE cwd = $cwd AND project_id IS NULL`, projectParams);
       if (table === "states") {
-        db.run(`UPDATE states SET canonical_root = $canonical_root WHERE cwd = $cwd AND canonical_root IS NULL`, {
-          $canonical_root: identity.canonicalRoot, $cwd: row.cwd,
-        } as any);
+        const rootParams: { $canonical_root: string; $cwd: string } = { $canonical_root: identity.canonicalRoot, $cwd: row.cwd };
+        db.run(`UPDATE states SET canonical_root = $canonical_root WHERE cwd = $cwd AND canonical_root IS NULL`, rootParams);
       }
     }
   }

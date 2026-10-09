@@ -53,6 +53,12 @@ import {
   tearDownAllWorkers,
   type WorkerContext,
 } from "../engine/budget/worker-tools";
+import {
+  getOrCreateInflightWake,
+  releaseWorkerWake,
+  tryAutoWake,
+  wakesForCommand,
+} from "./auto-wake";
 
 const POLL_INTERVAL_MS = 250;
 
@@ -118,15 +124,38 @@ function workerContextFor(agent: string): WorkerContext | undefined {
 // on the live worker handles — it mutates the session, ledger, and
 // workerHandles map. Errors are caught at the row level so one
 // failure does not block other rows.
+//
+// Auto-wake: for commands in `wakesForCommand` (compact / end /
+// pause / snapshot / resume), the consumer first looks up the
+// worker handle. If absent, it tries a transient auto-wake — the
+// `tryAutoWake` helper rehydrates the agent's persisted session,
+// registers a WorkerHandle, and the per-command side effect runs
+// against the live handle. The handle is unregistered in the
+// `finally` block below, so the wake is fully transient: every
+// command is wake → operate → sleep, with no persistent "live but
+// idle" state. Other commands (respawn / restore / abort-compaction
+// / force-kill / force-end / tear-down-all / hive_reload_agent_config)
+// skip the wake gate because they either operate on persisted state,
+// are nonsensical mid-wake, or already handle their own state
+// lookup.
 async function invokeRow(
   row: OperatorCommandRequest,
-  opts: { notify?: (message: string, level: "info" | "warning" | "error") => void },
+  opts: {
+    notify?: (message: string, level: "info" | "warning" | "error") => void;
+    state?: HiveState;
+    ctx?: ExtensionContext;
+  },
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   if (!ALLOWED_COMMANDS.has(row.command)) {
     return { ok: false, error: `unknown command "${row.command}"` };
   }
   const signal = new AbortController().signal;
   const reason = `operator: ${row.command}`;
+  // Track whether the wake path will (or did) register a handle so
+  // the `finally` block below can release it. Only wake-eligible
+  // commands set this flag; other commands never register a handle
+  // here, so the release is a no-op for them.
+  const willWake = wakesForCommand.has(row.command);
   try {
     // tear-down-all is a team-wide command and ignores the per-row
     // agent name (the dashboard sends an empty / placeholder agent
@@ -141,68 +170,96 @@ async function invokeRow(
     // static config (state.config.agents), not a live worker handle —
     // the agent is loaded from YAML and reloadable even when no
     // worker is currently running.
+    //
+    // For commands in `wakesForCommand`, the consumer tries a
+    // transient auto-wake before giving up. The wake requires a
+    // bound state + ctx (the per-row production wiring supplies
+    // them via `startOperatorCommandPickup`); when either is
+    // missing, the wake cannot run and the consumer returns the
+    // pre-change "no live worker handle" error byte-identically.
     if (row.command !== "hive_reload_agent_config") {
       const handle = lookupWorkerHandleForProduction(row.agent);
       if (!handle) {
-        return { ok: false, error: `no live worker handle for agent "${row.agent}"` };
+        if (willWake && opts.state && opts.ctx) {
+          const waked = await getOrCreateInflightWake(opts.state, row.agent, (s, a) => tryAutoWake(s, a, opts.ctx!));
+          if (!waked) {
+            return { ok: false, error: `no live worker handle for agent "${row.agent}"` };
+          }
+        } else {
+          return { ok: false, error: `no live worker handle for agent "${row.agent}"` };
+        }
       }
     }
-    switch (row.command) {
-      case "end":
-        await endWorkerSession(row.agent, reason, signal);
-        return { ok: true };
-      case "compact":
-        await compactWorkerSession(row.agent, reason, undefined, signal);
-        return { ok: true };
-      case "respawn": {
-        const ctx = workerContextFor(row.agent);
-        if (!ctx) return { ok: false, error: `no worker context for agent "${row.agent}"` };
-        await respawnWorkerSession(ctx, reason);
-        return { ok: true };
-      }
-      case "pause":
-        await pauseWorkerSession(row.agent, reason, signal);
-        return { ok: true };
-      case "snapshot": {
-        const ctx = workerContextFor(row.agent);
-        if (!ctx) return { ok: false, error: `no worker context for agent "${row.agent}"` };
-        await snapshotWorkerSession(ctx, "operator-snapshot");
-        return { ok: true };
-      }
-      case "restore": {
-        // restore takes a snapshotId; without one we can only fail
-        // cleanly. The dashboard UI does not currently surface a
-        // restore-with-id flow, so this is a defensive branch.
-        return { ok: false, error: "restore requires a snapshot id (not yet supported by the consumer)" };
-      }
-      case "resume":
-        await resumeWorkerSession(row.agent, signal);
-        return { ok: true };
-      case "abort-compaction":
-        await abortWorkerCompaction(row.agent, signal);
-        return { ok: true };
-      case "force-kill":
-        await forceKillWorkerSession(row.agent, reason, signal);
-        return { ok: true };
-      case "force-end":
-        await forceEndWorkerSession(row.agent, reason, signal);
-        return { ok: true };
-      case "hive_reload_agent_config": {
-        // T13.0 follow-up: reload the agent's YAML config. The
-        // command is idempotent — calling it twice with no edits
-        // between is a no-op (the runtime.config reference is the
-        // same). It requires a bound state + ctx (bindReloadAgentConfigState
-        // wires these on every dispatch); when unbound (e.g. a
-        // session that has not dispatched any worker), the function
-        // returns reloaded=false with a clear error message.
-        const result = hiveReloadAgentConfig(row.agent);
-        if (!result.reloaded) {
-          return { ok: false, error: result.error || "reload failed" };
+    try {
+      switch (row.command) {
+        case "end":
+          await endWorkerSession(row.agent, reason, signal);
+          return { ok: true };
+        case "compact":
+          await compactWorkerSession(row.agent, reason, undefined, signal);
+          return { ok: true };
+        case "respawn": {
+          const ctx = workerContextFor(row.agent);
+          if (!ctx) return { ok: false, error: `no worker context for agent "${row.agent}"` };
+          await respawnWorkerSession(ctx, reason);
+          return { ok: true };
         }
-        return { ok: true };
+        case "pause":
+          await pauseWorkerSession(row.agent, reason, signal);
+          return { ok: true };
+        case "snapshot": {
+          const ctx = workerContextFor(row.agent);
+          if (!ctx) return { ok: false, error: `no worker context for agent "${row.agent}"` };
+          await snapshotWorkerSession(ctx, "operator-snapshot");
+          return { ok: true };
+        }
+        case "restore": {
+          // restore takes a snapshotId; without one we can only fail
+          // cleanly. The dashboard UI does not currently surface a
+          // restore-with-id flow, so this is a defensive branch.
+          return { ok: false, error: "restore requires a snapshot id (not yet supported by the consumer)" };
+        }
+        case "resume":
+          await resumeWorkerSession(row.agent, signal);
+          return { ok: true };
+        case "abort-compaction":
+          await abortWorkerCompaction(row.agent, signal);
+          return { ok: true };
+        case "force-kill":
+          await forceKillWorkerSession(row.agent, reason, signal);
+          return { ok: true };
+        case "force-end":
+          await forceEndWorkerSession(row.agent, reason, signal);
+          return { ok: true };
+        case "hive_reload_agent_config": {
+          // T13.0 follow-up: reload the agent's YAML config. The
+          // command is idempotent — calling it twice with no edits
+          // between is a no-op (the runtime.config reference is the
+          // same). It requires a bound state + ctx (bindReloadAgentConfigState
+          // wires these on every dispatch); when unbound (e.g. a
+          // session that has not dispatched any worker), the function
+          // returns reloaded=false with a clear error message.
+          const result = hiveReloadAgentConfig(row.agent);
+          if (!result.reloaded) {
+            return { ok: false, error: result.error || "reload failed" };
+          }
+          return { ok: true };
+        }
+        default:
+          return { ok: false, error: `unhandled command "${row.command}"` };
       }
-      default:
-        return { ok: false, error: `unhandled command "${row.command}"` };
+    } finally {
+      // Sleep — release the wake handle so the next command is a
+      // fresh wake. Runs on success, failure, and throw so the
+      // handle is always gone before the operator sees the result.
+      // `unregisterWorkerHandleForProduction` is a no-op when the
+      // handle was never registered, so the release is safe for
+      // commands that did not need a wake (e.g., respawn rebuilds
+      // the handle internally; the wake handle is already gone by
+      // the time respawn returns).
+      if (willWake) {
+        releaseWorkerWake(row.agent);
+      }
     }
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
@@ -224,7 +281,12 @@ async function invokeRow(
 // happens here. A race where the dashboard appends between the
 // consumer's read and unlink is benign — the appended row is
 // preserved for the next tick (it was just queued, not lost).
-export async function pickupOperatorCommandRequests(opts: { notify?: (message: string, level: "info" | "warning" | "error") => void } = {}): Promise<PickupResult> {
+//
+// `state` + `ctx` thread the wake dependencies through. The polling
+// timer (set up in startOperatorCommandPickup) supplies both; tests
+// may pass them directly to exercise the wake path without starting
+// the timer.
+export async function pickupOperatorCommandRequests(opts: { notify?: (message: string, level: "info" | "warning" | "error") => void; state?: HiveState; ctx?: ExtensionContext } = {}): Promise<PickupResult> {
   const queuePath = operatorCommandQueuePath();
   if (!existsSync(queuePath)) {
     return { total: 0, invoked: 0, failed: 0, errors: [] };
@@ -293,7 +355,7 @@ export function startOperatorCommandPickup(state: HiveState, ctx: ExtensionConte
     // still receive rows, but invoking them would fail because no
     // handles are registered — better to short-circuit.
     if (state.mode === "normal") return;
-    void pickupOperatorCommandRequests({ notify }).catch((e: unknown) => {
+    void pickupOperatorCommandRequests({ notify, state, ctx }).catch((e: unknown) => {
       // Defensive — pickupOperatorCommandRequests catches its own
       // errors per row, but the top-level promise could still
       // reject (e.g. a synchronous throw before the loop). Log and

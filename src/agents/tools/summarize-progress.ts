@@ -20,9 +20,14 @@
 // removed in C D5 — its only consumer was `tests/budget-contracts.test.ts`
 // slice 9, which now asserts the real factory's signature instead.
 
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { defineTool as definePiTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Type, type TSchema } from "typebox";
 import type { BudgetLedger } from "../../engine/budget/ledger";
 import type { AgentRuntime, HiveState } from "../../core/types";
+
+function defineTool<TParams extends TSchema>(tool: ToolDefinition<TParams>): ToolDefinition<TParams> {
+  return definePiTool(tool) as ToolDefinition<TParams>;
+}
 
 /** Per-call estimated tokens: ~4 chars per token. Good enough for the cap gate. */
 const CHARS_PER_TOKEN = 4;
@@ -59,19 +64,15 @@ export function buildSummarizeProgressTool(
   ledger: BudgetLedger,
 ): ToolDefinition {
   void ledger;
-  return {
+  return defineTool({
     name: "summarize_progress",
     label: "Summarize Progress",
     description:
       "Record wrap-up notes for your worker session. Under the `compact` budget strategy, pass `compact: true` to inject the notes into LLM context immediately via appendCustomMessageEntry. Notes are capped at progressSummaryTokenLimit tokens (default 2000).",
-    parameters: {
-      type: "object",
-      properties: {
-        notes: { type: "string", description: "Wrap-up notes for operator interventions." },
-        compact: { type: "boolean", description: "When true and the worker's budget strategy is 'compact', inject the notes into LLM context via appendCustomMessageEntry." },
-      },
-      required: ["notes"],
-    },
+    parameters: Type.Object({
+      notes: Type.String({ description: "Wrap-up notes for operator interventions." }),
+      compact: Type.Optional(Type.Boolean({ description: "When true and the worker's budget strategy is 'compact', inject the notes into LLM context via appendCustomMessageEntry." })),
+    }),
     async execute(_toolCallId: string, params: unknown, signal: AbortSignal | undefined) {
       // Signal propagation: an already-aborted controller must skip the
       // appendCustomMessageEntry write (and any subsequent ledger snapshot).
@@ -175,5 +176,5 @@ export function buildSummarizeProgressTool(
         },
       };
     },
-  } as unknown as ToolDefinition;
+  });
 }
