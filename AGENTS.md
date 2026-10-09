@@ -66,6 +66,23 @@ This rule is here because the inline-display preference and the one-question-at-
 - **Never merge a pull request without explicit user permission.** Committing, pushing, and creating PRs is allowed; merging requires the user to instruct it each time. A PR is "ready" when it is open and its checks have passed — it is not "done" until the user merges. Do not run `gh pr merge`, do not click the GitHub merge button, and do not auto-merge via branch protection or repo settings on the agent's own initiative.
 - Do not add AI attribution trailers or generated-by notices to commits, docs, package text, or release notes.
 - Prefer complete, production-ready changes: no TODO placeholders, no debug logs, and no unexplained temporary behavior.
+- **Destructive git operations require explicit Operator approval.** Before any of the following, ASK the Operator first with the exact impact stated: "I want to run `X` which will lose `Y`. OK?" — and WAIT for an explicit yes before running the command.
+  - `git reset --hard` (any target). Loses uncommitted changes to tracked files in the current worktree, and rewrites the working tree from the index. `git reset` (without `--hard`) is fine — it only moves the branch ref.
+  - `git worktree remove <path>` (without `--force`). Deletes the worktree directory on disk. Loses uncommitted changes in the worktree's working tree and any index changes there. The worktree is removed from `git worktree list` but the branch ref survives unless explicitly deleted.
+  - `git clean -fdx` or any `rm -rf` on a directory that may contain uncommitted work, session files, telemetry databases, or build outputs that aren't gitignored.
+  - `git branch -D` (force-delete). Loses the branch ref. `git branch -d` is fine for merged branches — it refuses to delete unmerged branches.
+  - `git push --force` or `git push --force-with-lease` to any remote, ever (per the existing upstream/push rule).
+  - **The gitignored personal files and directories that exist on disk and must NEVER be deleted** (the `.gitignore` makes them invisible to git, so a `git clean -fdx` would happily remove them):
+    - `HANDOFF.md` at the repo root (`.gitignore` line 32)
+    - `tmp/` at the repo root (`.gitignore` line 15)
+    - `notes/` at the repo root (`.gitignore` line 29)
+    - `~/.pi/agent/extensions/pi-hive` (the symlink Pi uses to load this extension; not in the repo but easy to clobber)
+  - **Reversibility cheat sheet** (use this to phrase the impact in the question to the Operator):
+    - `git reset --hard <sha>` is reversible from the reflog as long as `git gc` hasn't pruned the entry (default 90 days). State: "Will move branch ref from <X> to <Y>. Uncommitted working-tree changes in <paths> will be discarded. The previous <X> remains reachable via reflog."
+    - `git worktree remove <path>` is partially reversible: the branch ref survives (and the worktree is re-creatable with `git worktree add`), but any uncommitted changes in that worktree's working tree are GONE. State: "Will delete <path>. Uncommitted work in that worktree is lost. The branch ref and the worktree's branch state are preserved."
+    - `git branch -D <name>` is reversible from the reflog (`git reflog show <name>`). State: "Will delete the local ref for <name>. The branch's tip is reachable via reflog for 90 days unless `git gc` runs."
+- **If a destructive operation seems necessary, default to asking.** The cost of asking is one turn; the cost of not asking is potentially losing work the user has spent hours on. There is no "obvious enough to just do it" threshold for these operations.
+
 - **All file edits go in a git worktree, never in the main working tree.** Even single-line docs changes, chore updates, and small fixes must be done in a worktree under `APP_ROOT/.worktrees/`, not as siblings of `APP_ROOT` and not directly on `main`. The `.worktrees/` directory is gitignored so `git add .` from a parent path can't drag a sibling checkout into a commit. Create with `git worktree add .worktrees/<branch> <base>` from `APP_ROOT`, then `just install` to populate a real `node_modules/` inside the worktree (do NOT symlink `node_modules` — the symlink target is brittle and the workflow itself is being phased out).
 
   Clean up with `git worktree remove .worktrees/<branch>` after the branch merges. This rule applies to every agent session that touches this repo, including the one writing this rule.
