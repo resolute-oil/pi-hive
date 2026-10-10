@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { applyMode } from "../src/ui/tui/widget.ts";
-import { handleAgentSettledForHiveRestore } from "../src/integration/hooks.ts";
+import { handleAgentSettledForHiveRestore } from "../src/engine/mode-switch-restore.ts";
 import { createState } from "../src/engine/state.ts";
 import { setCommandCtx, clearCommandCtx, getCommandCtx } from "../src/integration/commands.ts";
 
