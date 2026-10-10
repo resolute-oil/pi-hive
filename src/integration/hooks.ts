@@ -2,17 +2,17 @@ import type { ExtensionAPI, ExtensionContext, SessionManager } from "@earendil-w
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import type { AgentConfig, HiveState } from "../core/types";
-import { agentSlug, boundedDiagnostics, clip, configuredChildAgents, extractUsage, safeJson, textFromMessage, textOfResult, truncateMiddle } from "../core/utils";
+import { agentSlug, boundedDiagnostics, clip, configuredChildAgents, extractUsage, textFromMessage, truncateMiddle } from "../core/utils";
 import { logRecord } from "../engine/state";
 import { reloadTeam } from "../engine/session";
-import { enforceDomainForTool } from "../engine/domain";
 import { buildOrchestratorPrompt } from "../agents/prompts";
 import { applyMode, captureNormalTools, installHeader, updateWidget } from "../ui/tui/widget";
 import { clearHiveActivityWidget } from "../ui/tui/activity";
 import { resolveHiveSddStatus } from "../engine/sdd";
 import { ensureDashboard, killOwnedDashboardOnQuit } from "../engine/dashboard";
 import { resolveRuntime } from "../engine/agent-lookup";
-import { emitHiveEvent, emitModelCatalog, writeHiveStateSnapshot } from "../engine/observability";
+import { emitHiveEvent, writeHiveStateSnapshot } from "../engine/observability";
+import { registerOrchestratorTelemetryListeners } from "../engine/telemetry-listeners";
 import { resolveConfiguredPath } from "../core/safe-path";
 import { cancelWorkerQueue } from "../engine/worker-queue";
 import { clearCommandCtx, getCommandCtx } from "./commands";
@@ -93,14 +93,11 @@ export async function handleAgentSettledForHiveRestore(state: HiveState): Promis
 }
 
 export function registerHooks(pi: ExtensionAPI, state: HiveState) {
-  // toolCallId → startedAt for the orchestrator's own tool calls, so
-  // orchestrator_tool_end can carry durationMs the same way workers do (J5).
-  // Bounded by in-flight calls: entries are deleted on tool_result.
-  const orchestratorToolStartedAt = new Map<string, number>();
-
   // Debounced snapshot write so orchestrator-only conversations (no delegations)
   // still reach hive-state.json (J5). Delegations trigger their own snapshot in
-  // dispatch.ts; this covers turns where the orchestrator works alone.
+  // dispatch.ts; this covers turns where the orchestrator works alone. NOT
+  // telemetry-related, stays in hooks.ts; the telemetry listener module owns
+  // its own snapshot-on-status-change write via setOrchestratorStatus.
   let orchestratorSnapshotTimer: ReturnType<typeof setTimeout> | undefined;
   const scheduleOrchestratorSnapshot = () => {
     if (orchestratorSnapshotTimer) return;
@@ -111,198 +108,13 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
     orchestratorSnapshotTimer.unref?.();
   };
 
-  const setOrchestratorStatus = (status: "idle" | "running" | "done" | "error") => {
-    const orch = state.orchestratorRuntime;
-    if (!orch) return;
-    orch.status = status;
-    if (status === "running") {
-      orch.startedAt = Date.now();
-      orch.elapsedMs = 0;
-    } else if (orch.startedAt) {
-      orch.elapsedMs = Date.now() - orch.startedAt;
-      orch.startedAt = undefined;
-    }
-    try { writeHiveStateSnapshot(state); } catch { /* best-effort */ }
-  };
-
-  pi.on("tool_call", async (event, ctx: ExtensionContext) => {
-    // Enforcement (domain + agent-type policy) runs in plan AND hive mode; only
-    // normal mode is unguarded plain Pi.
-    if (state.mode === "normal") return;
-    // Orchestrator tool telemetry parity (A5). This hook fires on the main
-    // session's own tool calls; worker tool calls are emitted from dispatch.ts.
-    const orch = state.orchestratorRuntime;
-    if (orch) orch.toolCount++;
-    if (event.toolCallId) orchestratorToolStartedAt.set(event.toolCallId, Date.now());
-    const argsJson = safeJson(event.input);
-    emitHiveEvent(state, "orchestrator_tool_start", {
-      agent: "Orchestrator",
-      toolName: event.toolName || "unknown",
-      toolCallId: event.toolCallId,
-      args: truncateMiddle(argsJson, 500),
-      truncated: argsJson.length > 500,
-    }, "Orchestrator");
-    return enforceDomainForTool(state, event, ctx);
-  });
-
-  pi.on("tool_result", async (event) => {
-    // Always release the start-time entry, even when we bail below — otherwise a
-    // mode flip to normal between tool_call and tool_result strands the key
-    // forever (M-misc leak).
-    const startedAt = event.toolCallId ? orchestratorToolStartedAt.get(event.toolCallId) : undefined;
-    if (event.toolCallId) orchestratorToolStartedAt.delete(event.toolCallId);
-    if (state.mode === "normal") return;
-    const resultText = textOfResult(event.content);
-    emitHiveEvent(state, "orchestrator_tool_end", {
-      agent: "Orchestrator",
-      toolName: event.toolName || "unknown",
-      toolCallId: event.toolCallId,
-      isError: event.isError === true,
-      resultPreview: truncateMiddle(resultText, 500),
-      truncated: resultText.length > 500,
-      durationMs: startedAt != null ? Date.now() - startedAt : undefined,
-    }, "Orchestrator");
-  });
-
-  // J3: re-emit the model catalog when the main model changes mid-session, so
-  // `inherit` workers aren't left described by a stale catalog. Gated off in
-  // normal mode (the extension does nothing there). The DB upsert is idempotent.
-  pi.on("model_select", async (event, ctx: ExtensionContext) => {
-    if (state.mode === "normal") return;
-    // The event carries the newly-selected model; pass it through so the catalog
-    // covers what `inherit` workers now resolve to, even if it isn't config-
-    // declared (M1). Fall back to ctx.model if the event shape lacks it.
-    const contextModel = (ctx as ExtensionContext & { model?: { provider?: string; id?: string } }).model;
-    const m = event.model || contextModel;
-    const effectiveModel = m?.provider && m?.id ? `${m.provider}/${m.id}` : undefined;
-    try { emitModelCatalog(state, state.modelRegistry ?? ctx.modelRegistry, effectiveModel); } catch { /* best-effort */ }
-    // Phase 4.4: emit the SWITCH itself (not just the catalog re-emit) so the
-    // main session's model changes are an observable event, with provenance.
-    const prev = event?.previousModel;
-    const previousModel = prev?.provider && prev?.id ? `${prev.provider}/${prev.id}` : undefined;
-    emitHiveEvent(state, "model_select", {
-      agent: "Orchestrator", model: effectiveModel, previousModel, source: event?.source,
-    }, "Orchestrator");
-  });
-
-  // Phase 4.4: the main session's thinking-level changes, previously invisible.
-  pi.on("thinking_level_select", async (event) => {
-    if (state.mode === "normal") return;
-    emitHiveEvent(state, "thinking_level_select", {
-      agent: "Orchestrator", level: event?.level, previousLevel: event?.previousLevel,
-    }, "Orchestrator");
-  });
-
-  // Phase 4.1: main-session compactions produced zero telemetry — the orchestrator
-  // was a second-class citizen next to its own workers (which emit worker_compaction).
-  pi.on("session_compact", async (event) => {
-    if (state.mode === "normal") return;
-    emitHiveEvent(state, "orchestrator_compaction", {
-      agent: "Orchestrator",
-      reason: event?.reason,
-      willRetry: event?.willRetry === true,
-      fromExtension: event?.fromExtension === true,
-    }, "Orchestrator");
-  });
-
-  // Phase 4.10/4.11: per-turn latency. turn_start stamps the start; turn_end
-  // emits one `turn` event carrying turnIndex + the measured duration — the only
-  // per-turn timing the dashboard can surface for the main session.
-  const turnStartedAt = new Map<number, number>();
-  // W1.7: a turn that errors or is aborted never fires turn_end, so its start
-  // stamp would live in the map forever. Cap the map by evicting the oldest
-  // insertion (Map preserves insertion order) whenever it grows past the bound —
-  // only the newest in-flight turns can still legitimately match a turn_end.
-  const MAX_TRACKED_TURNS = 64;
-  pi.on("turn_start", async (event) => {
-    if (state.mode === "normal") return;
-    setOrchestratorStatus("running");
-    if (typeof event?.turnIndex !== "number") return;
-    turnStartedAt.set(event.turnIndex, Date.now());
-    while (turnStartedAt.size > MAX_TRACKED_TURNS) {
-      const oldest = turnStartedAt.keys().next().value;
-      if (oldest === undefined) break;
-      turnStartedAt.delete(oldest);
-    }
-  });
-  pi.on("turn_end", async (event) => {
-    if (state.mode === "normal") return;
-    setOrchestratorStatus("done");
-    const started = typeof event?.turnIndex === "number" ? turnStartedAt.get(event.turnIndex) : undefined;
-    if (typeof event?.turnIndex === "number") turnStartedAt.delete(event.turnIndex);
-    emitHiveEvent(state, "turn", {
-      agent: "Orchestrator",
-      turnIndex: event?.turnIndex,
-      durationMs: started != null ? Date.now() - started : undefined,
-    }, "Orchestrator");
-  });
-
-  // Phase 4.10/4.11: the ONLY pre-retry view of provider back-pressure. Surface
-  // rate-limit / overload responses (429/529) and their retry-after headers so a
-  // stalled session has a visible cause. Only emit non-2xx to avoid one row per
-  // successful call flooding the log.
-  pi.on("after_provider_response", async (event) => {
-    if (state.mode === "normal") return;
-    const status = Number(event?.status);
-    if (!Number.isFinite(status) || (status >= 200 && status < 300)) return;
-    const headers = event?.headers || {};
-    const pick = (k: string) => headers[k] ?? headers[k.toLowerCase()];
-    emitHiveEvent(state, "provider_response", {
-      agent: "Orchestrator",
-      status,
-      retryAfter: pick("retry-after"),
-      rateLimitRemaining: pick("anthropic-ratelimit-requests-remaining") ?? pick("x-ratelimit-remaining"),
-    }, "Orchestrator");
-  });
-
-  // Remaining SDK event classes (Phase 4, "everything the SDK exposes"). Each is
-  // emitted with a bounded payload and rendered generically in the Activity feed
-  // (the feed titles the common ones and dumps the payload for the rest). None
-  // carries unbounded bodies.
-  pi.on("user_bash", async (event) => {
-    if (state.mode === "normal") return;
-    emitHiveEvent(state, "user_bash", {
-      agent: "Orchestrator",
-      command: truncateMiddle(String(event?.command || ""), 500),
-      excludeFromContext: event?.excludeFromContext === true,
-    }, "Orchestrator");
-  });
-  // `input` telemetry is source-only (the footer already re-renders on input, a
-  // separate concern): record where user input came from and how it will be
-  // delivered, not the text (that lands as a user_message already).
-  pi.on("input", async (event) => {
-    if (state.mode === "normal") return;
-    emitHiveEvent(state, "input", {
-      agent: "User",
-      source: event?.source,
-      streamingBehavior: event?.streamingBehavior,
-      hasImages: Array.isArray(event?.images) && event.images.length > 0,
-    }, "User");
-  });
-  pi.on("session_before_fork", async (event) => {
-    if (state.mode === "normal") return;
-    emitHiveEvent(state, "session_fork", {
-      agent: "Orchestrator",
-      entryId: event?.entryId,
-      position: event?.position,
-    }, "Orchestrator");
-  });
-  pi.on("session_tree", async (event) => {
-    if (state.mode === "normal") return;
-    emitHiveEvent(state, "session_tree", {
-      agent: "Orchestrator",
-      newLeafId: event?.newLeafId ?? undefined,
-      oldLeafId: event?.oldLeafId ?? undefined,
-      fromExtension: event?.fromExtension === true,
-    }, "Orchestrator");
-  });
-  pi.on("session_info_changed", async (event) => {
-    if (state.mode === "normal") return;
-    emitHiveEvent(state, "session_info_changed", {
-      agent: "Orchestrator",
-      name: event?.name ? truncateMiddle(String(event.name), 200) : undefined,
-    }, "Orchestrator");
-  });
+  // The 12 simple orchestrator telemetry listeners + the shared
+  // orchestratorToolStartedAt / turnStartedAt Maps + setOrchestratorStatus
+  // live in `engine/telemetry-listeners.ts`. The returned handle is invoked
+  // from `session_shutdown` below to release the Maps and tear down the
+  // registered listeners — same leak-prevention as the inline .clear()
+  // calls the original hooks.ts owned.
+  const telemetryListeners = registerOrchestratorTelemetryListeners(pi, state);
 
   pi.on("before_agent_start", async (event, _ctx: ExtensionContext) => {
     if (!state.config || state.mode === "normal") return;
@@ -514,8 +326,12 @@ ${catalog}`,
     stopOperatorCommandPickup();
     if (orchestratorSnapshotTimer) clearTimeout(orchestratorSnapshotTimer);
     orchestratorSnapshotTimer = undefined;
-    orchestratorToolStartedAt.clear();
-    turnStartedAt.clear();
+    // Release the orchestrator's in-flight tracking Maps and tear down
+    // every SDK-registered listener. The previous inline `.clear()`
+    // calls lived at this exact site; both the Maps and the listener
+    // registration now live in `engine/telemetry-listeners.ts`, so a
+    // single `dispose()` covers both halves of the leak fix.
+    telemetryListeners.dispose();
     cancelWorkerQueue(state);
     for (const runtime of state.runtimes.values()) {
       if (runtime.timer) clearInterval(runtime.timer);
