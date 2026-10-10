@@ -655,10 +655,12 @@ export async function dispatchAgent(
 
   // Non-budget session event subscription: streaming text, tool telemetry,
   // retry, compaction telemetry, agent_end text fallback, per-message
-  // identity tracking. Extracted to src/engine/dispatch-subscribe.ts so this
-  // module stays under the ≤600 LOC refactor target. Budget paths (warning at
-  // 20%, abort at 0%, recordCompaction) live in installBudgetEventHooks and
-  // are installed separately (T2.1).
+  // identity tracking. Extracted to src/engine/dispatch-subscribe.ts. The
+  // dispatch.ts ≤600 LOC refactor target was relaxed once wave-4 extraction
+  // of hook/path-state helpers shifted the cost-benefit calculus; this module
+  // currently sits at 725 LOC (deliberately, per the wave-4 brief). Budget
+  // paths (warning at 20%, abort at 0%, recordCompaction) live in
+  // installBudgetEventHooks and are installed separately (T2.1).
   const unsubscribe = wireDispatchSubscription(state, runtime, session, streamState, runController);
   lifecycle.attachSubscription(unsubscribe);
 
