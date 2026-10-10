@@ -1,7 +1,9 @@
 import { DefaultResourceLoader, getAgentDir } from "@earendil-works/pi-coding-agent";
+import type { AfterProviderResponseEvent } from "@earendil-works/pi-coding-agent";
 import type { HiveState } from "../core/types";
 import { enforceDomainForTool } from "./domain";
 import { emitHiveEvent } from "./observability";
+import { buildProviderResponsePayload } from "./telemetry-payloads";
 import { buildBudgetToolCallHandler } from "./budget/events";
 
 export function normalizeWorkerSkillPaths(skillPaths: unknown[] = []): string[] {
@@ -67,16 +69,12 @@ export function workerResourceLoader(state: HiveState, cwd: string, callerName: 
         pi.on("tool_call", async (event: any, ctx: any) => enforceDomainForTool(state, event, ctx));
         // Only non-2xx responses (429/529 rate-limit/overload), mirroring the
         // orchestrator handler — successes would flood one row per call.
-        pi.on("after_provider_response", async (event: any) => {
+        pi.on("after_provider_response", async (event: AfterProviderResponseEvent) => {
           const status = Number(event?.status);
           if (!Number.isFinite(status) || (status >= 200 && status < 300)) return;
-          const headers = event?.headers || {};
-          const pick = (k: string) => headers[k] ?? headers[k.toLowerCase()];
           emitHiveEvent(state, "provider_response", {
             agent: callerName,
-            status,
-            retryAfter: pick("retry-after"),
-            rateLimitRemaining: pick("anthropic-ratelimit-requests-remaining") ?? pick("x-ratelimit-remaining"),
+            ...buildProviderResponsePayload(event),
           }, callerName);
         });
       },
