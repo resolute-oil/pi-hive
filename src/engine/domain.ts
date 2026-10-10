@@ -1,4 +1,4 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import type { AgentRuntime, DomainScope, HiveState } from "../core/types";
@@ -748,7 +748,7 @@ function enforceTypePolicyForPath(runtime: AgentRuntime, ctx: ExtensionContext, 
   return undefined;
 }
 
-export function enforceDomainForTool(state: HiveState, event: any, ctx: ExtensionContext): { block: true; reason: string } | undefined {
+export function enforceDomainForTool(state: HiveState, event: ToolCallEvent, ctx: ExtensionContext): { block: true; reason: string } | undefined {
   // Use runtimeForCaller so the main session ("Orchestrator") resolves to its
   // configured runtime instead of silently no-oping (G4). Zero behavior change
   // today (the main session has no file/bash tools in plan/hive mode) — this
@@ -758,11 +758,17 @@ export function enforceDomainForTool(state: HiveState, event: any, ctx: Extensio
   if (!runtime) return undefined;
 
   const toolName = String(event.toolName || "");
+  // `event.input` is a union of every tool variant's input shape. The Custom
+  // variant (`toolName: string`) widens to Record<string, unknown> so
+  // `event.toolName === toolName` alone doesn't narrow to a specific variant
+  // for TS. For known toolNames the SDK still guarantees the input shape; cast
+  // at the use site (read/upsert → path-extractor accepts unknown; bash → cast
+  // to BashToolInput which has `.command`).
   const readTools = new Set(["read", "grep", "find", "ls"]);
   const upsertTools = new Set(["write", "edit"]);
 
   if (readTools.has(toolName)) {
-    for (const path of extractToolPaths(toolName, event.input)) {
+    for (const path of extractToolPaths(toolName, event.input as unknown as Record<string, unknown>)) {
       const reservedBlock = enforceReservedPath(state, runtime, ctx, path, "read");
       if (reservedBlock) return { block: true, reason: reservedBlock };
       const typeBlock = enforceTypePolicyForPath(runtime, ctx, path, "read");
@@ -774,7 +780,7 @@ export function enforceDomainForTool(state: HiveState, event: any, ctx: Extensio
   }
 
   if (upsertTools.has(toolName)) {
-    for (const path of extractToolPaths(toolName, event.input)) {
+    for (const path of extractToolPaths(toolName, event.input as unknown as Record<string, unknown>)) {
       const reservedBlock = enforceReservedPath(state, runtime, ctx, path, "upsert");
       if (reservedBlock) return { block: true, reason: reservedBlock };
       const typeBlock = enforceTypePolicyForPath(runtime, ctx, path, "upsert");
@@ -786,7 +792,11 @@ export function enforceDomainForTool(state: HiveState, event: any, ctx: Extensio
   }
 
   if (toolName === "bash") {
-    const command = String(event.input?.command || "");
+    // BashToolInput declares `command` as a required TString. Cast is safe
+    // because toolName === "bash" implies the BashToolCallEvent variant per
+    // the SDK's runtime contract; the Custom variant can't have toolName
+    // === "bash" by definition.
+    const command = String((event.input as { command?: string }).command || "");
     const readOnlyType = runtime.config.agentType === "reviewer" || runtime.config.agentType === "lead";
 
     // Read-only types get a positive allowlist before the broader mutation and
