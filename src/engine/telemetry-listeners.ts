@@ -36,6 +36,7 @@ import type {
   ExtensionContext,
   InputEvent,
   SessionBeforeForkEvent,
+  SessionCompactEvent,
   SessionInfoChangedEvent,
   SessionTreeEvent,
   ThinkingLevelSelectEvent,
@@ -218,14 +219,18 @@ export function registerOrchestratorTelemetryListeners(
   // Phase 4.1: main-session compactions produced zero telemetry — the
   // orchestrator was a second-class citizen next to its own workers
   // (which emit worker_compaction).
-  disposers.push(pi.on("session_compact", gatedEmit(
+  disposers.push(pi.on("session_compact", gatedEmit<SessionCompactEvent>(
     "orchestrator_compaction",
     "Orchestrator",
     (e) => ({
       agent: "Orchestrator",
-      reason: e?.reason,
-      willRetry: e?.willRetry === true,
-      fromExtension: e?.fromExtension === true,
+      // SDK declares `reason`, `willRetry`, and `fromExtension` as
+      // required on SessionCompactEvent
+      // (node_modules/@earendil-works/pi-coding-agent/.../types.d.ts:580-589);
+      // the deferred bit used optional chains while the type was untyped.
+      reason: e.reason,
+      willRetry: e.willRetry === true,
+      fromExtension: e.fromExtension === true,
     }),
   )));
 
