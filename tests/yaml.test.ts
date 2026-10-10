@@ -14,7 +14,7 @@ test("parseYamlLite keeps quoted list items containing colons as strings", () =>
 shared_context:
   - "iMed is HIPAA-regulated: no TODOs, no placeholders"
   - 'Another inline note: still text'
-`);
+`) as { [k: string]: unknown };
 
   assert.deepEqual(parsed.shared_context, [
     "iMed is HIPAA-regulated: no TODOs, no placeholders",
@@ -27,7 +27,7 @@ test("parseYamlLite still parses unquoted list mappings", () => {
 context:
   - path: .pi/hive/knowledge/foo.md
     use-when: Always
-`);
+`) as { [k: string]: unknown };
 
   assert.deepEqual(parsed.context, [
     { path: ".pi/hive/knowledge/foo.md", useWhen: "Always" },
@@ -44,7 +44,7 @@ e: { percent: 35 }
 f: {}
 g: { cap : 100 , depth : 4 }
 h: { hint: "a, b" }
-`);
+`) as { [k: string]: unknown };
 
   assert.deepEqual(parsed.a, { cap: 100 });
   assert.deepEqual(parsed.b, { costUsd: 0.5 });
@@ -101,7 +101,9 @@ settings:
       on-token-exhaustion:   { action: abort }
       on-context-exhaustion: { action: compact }
       summary:               { max-tokens: 5000 }
-`);
+`) as {
+    settings: { budgets: { perWorker: { runs: unknown; context: unknown }; strategies: { summary: unknown } } };
+  };
 
   assert.equal(typeof parsed.settings.budgets.perWorker.runs, "object");
   assert.deepEqual(parsed.settings.budgets.perWorker.runs, { cap: 100 });
