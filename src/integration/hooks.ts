@@ -111,13 +111,14 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
 
   // The 12 simple orchestrator telemetry listeners + the shared
   // orchestratorToolStartedAt / turnStartedAt Maps live in
-  // `engine/telemetry-listeners.ts`; the module-local setOrchestratorStatus
-  // helper that turn_start / turn_end call is also defined there (not
-  // re-imported here — it stays module-local so this file does not depend
-  // on telemetry-listeners for status writes). The returned handle is
-  // invoked from `session_shutdown` below to release the Maps and tear
-  // down the registered listeners — same leak-prevention as the inline
-  // .clear() calls the original hooks.ts owned.
+  // `engine/telemetry-listeners.ts`. The module-local setOrchestratorStatus
+  // helper (called by `turn_start` / `turn_end` inside that module to
+  // update the status counter) is also defined there — kept module-local
+  // so this file does not depend on telemetry-listeners for status
+  // writes. The returned handle is invoked from `session_shutdown` below
+  // to release the Maps and tear down the registered listeners — same
+  // leak-prevention as the inline .clear() calls the original hooks.ts
+  // owned.
   const telemetryListeners = registerOrchestratorTelemetryListeners(pi, state);
 
   pi.on("before_agent_start", async (event, _ctx: ExtensionContext) => {
