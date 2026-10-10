@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ExtensionContext, AgentSession, SessionManager, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { BudgetLedger } from "../src/engine/budget/ledger.ts";
-import type { WorkerBudgetPolicy } from "../src/core/types.ts";
+import type { BudgetBlock, WorkerBudgetPolicy } from "../src/core/types.ts";
 import type { HiveState } from "../src/core/types.ts";
 import { delegateAgentWithInternals, BudgetExhaustedError } from "../src/engine/budget/worker-tools.ts";
 
@@ -119,7 +119,7 @@ test("delegateAgent throws BudgetExhaustedError when checkBudgetPolicy returns a
             restoreCalled = true;
             return ledger;
           }) as never,
-          checkBudgetPolicy: (() => {
+          checkBudgetPolicy: ((): BudgetBlock => {
             checkPolicyCalled = true;
             return { reason: "Worker token budget exhausted: 100/100", scope: "worker", resource: "tokens", remaining: { tokens: 0 }, limit: { tokens: 100 } };
           }) as never,
@@ -600,7 +600,7 @@ test("BudgetExhaustedError propagates through dispatchAgent's caller (no silent 
       {
         resolveWorkerBudgetPolicy: (() => noCapPolicy) as never,
         restoreLedger: (async () => ledger) as never,
-        checkBudgetPolicy: (() => ({ reason: "Worker cost budget exhausted: $5.00/$5.00", scope: "worker", resource: "costUsd", remaining: { costUsd: 0 }, limit: { costUsd: 5 } })) as never,
+        checkBudgetPolicy: ((): BudgetBlock => ({ reason: "Worker cost budget exhausted: $5.00/$5.00", scope: "worker", resource: "costUsd", remaining: { costUsd: 0 }, limit: { costUsd: 5 } })) as never,
         installBudgetEventHooks: (() => () => {}) as never,
         sessionManagerCreate: (() => { const m = { ...sm } as any; m.toAgentSession = () => makeFakeSession(sm); return m; }) as never,
         sessionManagerContinueRecent: (() => { const m = { ...sm } as any; m.toAgentSession = () => makeFakeSession(sm); return m; }) as never,
