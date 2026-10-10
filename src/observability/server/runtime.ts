@@ -556,12 +556,12 @@ function materializeTypedEvent(event: HiveTelemetryEvent) {
   // at the use site. Replacing `as any` with this interface keeps B-4's
   // strict-typing contract local to the audit site.
   interface RuntimeAggregates {
-    inputTokens?: unknown;
-    outputTokens?: unknown;
-    cacheReadTokens?: unknown;
-    cacheWriteTokens?: unknown;
-    reasoningTokens?: unknown;
-    costUsd?: unknown;
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+    reasoningTokens?: number;
+    costUsd?: number;
   }
   interface ModelCatalogEntry {
     provider?: string;
@@ -617,6 +617,13 @@ function materializeTypedEvent(event: HiveTelemetryEvent) {
       materializeDelegationEnd({
         eventId: event.event_id, sessionId, cwd: event.cwd, agent: p.from, parent: p.to, endedAt: event.ts,
         durationMs: Number(p.elapsedMs) || undefined,
+        // `Number(...) ?? 0` keeps the same `??` precedence as before (undefined
+        // values fall through to the `?? 0` tail) and preserves defense against
+        // sparse-payload contracts where the SDK might emit a string or null in
+        // place of a number. With RuntimeAggregates already typed `number`,
+        // the `Number(...)` wrapping is technically redundant for the typed path
+        // but kept as a one-shot coercion so a contractor ingest path that
+        // violates the shape doesn't blow up here.
         inputTokens: Number((isDelta ? d.inputTokens : rt.inputTokens ?? p.inputTokens) ?? 0),
         outputTokens: Number((isDelta ? d.outputTokens : rt.outputTokens ?? p.outputTokens) ?? 0),
         cacheReadTokens: Number((isDelta ? d.cacheReadTokens : rt.cacheReadTokens) ?? 0),
@@ -1073,14 +1080,20 @@ export function recentThinking(sessionId: string, perAgent = 12, overall = 200):
 // Shape of the page returned by readAgentLog. The pagination fields
 // (startOffset/hasMoreBefore/hasMoreAfter/truncated) are populated only when the
 // function actually read a file; early returns (no file / no runs) omit them.
-// Entries are heterogeneous depending on whether the source was the main
-// conversation log (MainConversationEntry) or a per-agent run log
-// (AgentLogEntry); downstream consumers (HTTP serializer + tests) only need
-// array length/iteration, so unknown is the honest shared type.
+// `entries` is typed as a discriminated union over the two log shapes
+// (`MainConversationEntry[]` for the main session path, `AgentLogEntry[]` for
+// per-agent runs) so callers get the concrete entry shape instead of `unknown`.
+// Downstream consumers (HTTP serializer + tests) only iterate or take
+// `.length`, so the discriminated union is structural-only and adds no runtime
+// cost.
 interface AgentLogRunRef { id: string; label: string; }
 
+type AgentLogEntries =
+  | ReadonlyArray<MainConversationEntry>
+  | ReadonlyArray<AgentLogEntry>;
+
 interface AgentLogPage {
-  entries: ReadonlyArray<unknown>;
+  entries: AgentLogEntries;
   offset: number;
   size: number;
   startOffset?: number;

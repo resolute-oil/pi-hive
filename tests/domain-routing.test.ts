@@ -129,8 +129,8 @@ test("enforceDomainForTool blocks mutating bash outside explicit domains", () =>
 
   assert.equal(bashMutationKind("rm ui/App.tsx"), "delete");
   runAsAgent("Frontend Dev", () => {
-    assert.match(enforceDomainForTool(state, { toolName: "bash", input: { command: "rm ui/App.tsx" } }, ctx)?.reason ?? "", /cannot delete/);
-    assert.equal(enforceDomainForTool(state, { toolName: "bash", input: { command: "touch ui/App.tsx" } }, ctx), undefined);
+    assert.match(enforceDomainForTool(state, { type: "tool_call", toolCallId: "t1", toolName: "bash", input: { command: "rm ui/App.tsx" } }, ctx)?.reason ?? "", /cannot delete/);
+    assert.equal(enforceDomainForTool(state, { type: "tool_call", toolCallId: "t2", toolName: "bash", input: { command: "touch ui/App.tsx" } }, ctx), undefined);
   });
 });
 
