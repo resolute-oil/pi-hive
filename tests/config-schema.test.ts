@@ -477,7 +477,7 @@ settings:
       summary:
         max-tokens: 5000
 `;
-  const parsed = parseYamlLite(yaml);
+  const parsed = parseYamlLite(yaml) as { settings: { budgets: unknown } };
   const budgets = parsed.settings.budgets;
   assert.doesNotThrow(() => validateBudgetsConfig(budgets), "one-tier (per-worker only) YAML validates cleanly");
 });
@@ -498,7 +498,7 @@ budgets:
       resource: runs
       cap: 200
 `;
-  const parsed = parseYamlLite(yaml);
+  const parsed = parseYamlLite(yaml) as { budgets: unknown };
   const budgets = parsed.budgets;
   assert.doesNotThrow(() => validateBudgetsConfig(budgets), "one-tier (per-team only) YAML validates cleanly");
 });

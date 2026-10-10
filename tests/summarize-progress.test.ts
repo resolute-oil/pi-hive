@@ -25,7 +25,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { buildSummarizeProgressTool } from "../src/agents/tools/summarize-progress.ts";
 import type { AgentRuntime, AgentConfig, HiveState, WorkerGovernance } from "../src/core/types.ts";
 import type { BudgetLedger } from "../src/engine/budget/ledger.ts";
@@ -62,7 +62,11 @@ interface FakeRuntimeOpts {
 
 function makeRuntime(opts: FakeRuntimeOpts = {}): AgentRuntime {
   const sessionManager = makeFakeSessionManager();
-  const session: { sessionManager: FakeSessionManager } = { sessionManager };
+  // AgentSession grew to a 200+-property object across pi-coding-agent
+  // versions; the test only needs sessionManager. Cast through unknown
+  // (mirrors the governance cast below) so the type-checker accepts the
+  // stub without enumerating the full surface.
+  const session = { sessionManager } as unknown as AgentSession;
   const governance: WorkerGovernance | undefined = opts.budgetStrategy
     ? ({ budgetStrategy: opts.budgetStrategy } as unknown as WorkerGovernance)
     : undefined;
@@ -202,7 +206,7 @@ test("summarize_progress({ notes, compact: true }) under compact strategy calls 
   const result = await invoke(state, ledger, { notes, compact: true });
 
   assert.equal(result.isError, undefined, "compact strategy honors the flag");
-  const calls = runtime.session.sessionManager.calls;
+  const calls = (runtime.session!.sessionManager as unknown as FakeSessionManager).calls;
   assert.equal(calls.length, 1, "exactly one appendCustomMessageEntry call");
   assert.equal(calls[0].customType, "progress_note");
   assert.equal(calls[0].content, notes);
@@ -267,7 +271,11 @@ test("summarize_progress returns compact_failed isError under default strategy w
   assert.match(result.content[0].text, /under "default" strategy/);
   // Under non-compact strategy, appendCustomMessageEntry must NOT be called.
   const runtime = state.runtimes.get(CALLER);
-  assert.equal(runtime?.session.sessionManager.calls.length, 0, "no appendCustomMessageEntry under default strategy");
+  assert.equal(
+    (runtime!.session!.sessionManager as unknown as FakeSessionManager).calls.length,
+    0,
+    "no appendCustomMessageEntry under default strategy",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -325,6 +333,6 @@ test("summarize_progress does not call appendCustomMessageEntry when the abort s
 
   await invoke(state, ledger, { notes: "should not be written", compact: true }, controller.signal);
 
-  const calls = runtime.session.sessionManager.calls;
+  const calls = (runtime.session!.sessionManager as unknown as FakeSessionManager).calls;
   assert.equal(calls.length, 0, "aborted signal prevents appendCustomMessageEntry");
 });

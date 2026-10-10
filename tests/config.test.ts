@@ -149,7 +149,7 @@ test("loadConfig treats absent settings: block as having no default distiller (o
   assert.equal(config.settings.defaultTools, "read, grep, find, ls");
   assert.equal(config.settings.maxParallel, undefined, "no cap by default — dispatcher skips the parallel branch");
   assert.equal(config.settings.queueSize, undefined, "no queue by default — dispatcher skips the queue branch");
-  assert.equal(config.settings.telemetry.retentionDays, 30);
+  assert.equal(config.settings.telemetry?.retentionDays, 30);
 });
 
 test("worker governance is opt-in with settings defaults and per-agent overrides", () => {
