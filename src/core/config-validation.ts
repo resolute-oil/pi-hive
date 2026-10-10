@@ -105,7 +105,18 @@ const DOMAIN_KEYS = ["path", "read", "upsert", "delete", "include", "exclude", "
 const AGENT_KEYS = [
   "name", "slug", "path", "color", "model", "tools", "thinking", "consultWhen",
   "routingTags", "responsibilities", "context", "skills", "domain", "members", "children",
-  "allowedAgents", "agentType", "stages", "network", "commit", "allowOutsideProject", "governance",
+  "allowedAgents", "agentType", "stages", "network", "commit", "allowOutsideProject",
+  "governance",
+  // Bug G-allow-delegate-strict: the hand-written `validateHiveConfigShape` at
+  // schema.ts:81 accepts `agent.delegateStrict` (the per-caller widening bypass
+  // enforced by `canDelegateTo` in `src/engine/domain.ts:44-46`), and the
+  // YAML-lite parser kebab-cases `delegate-strict:` to `delegateStrict` at
+  // yaml.ts:parseKeyValue, but the hand-written `validateRawConfig` allow-list
+  // here did NOT include it — so any real `hive-config.yaml` with
+  // `delegate-strict: true` on a lead threw
+  // `<agent>.delegateStrict is not a recognized configuration key` at load.
+  // Adding it here closes that gap without touching the kebab→camel convention.
+  "delegateStrict",
 ] as const;
 
 interface ValidationTotals {
