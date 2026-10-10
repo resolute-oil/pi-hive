@@ -434,7 +434,21 @@ function enrichEvent(event: HiveTelemetryEvent, source: Source): HiveTelemetryEv
 // dashboard turns them into queryable rows here. The event_id is reused as the
 // row id so INSERT OR IGNORE makes materialization idempotent on replay.
 function materializePlanEvent(event: HiveTelemetryEvent) {
-  const payload = (event.payload || {}) as any;
+  // Narrow the telemetry payload to exactly the fields this materializer reads.
+  // `evidence`/`concerns`/`blockers` flow through to `jsonArray(unknown)`; the
+  // string fields go straight into the typed `PlanVerdictInput`. The interface
+  // is local to the B-4 audit site so it documents the contract without
+  // leaking into other consumers of `event.payload`.
+  interface PlanPayload {
+    changeId?: string;
+    reviewer?: string;
+    verdict?: string;
+    summary?: string;
+    evidence?: unknown;
+    concerns?: unknown;
+    blockers?: unknown;
+  }
+  const payload = (event.payload || {}) as PlanPayload;
   const changeId = typeof payload.changeId === "string" ? payload.changeId.trim() : "";
   if (!changeId) return; // no active change ⇒ nothing plan-scoped to record
   // Only reviewer verdicts are materialized from telemetry events now. Plan
@@ -488,7 +502,7 @@ function ingestEvent(event: HiveTelemetryEvent): { event: HiveTelemetryEvent; cu
 
 function modelKeyParts(model: unknown): { provider: string; modelId: string } | undefined {
   if (model && typeof model === "object") {
-    const m = model as any;
+    const m = model as Record<string, unknown>;
     if (typeof m.provider === "string" && typeof m.id === "string" && m.provider && m.id) {
       return { provider: m.provider, modelId: m.id };
     }
@@ -536,7 +550,54 @@ function recordAuthoritativeThinkingLevels(model: unknown, levels: unknown, ts: 
 // Materialize hot entities (delegations, tool_calls, and the model catalog) from
 // their source events (B3). Idempotent via event_id PK / tool_call_id uniqueness.
 function materializeTypedEvent(event: HiveTelemetryEvent) {
-  const p = (event.payload || {}) as any;
+  // Narrow the telemetry payload to exactly the fields this materializer reads.
+  // `string` fields flow straight into the typed materializer inputs; numeric
+  // counters and arbitrary blobs are coerced via Number/String/Array.isArray
+  // at the use site. Replacing `as any` with this interface keeps B-4's
+  // strict-typing contract local to the audit site.
+  interface RuntimeAggregates {
+    inputTokens?: unknown;
+    outputTokens?: unknown;
+    cacheReadTokens?: unknown;
+    cacheWriteTokens?: unknown;
+    reasoningTokens?: unknown;
+    costUsd?: unknown;
+  }
+  interface ModelCatalogEntry {
+    provider?: string;
+    modelId?: string;
+    name?: string;
+    api?: string;
+    reasoning?: boolean;
+    thinkingLevels?: readonly unknown[];
+    contextWindow?: unknown;
+    maxTokens?: unknown;
+    costRates?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  }
+  interface MaterializePayload {
+    to?: string;
+    from?: string;
+    type?: string;
+    stopReason?: string;
+    agent?: string;
+    toolName?: string;
+    toolCallId?: string;
+    args?: string;
+    resultPreview?: string;
+    isError?: unknown;
+    durationMs?: unknown;
+    elapsedMs?: unknown;
+    model?: unknown;
+    thinkingLevels?: unknown;
+    delegationsSchema?: unknown;
+    inputTokens?: unknown;
+    outputTokens?: unknown;
+    costUsd?: unknown;
+    runtime?: RuntimeAggregates;
+    delta?: RuntimeAggregates;
+    models?: readonly ModelCatalogEntry[];
+  }
+  const p = (event.payload || {}) as MaterializePayload;
   const sessionId = event.session_id || "unknown";
   switch (event.type) {
     case "delegation_start":
@@ -546,13 +607,13 @@ function materializeTypedEvent(event: HiveTelemetryEvent) {
       recordAuthoritativeThinkingLevels(p.model, p.thinkingLevels, event.ts);
       break;
     case "delegation_end": {
-      const rt = p.runtime || {};
+      const rt = (p.runtime ?? {}) as RuntimeAggregates;
       // Decision 1: a delegation_end carrying delegationsSchema=1 stamps PER-RUN
       // deltas from p.delta; the row records only what this run consumed. Legacy
       // events (no delta block) fall back to the cumulative runtime aggregates and
       // are stored as schema_version 0 so they are never summed with the deltas.
-      const d = p.delta;
-      const isDelta = Number(p.delegationsSchema) >= 1 && d && typeof d === "object";
+      const d = (p.delta ?? {}) as RuntimeAggregates;
+      const isDelta = Number(p.delegationsSchema) >= 1 && !!p.delta && typeof p.delta === "object";
       materializeDelegationEnd({
         eventId: event.event_id, sessionId, cwd: event.cwd, agent: p.from, parent: p.to, endedAt: event.ts,
         durationMs: Number(p.elapsedMs) || undefined,
@@ -940,7 +1001,7 @@ function thinkingFromEntries(agent: string, entries: any[]): ThinkingEntry[] {
   const out: ThinkingEntry[] = [];
   for (const e of entries) {
     if (e.kind !== "message" || !Array.isArray(e.parts)) continue;
-    const u = (e as any).usage || {};
+    const u = (e as unknown as { usage?: Record<string, unknown> }).usage || {};
     const tokens = Number(u.reasoning || 0) || Number(u.output || 0) || 0;
     for (const p of e.parts) {
       if (p.type === "thinking" && p.text && p.text.trim()) {
