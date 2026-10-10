@@ -578,6 +578,67 @@ test("loadConfig rejects unknown settings and nested keys with path-aware errors
   assert.throws(() => loadConfig(cwd3), /hive\.agents\[0\]\.mysteryCapability is not a recognized configuration key/);
 });
 
+// ── AGENT_KEYS regression net ───────────────────────────────────────────────
+//
+// Real `hive-config.yaml` files use the kebab-case `delegate-strict:`
+// (per `src/core/normalize.ts:normalizeDelegateStrict` + the run-time
+// per-caller widening bypass at `src/engine/domain.ts:36-46`). The
+// YAML-lite parser kebab-cases it to `delegateStrict` before the allow-list
+// check (see `src/core/yaml.ts:parseKeyValue`'s `-([a-z])` regex), so the
+// allow-list at `src/core/config-validation.ts` AGENT_KEYS must include
+// `delegateStrict`. Pre-fixup the key was missing from the allow-list; a
+// config with `delegate-strict: true` on a lead threw
+// `...delegateStrict is not a recognized configuration key` at load. The
+// pre-existing behavioral coverage at `tests/domain-routing.test.ts:427-540`
+// exercises `canDelegateTo` but loads configs by passing JS objects directly
+// (it never calls `loadConfig`), so it never hit the gap. This regression
+// drives the full YAML → parser → allow-list → schema validator chain.
+test("loadConfig accepts the kebab-case `delegate-strict:` frontmatter key", () => {
+  // Mirror the smoke-test incident (Engineering Lead opting out of
+  // type-based widening). The agent node is a top-level report of
+  // hive.agents[*]; we exercise the allow-list through the same parser
+  // path a real `hive-config.yaml` would take.
+  const cwd = fixtureProject();
+  const file = join(cwd, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(
+    file,
+    readFileSync(file, "utf8").replace(
+      "      routing-tags: [frontend, react]",
+      "      routing-tags: [frontend, react]\n      delegate-strict: true",
+    ),
+  );
+  // Pre-fixup this threw `hive.agents[0].delegateStrict is not a recognized
+  // configuration key`; post-fixup the config loads cleanly and the
+  // kebab-cased key reaches the runtime as `delegateStrict: true` (verified
+  // by the `canDelegateTo` tests at `tests/domain-routing.test.ts:436-485`).
+  const cfg = loadConfig(cwd);
+  assert.equal(cfg.agents[0].delegateStrict, true);
+});
+
+test("loadConfig rejects an unknown kebab-case agent key with the camelized path", () => {
+  // Sibling regression: confirm a misspelled / unknown agent frontmatter
+  // key still throws with the camelized path so the user can locate the
+  // bad config line. Pinned so a future addition to AGENT_KEYS can't
+  // silently widen the allow-list. The YAML-lite regex only replaces
+  // `-([a-z])` (the hyphen + the immediately following letter), so
+  // `delegate-strickt` becomes `delegateStrickt` — same `S` uppercasing
+  // the canonical path uses.
+  const cwd = fixtureProject();
+  const file = join(cwd, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(
+    file,
+    readFileSync(file, "utf8").replace(
+      "      routing-tags: [frontend, react]",
+      "      routing-tags: [frontend, react]\n      delegate-strickt: true",
+    ),
+  );
+  assert.throws(
+    () => loadConfig(cwd),
+    /hive\.agents\[0\]\.delegateStrickt is not a recognized configuration key/,
+    "kebab-case typo surfaces at the parsed (camelized) path, not the raw kebab form",
+  );
+});
+
 test("loadConfig accepts tokenBudgetScope on settings.workerBudgets, settings.teamBudgets, and per-agent governance", () => {
   const cwd = fixtureProject();
   const file = join(cwd, ".pi", "hive", "hive-config.yaml");
