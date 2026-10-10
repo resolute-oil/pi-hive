@@ -47,6 +47,7 @@ import type { HiveTelemetryEventType } from "../shared/telemetry";
 import { safeJson, textOfResult, truncateMiddle } from "../core/format";
 import { emitHiveEvent, emitModelCatalog, writeHiveStateSnapshot } from "./observability";
 import { enforceDomainForTool } from "./domain";
+import { buildProviderResponsePayload, buildSessionInfoChangedPayload } from "./telemetry-payloads";
 
 /**
  * Set the orchestrator's runtime status. Used by the `turn_start` /
@@ -276,13 +277,9 @@ export function registerOrchestratorTelemetryListeners(
     if (state.mode === "normal") return;
     const status = Number(event?.status);
     if (!Number.isFinite(status) || (status >= 200 && status < 300)) return;
-    const headers = event?.headers || {};
-    const pick = (k: string) => headers[k] ?? headers[k.toLowerCase()];
     emitHiveEvent(state, "provider_response", {
       agent: "Orchestrator",
-      status,
-      retryAfter: pick("retry-after"),
-      rateLimitRemaining: pick("anthropic-ratelimit-requests-remaining") ?? pick("x-ratelimit-remaining"),
+      ...buildProviderResponsePayload(event),
     }, "Orchestrator");
   }));
 
@@ -341,7 +338,7 @@ export function registerOrchestratorTelemetryListeners(
   disposers.push(pi.on("session_info_changed", gatedEmit<SessionInfoChangedEvent>(
     "session_info_changed",
     "Orchestrator",
-    (e) => ({ agent: "Orchestrator", name: e.name ? truncateMiddle(String(e.name), 200) : undefined }),
+    (e) => ({ agent: "Orchestrator", ...buildSessionInfoChangedPayload(e) }),
   )));
 
   return {
