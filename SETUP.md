@@ -131,21 +131,49 @@ This file declares **only**: the orchestrator, the agent tree (`name` / `color` 
 | `default-tools` | Fallback tool list **only** if an agent omits `tools` | `read, grep, find, ls` |
 | `max-parallel` | Optional maximum concurrent worker runs; omitted means unlimited | unlimited |
 | `queue-size` | Optional FIFO wait queue used when `max-parallel` is reached; omitted means fail immediately | disabled |
-| `worker.timeout-ms` | Optional timeout for each worker run | unlimited |
-| `worker.max-delegation-depth` | Optional nested delegation depth | unlimited |
-| `worker.max-runs` | Optional run budget per worker | unlimited |
-| `worker.token-budget` | Optional token budget per worker | unlimited |
-| `worker.cost-budget-usd` | Optional USD budget per worker | unlimited |
-| `worker.distiller-runs` | Optional distillation-run budget per worker | unlimited |
-| `team-budgets.max-runs` | Optional run pool shared by the team | unlimited |
-| `team-budgets.token-budget` | Optional token pool shared by the team | unlimited |
-| `team-budgets.cost-budget-usd` | Optional USD pool shared by the team | unlimited |
 | `secret-paths` | Additional project-relative or absolute paths reserved from every worker | `[]` |
 | `distiller.enabled` | Run the mental-model distiller after each worker | `true` |
 | `distiller.model` | `provider/id` for distillation (required if enabled) | — |
 | `distiller.conversation-lines` | Tail of the session fed to the distiller (`1..10000`) | `200` |
 
-Configured numeric limits must be positive finite values (`cost-budget-usd` may be fractional; count/token/time limits are integers). Quoted numbers, fractions for integer fields, zero, negatives, `NaN`, infinity, and unknown keys are rejected during config load with a path-aware error. Governance limits are all optional: omitting them does not install hidden defaults.
+Worker/team resource governance moved to the top-level `budgets:` block (§5 Budgets below). The legacy flat shapes (`settings.worker-budgets.*`, `settings.worker.*`, `settings.team-budgets.*`, `settings.governance.*`, and the legacy frontmatter `governance:` aliases) are no longer accepted at config load — a hard cutover per `docs/migrations/budget-config-v2.md`. Configured numeric limits must be positive finite values (USD caps may be fractional; count/time limits are integers). Quoted numbers, fractions for integer fields, zero, negatives, `NaN`, infinity, and unknown keys are rejected during config load with a path-aware error. Governance limits are all optional: omitting them does not install hidden defaults.
+
+### Budgets (the top-level `budgets:` block)
+
+This is the canonical nested shape per `docs/migrations/budget-config-v2.md` §2.10. The `budgets:` block sits at the TOP level of `hive-config.yaml` — not under `settings:`. Each per-tier resource block is optional; most projects declare only the resources and tiers they actually want to cap. Per-agent overrides live in each agent's `.md` frontmatter under a sibling `budgets:` key (or, deprecated, `governance:`), applied per-resource against the matching global cap (see §6).
+
+| Key (kebab-case in YAML → camelCase in code) | Tier | Type | Default | Notes |
+|---|---|---|---|---|
+| `budgets.defaults-enabled` | top-level | boolean | — | Reserved for a future release (per migration guide C3 / G-16). Not implemented in v2 — accepted by the parser only, currently inert. |
+| `budgets.per-worker.tokens.cap` | per-worker | number ≥ 0 | — | Per-worker token cap. |
+| `budgets.per-worker.tokens.window` | per-worker | enum | `per-session` | One of `per-session`, `per-run`, `per-day`, `per-team-lifetime`. The worker tier is the only tier that forbids `per-day` / `per-team-lifetime`; setting either on a worker throws at load. |
+| `budgets.per-worker.tokens.include` | per-worker | list | `[input, output]` | Pi `Usage` keys from `[input, output, cacheRead, cacheWrite, reasoning]`. Anything else fails the typebox schema at load with a path-bearing error. |
+| `budgets.per-worker.cost-usd.cap` | per-worker | number ≥ 0 | — | Per-worker USD cap. Fractional values accepted. |
+| `budgets.per-worker.cost-usd.window` | per-worker | enum | `per-session` | One of `per-session`, `per-team-lifetime`. `costUsd` windows are narrower than token windows regardless of tier. |
+| `budgets.per-worker.runs.cap` | per-worker | number ≥ 0 | — | Max runs per worker. |
+| `budgets.per-worker.depth.cap` | per-worker | number ≥ 0 | — | Max nested delegation depth per worker. Worker-only — the team tier has no `depth:` field. |
+| `budgets.per-worker.context.tokens` | per-worker | number ≥ 0 | — | Nominal cap on the LLM's current view (the SDK's `ContextUsage.tokens`). Set exactly one of `tokens:` or `percent:`, not both. |
+| `budgets.per-worker.context.percent` | per-worker | 0 ≤ n ≤ 100 | — | Percentage cap on the context window. 0–100 scale (NOT 0–1). Set exactly one of `tokens:` or `percent:`, not both. |
+| `budgets.per-team.tokens.cap` | per-team | number ≥ 0 | — | Per-team token cap. |
+| `budgets.per-team.tokens.window` | per-team | enum | `per-team-lifetime` | One of `per-team-lifetime`, `per-session`, `per-run`, `per-day`. The team tier is the only tier that accepts `per-day`. |
+| `budgets.per-team.tokens.include` | per-team | list | `[input, output, cacheRead, cacheWrite, reasoning]` | Default is the full Pi `Usage` set (matches the prior `scope: all` behavior). |
+| `budgets.per-team.cost-usd.cap` | per-team | number ≥ 0 | — | Per-team USD cap. Fractional values accepted. |
+| `budgets.per-team.cost-usd.window` | per-team | enum | `per-team-lifetime` | One of `per-session`, `per-team-lifetime`. |
+| `budgets.per-team.runs.cap` | per-team | number ≥ 0 | — | Max runs per team. |
+| `budgets.per-team.context.tokens` | per-team | number ≥ 0 | — | Nominal cap on team-level context (resolver pass-through; enforcement is per-worker). |
+| `budgets.per-team.context.percent` | per-team | 0 ≤ n ≤ 100 | — | Percentage cap on team-level context. |
+| `budgets.strategies.on-approaching-limit.action` | strategies | enum | — | One of `wrap-up`, `compact`, `none`. The warning behavior. |
+| `budgets.strategies.on-approaching-limit.threshold` | strategies | 0 ≤ n ≤ 1 | — | Fraction of remaining budget at which the warning fires (per dimension). |
+| `budgets.strategies.on-approaching-limit.hint` | strategies | string | — | Text injected into the worker's prompt on warning. |
+| `budgets.strategies.on-exhaustion.action` | strategies | enum | — | One of `compact`, `abort`, `none`. The end-of-life behavior; the global default for both dimensions. |
+| `budgets.strategies.on-exhaustion.custom-instructions` | strategies | string? | — | Compaction prompt when `action: compact`. |
+| `budgets.strategies.on-token-exhaustion.action` | strategies | enum | — | Per-dimension override of `on-exhaustion.action` for the token dimension. Same enum. |
+| `budgets.strategies.on-token-exhaustion.custom-instructions` | strategies | string? | — | Compaction prompt when the per-dimension token action is `compact`. |
+| `budgets.strategies.on-context-exhaustion.action` | strategies | enum | — | Per-dimension override of `on-exhaustion.action` for the context dimension. Same enum. |
+| `budgets.strategies.on-context-exhaustion.custom-instructions` | strategies | string? | — | Compaction prompt when the per-dimension context action is `compact`. |
+| `budgets.strategies.summary.max-tokens` | strategies | number ≥ 0 | — | Token cap for `summarize_progress` notes (the migration guide's replacement for `progress-summary-token-limit`). |
+
+Inheritance: `budgets.per-worker.*` and `budgets.per-team.*` are **global defaults**. Each agent's frontmatter `budgets:` (or legacy `governance:`) block overrides per-resource for that worker only. Omitted resources on an agent fall back to the global cap (no hidden defaults). The per-dimension strategy fields override `on-exhaustion.action` only for the named dimension; absent per-dimension fields fall back to the global `on-exhaustion.action` (then `"abort"`). The full example-by-example migration (Before/After pairs for every legacy key, plus context-cap variants and per-dimension overrides) lives in [`docs/migrations/budget-config-v2.md`](docs/migrations/budget-config-v2.md) — treat that guide as authoritative.
 
 ### Template (copy, then edit to the confirmed tree)
 
@@ -169,21 +197,9 @@ shared_context: []
 settings:
   subagent-output-limit: 12000
   default-tools: read, grep, find, ls
-  # Resource governance is opt-in. Omit this whole block for unconstrained runs.
+  # Concurrency is opt-in. Omit both keys for unconstrained runs.
   max-parallel: 10
   queue-size: 20
-  worker:
-    timeout-ms: 1800000
-    max-delegation-depth: 4
-    max-runs: 20
-    token-budget: 1000000
-    cost-budget-usd: 25
-    distiller-runs: 10
-  team-budgets:
-    max-runs: 100
-    token-budget: 5000000
-    cost-budget-usd: 100
-  # Any agent node may override worker defaults with its own `governance:` map.
   # Reserved before normal domain rules. Add project-specific credentials here.
   secret-paths:
     - config/secrets.json
@@ -199,6 +215,50 @@ settings:
     enabled: true
     model: openai-codex/gpt-5.4-mini   # see: pi --list-models
     conversation-lines: 200
+
+# Top-level resource governance (see §5 Budgets). The legacy
+# `settings.worker-budgets` / `settings.team-budgets` / `worker:` /
+# `team-budgets:` flat shapes are no longer accepted; this is a hard
+# cutover per docs/migrations/budget-config-v2.md.
+budgets:
+  per-worker:
+    tokens:
+      cap: 1000000
+      include: [input, output]
+    cost-usd:
+      cap: 25
+    runs:
+      cap: 20
+    depth:
+      cap: 4
+    # `context:` is optional; when set, choose exactly one of `tokens:`
+    # (nominal) or `percent:` (fill on 0–100 scale). NOT both.
+    # context:
+    #   tokens: 100000
+    #   # or: percent: 80
+  per-team:
+    tokens:
+      cap: 5000000
+    cost-usd:
+      cap: 100
+    runs:
+      cap: 100
+    # context:
+    #   percent: 80
+  strategies:
+    on-approaching-limit:
+      action: wrap-up
+      threshold: 0.20
+      hint: "Wrap up your work; call summarize_progress when done."
+    on-exhaustion:
+      action: compact
+    # Per-dimension overrides — leave absent to fall back to on-exhaustion.action.
+    # on-token-exhaustion:
+    #   action: abort
+    # on-context-exhaustion:
+    #   action: compact
+    summary:
+      max-tokens: 2000
 
 # PLAN mode team (REQUIRED — the loader hard-throws without it, same as `hive:`).
 # The main session drives planners to produce full specs.
@@ -285,13 +345,22 @@ Every agent (orchestrator, leads, members) is a Markdown file: **YAML frontmatte
 | `network` | no | boolean | Enables network commands for this worker. Defaults to `false`; the local pi-hive dashboard API remains blocked. |
 | `commit` | no | string | Optional commit guidance. Its **presence** unlocks the commit gate for a write-capable agent. It never overrides the read-only `reviewer`/`lead` type policy. |
 | `tools` | no | list | Allow-list of tool names for this agent. Falls back to `default-tools` if omitted. See §7. |
-| `context` | no | list of `{path, use-when}` | Files **always inlined** into the prompt (full content). The agent's always-on knowledge. |
-| `skills` | no | list of `{path, use-when}` | On-demand procedures using Pi's native skill system. Worker launches disable ambient discovery with `--no-skills` and pass these paths explicitly with `--skill`. |
-| `domain` | no | list of `{path, read, upsert, delete, include, exclude, description}` | **Enforced** filesystem scopes. See §8. |
+| `context` | no | list of `{path, use-when, updatable?, allow-outside-project?}` | Files **always inlined** into the prompt (full content). The agent's always-on knowledge. See sub-keys below. |
+| `skills` | no | list of `{path, use-when, updatable?, allow-outside-project?}` | On-demand procedures using Pi's native skill system. Worker launches disable ambient discovery with `--no-skills` and pass these paths explicitly with `--skill`. See sub-keys below. |
+| `domain` | no | list of `{path, read, upsert, delete, include, exclude, description, allow-outside-project?}` | **Enforced** filesystem scopes. See §8 and the per-scope `allow-outside-project` sub-key below. |
+| `budgets` | no | map of `{tokens, cost-usd, runs, depth}` | Per-agent override of the matching `budgets.per-worker.<resource>.cap` from `hive-config.yaml`. Accepted in two equivalent shapes: flat scalar (`tokens: 1000`) or nested (`tokens: { cap: 1000 }`). Set exactly the resources you want to override on this agent; omitted resources fall back to the matching global cap (no hidden defaults). The `context:` cap is NOT a per-agent override — it's a team/worker-tier setting only. See §5 Budgets and `docs/migrations/budget-config-v2.md` Example 3. |
+| `governance` | no | map (deprecated) | **DEPRECATED.** Accepted as an alias for `budgets:`; same flat/nested shapes. Will be removed in a future release; switch to `budgets:`. When both `governance:` and `budgets:` are present, `budgets:` wins. See `docs/migrations/budget-config-v2.md` Example 3. |
+| `delegate-strict` | no | boolean | **Per-caller widening bypass.** When `true`, this agent/caller only delegates to its `members` (tree-bound) — the type-based widening that lets a caller reach any `{coder, tester, reviewer, planner}` is **disabled** for this caller. Defaults to `false` (widening enabled). Useful when an Engineering Lead wants to stop dispatching inspections directly to a tester or reviewer. Per-caller, not per-role — leads and orchestrators both honor the flag. See §7.1.1. |
 | `routing-tags` | no | list | Keywords that bias the orchestrator/leads to route matching tasks here. |
 | `consult-when` | no | string | One-line "use me when…" shown in the routing catalog. |
 | `responsibilities` | no | list | Bullets describing what this agent owns. |
 | `color` | no | string | Overrides the config color if set. |
+| `allow-outside-project` | no | boolean | **Escapes the project trust boundary.** Allowed at the agent level AND as a sub-key on `context`/`skills`/`domain` entries. When set at the agent level, every path on this agent may reference files outside the project. When set on a single `context`/`skills`/`domain` entry, only that one path may leave the project. Defaults to `false` everywhere — leaving it off keeps every path project-relative. Use sparingly; the flag expands the worker trust boundary. |
+
+**Sub-keys (apply on `context` / `skills` / `domain` entries, not at agent level):**
+
+- `updatable` (boolean, on `context` / `skills` entries only) — Marks the referenced file as mutable: when the agent edits or rewrites the file, both runtime and validation treat the file as a tracked artifact (instead of read-only always-on knowledge). Default is `false` (always-on knowledge stays read-only). The agent's own `edit`/`write` tools are still gated by domain policy.
+- `allow-outside-project` (boolean, on `context` / `skills` / `domain` entries) — Per-entry escape from the project trust boundary (same semantics as the agent-level `allow-outside-project`, scoped to one ref/scope).
 
 > Do **not** put delegation/permission fields in frontmatter — the hierarchy in `hive-config.yaml` is the sole source of who-can-delegate-to-whom.
 
@@ -313,7 +382,38 @@ These extension tools can be granted via an agent's `tools` list:
 | `hive_sdd_status` | orchestrator / leads | Inspect OpenSpec changes under `openspec/changes/` and recommended phase routing. |
 | `ask_user` (peer dep) | planners / leads | Ask the human before authoring when scope, requirements, or acceptance criteria are ambiguous. Provided by the optional [`pi-ask-user`](https://github.com/edlsh/pi-ask-user) peer dep (install with `pi install npm:pi-ask-user`). Supports multi-choice `options[]` with `title`/`description`, freeform input, optional comments, and a configurable `timeout`. In the TUI it renders a feature-rich overlay prompt; in headless sessions it throws an error containing the question — surface it and have the planner record an explicit assumption in the artifact instead. |
 
-Type-scoped hive tools (granted automatically by `agent-type`, not listed in `tools`): `submit_review_verdict` (reviewers), and `plan_new` / `plan_select` / `plan_task_complete` (leads). Human approval happens only in the authenticated dashboard review UI; there is no approval tool for agents.
+Type-scoped hive tools (granted automatically by `agent-type`, NOT listed in `tools`):
+
+- Reviewers: `submit_review_verdict`.
+- Leads/orchestrator: `plan_new` / `plan_select` / `plan_task_complete`, plus the **12 operator commands** and **2 introspection tools** enumerated below.
+
+**Operator commands (12 LLM-callable, granted by `agent-type: lead`)** — the orchestrator's path to the same operator surface the dashboard exposes to humans:
+
+| Tool | Purpose |
+|---|---|
+| `hive_end_worker(agent)` | End a worker's session cleanly (preserves the archive, frees the agent for re-dispatch). |
+| `hive_compact_worker(agent)` | Trigger a session-compaction pass on a worker (reclaims context, keeps session). |
+| `hive_respawn_worker(agent)` | Discard the current session and start fresh (archives the prior session). |
+| `hive_pause_worker(agent)` | Halt a worker without ending it (paired with `hive_resume_worker`). |
+| `hive_resume_worker(agent)` | Re-queue a paused worker (paired with `hive_pause_worker`). |
+| `hive_snapshot_worker(agent)` | Take a labeled snapshot of a worker (branchable via `hive_restore_worker`). |
+| `hive_restore_worker(agent)` | Restore a worker from a snapshot (the snapshot-id flow is dashboard-side today; the LLM path returns a clear error until that input lands). |
+| `hive_abort_compaction(agent)` | Abort an in-flight compaction pass on a worker. |
+| `hive_force_kill_worker(agent)` | **Operator escape hatch** — forcibly kill a stuck worker (disposes session, unregisters handle). |
+| `hive_force_end_worker(agent)` | Strong end that preserves the handle for re-dispatch (use when normal end is unresponsive but you want to keep the handle alive). |
+| `hive_tear_down_all()` | End every live worker in one call. No `agent` arg — team-wide. |
+| `hive_reload_agent_config(agent)` | Reload an agent's YAML config from disk (use after editing an agent's `.md` or its `budgets:`/`governance:` block in `hive-config.yaml` and you want the live session to pick up the change without a full respawn). |
+
+**Introspection tools (2, granted by `agent-type: lead`)** — read-only view of policy and the last delegation rejection:
+
+| Tool | Purpose |
+|---|---|
+| `hive_read_policy(agent?)` | Return the resolved `WorkerBudgetPolicy` (tokens / `costUsd` / runs / depth caps and the per-dimension context cap when set) plus the global `budgets.strategies` block (`on-approaching-limit.threshold`, `on-exhaustion.action`, `summary.max-tokens`). Omit `agent` to see team-wide defaults from `budgets.per-worker.*` / `budgets.per-team.*`. Use it to predict whether a `delegate_agent` call will pass the pre-flight gate before you invoke it. |
+| `hive_explain_rejection(agent)` | Return the structured `BudgetBlock` from the most recent pre-flight gate refusal for the named agent — scope, resource, remaining, limit, timestamp. When `delegate_agent` fails with a "Delegation blocked" message, call this to choose between `hive_respawn_worker`, `hive_compact_worker`, `hive_force_kill_worker`, or a re-delegation with different parameters. |
+
+Both operator commands and introspection tools are **type-scoped** (granted automatically by `agent-type: lead`, not by an agent's `tools` list), so a `coder`/`tester`/`reviewer`/`planner` does NOT see them. The dashboard buttons and the LLM tools share the same underlying `operator-command-pickup.jsonl` consumer as worker-self cooperative calls.
+
+Human approval happens only in the authenticated dashboard review UI; there is no approval tool for agents.
 
 Built-in `pi` tools you allow per role: `read`, `grep`, `find`, `ls` (read/search — safe default for everyone), `edit`, `write` (mutate files — only implementers), `bash` (shell — grant sparingly; mutating bash is gated by domains, see §8).
 
@@ -781,6 +881,7 @@ Naming: prefix by scope — `behavior-*` (cross-cutting), `<role>-*` (role-owned
 - [ ] Agents that edit files have `edit`/`write` in `tools` **and** an `upsert: true` domain over their area. (Tools without a matching domain = blocked at runtime.)
 - [ ] The orchestrator has **no** `edit`/`write`/`bash`.
 - [ ] `settings.distiller.model` is set (or `distiller.enabled: false`).
+- [ ] Budgets are in the canonical nested shape (`budgets.per-worker.*`, `budgets.per-team.*`, `budgets.strategies.*`). The flat `worker-budgets:` / `team-budgets:` shapes from earlier releases are no longer accepted (hard cutover; see `docs/migrations/budget-config-v2.md`).
 - [ ] Spec-driven planning is the default for non-trivial work: changes live under `openspec/changes/<change-id>/` with the `proposal → { design, specs } → tasks` graph. A lead creates a change with `plan_new`; planners use `ask_user` (provided by the optional `pi-ask-user` peer dep — install with `pi install npm:pi-ask-user` to enable multi-choice options, freeform input, optional comments, and a configurable timeout) and write canonical artifacts; `/hive:execute <change-id>` drives execution only after exact-content review and approval. Leads record completed execution tasks with evidence through `plan_task_complete` without editing approved `tasks.md`.
 - [ ] Every agent `skills:` entry points to a Pi-loadable skill file or directory; only these explicit skills are exposed to that worker.
 - [ ] The local telemetry dashboard auto-starts when enabled (Bun required), binds to loopback by default, and requires bearer authentication for writes. `/hive:observe` force-restarts + opens it, `/hive:observe-stop` performs authenticated teardown, and `/hive:observe-prune <days>` prunes SQLite rows (not project JSONL). It is a shared daemon, survives individual session shutdown, adopts only an exact compatible identity, and exits after bounded idle time.
@@ -811,3 +912,7 @@ done
 - **Fat `shared_context`.** It's paid on every delegation. Put per-role knowledge in each agent's `context:`/`skills:` instead.
 - **Hand-creating `sessions/`** — it's runtime state; leave it to the extension and gitignore it.
 - **Inventing config keys or directory names** not in this guide. If something's missing, ask the user.
+- **Using legacy flat budget shapes.** `settings.worker-budgets:`, `settings.team-budgets:`, the frontmatter flat `governance:` aliases, and the legacy keys they contained (`budget-strategy:`, `token-budget-scope:`, `progress-summary-token-limit:`) all fail at config-load. The hard cutover means there is no deprecation window — projects with any of these keys do not start. Use the canonical nested shape from §5 Budgets and `docs/migrations/budget-config-v2.md`.
+- **Setting `budgets.per-worker.tokens.window: per-day`.** Only the team tier accepts `per-day` (it's a per-UTC-day cap, which is a team-aggregate concept). The worker tier forbids both `per-day` and `per-team-lifetime`; both names mean "this resource rolls over beyond one worker session." Pin per-day limits on the team tier instead.
+- **Setting `tokens.include: [...]` with non-`Usage` keys.** The only valid values are the Pi `Usage` keys: `input`, `output`, `cacheRead`, `cacheWrite`, `reasoning`. Anything else fails the typebox schema at load with an `expected one of input, output, cacheRead, cacheWrite, reasoning` error pointing at the index. Don't try to add a custom key for cache accounting — the SDK already reports the relevant signal under one of the five canonical keys.
+- **Setting both `budgets.per-worker.context.tokens` AND `budgets.per-worker.context.percent`.** The `context:` constraint accepts **exactly one** of `tokens:` (nominal cap) or `percent:` (fill on the 0–100 scale). Setting both, or neither, fails at config-load with a path-bearing error pointing at the offending tier. This is enforced by `validateBudgetsConfig` post-typebox (see `src/core/schema.ts`).
