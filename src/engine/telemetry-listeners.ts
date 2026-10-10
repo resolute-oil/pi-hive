@@ -34,6 +34,12 @@
 import type {
   ExtensionAPI,
   ExtensionContext,
+  InputEvent,
+  SessionBeforeForkEvent,
+  SessionInfoChangedEvent,
+  SessionTreeEvent,
+  ThinkingLevelSelectEvent,
+  UserBashEvent,
 } from "@earendil-works/pi-coding-agent";
 import type { HiveState } from "../core/types";
 import type { HiveTelemetryEventType } from "../shared/telemetry";
@@ -42,13 +48,15 @@ import { emitHiveEvent, emitModelCatalog, writeHiveStateSnapshot } from "./obser
 import { enforceDomainForTool } from "./domain";
 
 /**
- * Set the orchestrator's runtime status. Used by `turn_start` /
- * `turn_end` (moving here) and by `message_end` (which stays in
- * `hooks.ts` and imports this). The setter is purely an
- * orchestrator-runtime concern — moving it here keeps the closure tight
- * instead of forcing the new module to depend on `hooks.ts`.
+ * Set the orchestrator's runtime status. Used by the `turn_start` /
+ * `turn_end` handlers below (which always update the counter for any
+ * mode). The setter is purely an orchestrator-runtime concern — it
+ * stays module-local so the new module never needs to depend on
+ * `hooks.ts`. `message_end` in `hooks.ts` accumulates usage/cost but
+ * does NOT touch `orchestratorRuntime.status`, so the counter is owned
+ * entirely by this module.
  */
-export function setOrchestratorStatus(state: HiveState, status: "idle" | "running" | "done" | "error"): void {
+function setOrchestratorStatus(state: HiveState, status: "idle" | "running" | "done" | "error"): void {
   const orch = state.orchestratorRuntime;
   if (!orch) return;
   orch.status = status;
@@ -107,7 +115,13 @@ export function registerOrchestratorTelemetryListeners(
   // must release its Map entry before bailing, and `turn_start` /
   // `turn_end`, which must update status counters for any mode) inline
   // their gate explicitly.
-  const gatedEmit = <E, P extends Record<string, unknown>>(
+  //
+  // `<E>` is the SDK's per-event type — each call site passes it
+  // explicitly (`gatedEmit<ThinkingLevelSelectEvent>(...)`) so `project`
+  // sees the SDK's real event shape (not an inferred loose type). `P`
+  // is inferred from the return type of `project`; the `Record<string,
+  // unknown>` constraint matches the `emitHiveEvent` payload contract.
+  const gatedEmit = <E, P extends Record<string, unknown> = Record<string, unknown>>(
     type: HiveTelemetryEventType,
     caller: "Orchestrator" | "User",
     project: (event: E) => P,
@@ -193,10 +207,10 @@ export function registerOrchestratorTelemetryListeners(
 
   // Phase 4.4: the main session's thinking-level changes, previously
   // invisible.
-  disposers.push(pi.on("thinking_level_select", gatedEmit(
+  disposers.push(pi.on("thinking_level_select", gatedEmit<ThinkingLevelSelectEvent>(
     "thinking_level_select",
     "Orchestrator",
-    (e) => ({ agent: "Orchestrator", level: e?.level, previousLevel: e?.previousLevel }),
+    (e) => ({ agent: "Orchestrator", level: e.level, previousLevel: e.previousLevel }),
   )));
 
   // --- Compaction + per-turn timing (turn_start / turn_end paired). ---
@@ -272,13 +286,18 @@ export function registerOrchestratorTelemetryListeners(
   // the Activity feed (the feed titles the common ones and dumps the
   // payload for the rest). None carries unbounded bodies.
 
-  disposers.push(pi.on("user_bash", gatedEmit(
+  disposers.push(pi.on("user_bash", gatedEmit<UserBashEvent>(
     "user_bash",
     "Orchestrator",
     (e) => ({
       agent: "Orchestrator",
-      command: truncateMiddle(String(e?.command || ""), 500),
-      excludeFromContext: e?.excludeFromContext === true,
+      // SDK declares `command: string` as required, but the existing
+      // sparse-payload test simulates `{}` to confirm the handler doesn't
+      // crash; the `|| ""` is a defensive runtime coercion so an unexpected
+      // undefined surfaces as an empty string rather than the literal
+      // "undefined". Same pattern as the original handler.
+      command: truncateMiddle(String(e.command || ""), 500),
+      excludeFromContext: e.excludeFromContext === true,
     }),
   )));
   // `input` telemetry is source-only (the footer already re-renders on
@@ -286,35 +305,38 @@ export function registerOrchestratorTelemetryListeners(
   // how it will be delivered, not the text (that lands as a
   // user_message already). Caller label is `User`, not `Orchestrator`,
   // to match the existing dashboard grouping contract.
-  disposers.push(pi.on("input", gatedEmit(
+  disposers.push(pi.on("input", gatedEmit<InputEvent>(
     "input",
     "User",
     (e) => ({
       agent: "User",
-      source: e?.source,
-      streamingBehavior: e?.streamingBehavior,
-      hasImages: Array.isArray(e?.images) && e.images.length > 0,
+      source: e.source,
+      streamingBehavior: e.streamingBehavior,
+      // SDK declares `images?: ImageContent[]` — runtime guard handles undefined.
+      hasImages: Array.isArray(e.images) && e.images.length > 0,
     }),
   )));
-  disposers.push(pi.on("session_before_fork", gatedEmit(
+  disposers.push(pi.on("session_before_fork", gatedEmit<SessionBeforeForkEvent>(
     "session_fork",
     "Orchestrator",
-    (e) => ({ agent: "Orchestrator", entryId: e?.entryId, position: e?.position }),
+    (e) => ({ agent: "Orchestrator", entryId: e.entryId, position: e.position }),
   )));
-  disposers.push(pi.on("session_tree", gatedEmit(
+  disposers.push(pi.on("session_tree", gatedEmit<SessionTreeEvent>(
     "session_tree",
     "Orchestrator",
     (e) => ({
       agent: "Orchestrator",
-      newLeafId: e?.newLeafId ?? undefined,
-      oldLeafId: e?.oldLeafId ?? undefined,
-      fromExtension: e?.fromExtension === true,
+      // SDK fields are `string | null` (not undefined); the `?? undefined`
+      // coerces null → undefined so downstream consumers see a single shape.
+      newLeafId: e.newLeafId ?? undefined,
+      oldLeafId: e.oldLeafId ?? undefined,
+      fromExtension: e.fromExtension === true,
     }),
   )));
-  disposers.push(pi.on("session_info_changed", gatedEmit(
+  disposers.push(pi.on("session_info_changed", gatedEmit<SessionInfoChangedEvent>(
     "session_info_changed",
     "Orchestrator",
-    (e) => ({ agent: "Orchestrator", name: e?.name ? truncateMiddle(String(e.name), 200) : undefined }),
+    (e) => ({ agent: "Orchestrator", name: e.name ? truncateMiddle(String(e.name), 200) : undefined }),
   )));
 
   return {

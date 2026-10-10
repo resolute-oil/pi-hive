@@ -97,7 +97,8 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
   // still reach hive-state.json (J5). Delegations trigger their own snapshot in
   // dispatch.ts; this covers turns where the orchestrator works alone. NOT
   // telemetry-related, stays in hooks.ts; the telemetry listener module owns
-  // its own snapshot-on-status-change write via setOrchestratorStatus.
+  // its own snapshot-on-status-change write via its module-local
+  // setOrchestratorStatus (called from turn_start / turn_end).
   let orchestratorSnapshotTimer: ReturnType<typeof setTimeout> | undefined;
   const scheduleOrchestratorSnapshot = () => {
     if (orchestratorSnapshotTimer) return;
@@ -109,11 +110,15 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
   };
 
   // The 12 simple orchestrator telemetry listeners + the shared
-  // orchestratorToolStartedAt / turnStartedAt Maps + setOrchestratorStatus
-  // live in `engine/telemetry-listeners.ts`. The returned handle is invoked
-  // from `session_shutdown` below to release the Maps and tear down the
-  // registered listeners — same leak-prevention as the inline .clear()
-  // calls the original hooks.ts owned.
+  // orchestratorToolStartedAt / turnStartedAt Maps live in
+  // `engine/telemetry-listeners.ts`. The module-local setOrchestratorStatus
+  // helper (called by `turn_start` / `turn_end` inside that module to
+  // update the status counter) is also defined there — kept module-local
+  // so this file does not depend on telemetry-listeners for status
+  // writes. The returned handle is invoked from `session_shutdown` below
+  // to release the Maps and tear down the registered listeners — same
+  // leak-prevention as the inline .clear() calls the original hooks.ts
+  // owned.
   const telemetryListeners = registerOrchestratorTelemetryListeners(pi, state);
 
   pi.on("before_agent_start", async (event, _ctx: ExtensionContext) => {
