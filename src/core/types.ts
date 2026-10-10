@@ -409,7 +409,7 @@ export interface HiveState {
   lifecycleGeneration?: number;
   backgroundTasks?: Set<Promise<void>>;
   distillQueues?: Map<string, Promise<void>>;
-  backgroundDistillerSessions?: Set<any>;
+  backgroundDistillerSessions?: Set<AgentSession>;
   // Snapshot/restore handoff for the mode-switch flow (set in applyMode when
   // transitioning hive→normal with a baseline; `summary` is filled in by the
   // LLM's hive_cycle_summary tool call; cleared in the agent_settled handler
