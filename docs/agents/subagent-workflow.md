@@ -54,14 +54,14 @@ For blocking calls (you need the answer before your next move), pass `run_in_bac
 
 ## Default agent types
 
-Four first-class types are available in this project. Three ship with `pi-subagents`; the fourth (`Typescript-Reviewer`) is a project-registered custom agent — its definition lives at `.pi/agents/Typescript-Reviewer.md` (gitignored, since `.pi/` is the runtime hive state dir). The `kieran-typescript-review` skill supplies the body/persona; invoke it with `subagent_type: "Typescript-Reviewer"` pointed at code to review. See [Custom agents](#custom-agents) below for the override / disable mechanics.
+Four first-class types are available in this project. Three ship with `pi-subagents`; the fourth (`Typescript-Reviewer`) is a project-registered custom agent — its definition lives at `.pi/agents/Typescript-Reviewer.md` (gitignored, since `.pi/` is the runtime hive state dir). The `kieran-typescript-reviewer` skill supplies the body/persona; invoke it with `subagent_type: "Typescript-Reviewer"` pointed at code to review. See [Custom agents](#custom-agents) below for the override / disable mechanics.
 
 | Type | Tools | Model | Use for |
 |---|---|---|---|
 | `general-purpose` | All seven (read, bash, grep, find, ls, edit, write) | Inherits your model | Anything your main session can do, but isolated. The only one with `edit`/`write`. |
 | `Explore` | read, bash, grep, find, ls (read-only) | Haiku (falls back to inherit) | Fast read-only codebase exploration |
 | `Plan` | read, bash, grep, find, ls (read-only) | Inherits your model | Implementation planning, design docs |
-| `Typescript-Reviewer` (loaded by the `kieran-typescript-review` skill) | read, bash, grep, find, ls (read-only) | Inherits your model (run with high `thinking`) | Strict TypeScript quality review — `any` usage, type safety, naming, module extraction, modern TS patterns, regressions. The Kieran persona; outputs a findings list, never mutates. |
+| `Typescript-Reviewer` (loaded by the `kieran-typescript-reviewer` skill) | read, bash, grep, find, ls (read-only) | Inherits your model (run with high `thinking`) | Strict TypeScript quality review — `any` usage, type safety, naming, module extraction, modern TS patterns, regressions. The Kieran persona; outputs a findings list, never mutates. |
 
 `Explore` is the right default for research: it's read-only, fast, and uses a cheap model. `Plan` is for tasks where you want a structured plan before any work — also read-only; it produces a plan, it does not apply one. `general-purpose` is for anything that needs to mutate or run commands — it's a parent twin, so it inherits your system prompt and project conventions, and it is the **only** type that can write. `Typescript-Reviewer` is the project's read-only TypeScript reviewer — the Kieran persona, with the high-thinking bar it enforces; treat it as the review pass before merging a TypeScript change.
 
