@@ -7,6 +7,7 @@ import { normalizeWorkerSkillPaths, workerResourceLoader } from "../src/engine/w
 import { enforceDomainForTool } from "../src/engine/domain.ts";
 import { runAsAgent } from "../src/engine/session.ts";
 import type { AgentRuntime, HiveState } from "../src/core/types.ts";
+import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
 
 function runtime(name: string, extra: Partial<AgentRuntime["config"]> = {}): AgentRuntime {
   return {
@@ -109,8 +110,8 @@ test("workerResourceLoader re-attaches tool_call with identical behavior to enfo
   const toolCall = handlers.get("tool_call");
   assert.ok(toolCall, "expected a tool_call handler to be registered");
 
-  const blockingEvent = { toolName: "bash", input: { command: "rm ui/App.tsx" } };
-  const allowedEvent = { toolName: "bash", input: { command: "touch ui/App.tsx" } };
+  const blockingEvent: ToolCallEvent = { type: "tool_call", toolCallId: "t1", toolName: "bash", input: { command: "rm ui/App.tsx" } };
+  const allowedEvent: ToolCallEvent = { type: "tool_call", toolCallId: "t2", toolName: "bash", input: { command: "touch ui/App.tsx" } };
 
   await runAsAgent("Frontend Dev", async () => {
     const viaLoader = await toolCall!(blockingEvent, ctx);
