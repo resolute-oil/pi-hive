@@ -126,3 +126,17 @@ cd .worktrees/<branch>
 just install    # populates node_modules in the worktree
 git worktree remove .worktrees/<branch>   # after the branch merges
 ```
+
+<!-- BEGIN COMPOUND PI TOOL MAP -->
+## Compound Engineering (Pi compatibility)
+
+This block is added by the pi-compound-engineering package.
+
+Pi extensions used by skills shipped by this package:
+- Required for full functionality: `@tintinweb/pi-subagents` (by tintinweb) provides the `Agent` tool used by ce-compound, ce-code-review, ce-plan, ce-compound-refresh, and other parallel-agent skills.
+- Recommended: `pi-ask-user` (by edlsh) provides the `ask_user` tool; skills fall back to numbered options in chat when it is missing.
+
+Install with:
+  pi install npm:@tintinweb/pi-subagents@latest
+  pi install npm:pi-ask-user
+<!-- END COMPOUND PI TOOL MAP -->
