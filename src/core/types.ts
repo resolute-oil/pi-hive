@@ -339,6 +339,17 @@ export interface YamlLine {
   text: string;
 }
 
+// A single FIFO waiter parked on the workerQueue when the configured
+// maxParallel is saturated. Naming the shape lets `engine/worker-queue.ts`
+// (and any future caller) consume it without re-declaring the inline object.
+export interface WorkerQueueEntry {
+  id: number;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  signal?: AbortSignal;
+  abort?: () => void;
+}
+
 // Shared mutable state for the extension. Replaces the closure-captured `let`
 // bindings so the extension's logic can be split across modules. Functions that
 // read or write any of these fields take this object as a parameter.
@@ -354,7 +365,7 @@ export interface HiveState {
   modelRegistry?: unknown;
   activeRuns: number;
   // FIFO waiters created only when maxParallel and queueSize are configured.
-  workerQueue?: Array<{ id: number; resolve: () => void; reject: (error: Error) => void; signal?: AbortSignal; abort?: () => void }>;
+  workerQueue?: WorkerQueueEntry[];
   nextQueueId?: number;
   // The current session mode. Normal = plain Pi; plan = planning team; hive =
   // execution team. (Was `teamMode`; renamed for the three-mode model.)
