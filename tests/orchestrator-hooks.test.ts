@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { registerHooks } from "../src/integration/hooks.ts";
+import { registerOrchestratorTelemetryListeners } from "../src/engine/telemetry-listeners.ts";
 import type { HiveState } from "../src/core/types.ts";
 
 // M8b: the orchestrator's own tool calls must carry durationMs on
@@ -301,4 +302,39 @@ test("orchestrator telemetry tolerates sparse SDK payloads and missing runtime s
   assert.ok(events.some((event) => event.type === "model_select" && event.payload.model === "fallback/model"));
   assert.ok(events.some((event) => event.type === "provider_response" && event.payload.rateLimitRemaining === "2"));
   assert.ok(events.some((event) => event.type === "assistant_message"));
+});
+
+// B-2 Region 1: dispose() must clear the orchestratorToolStartedAt and
+// turnStartedAt Maps AND invoke every Pi-SDK-returned listener cleanup, so a
+// fresh session can't see stranded entries or accumulate duplicate handlers.
+test("registerOrchestratorTelemetryListeners dispose() clears shared Maps and detaches listeners", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-tl-dispose-"));
+  const obsLog = join(dir, "e.jsonl");
+  let active = 0;
+  const handlers = new Map<string, Array<(e: any, ctx: any) => any>>();
+  const pi = {
+    on(event: string, handler: (e: any, ctx: any) => any) {
+      active++;
+      const list = handlers.get(event) || [];
+      list.push(handler);
+      handlers.set(event, list);
+      return () => { active--; handlers.set(event, (handlers.get(event) || []).filter((h) => h !== handler)); };
+    },
+    async fire(event: string, payload: any, ctx: any) {
+      let result: any;
+      for (const h of handlers.get(event) || []) result = await h(payload, ctx);
+      return result;
+    },
+  };
+  const state = { mode: "hive", session: { sessionId: "s1", sessionDir: dir, observabilityLog: obsLog }, widgetCtx: { cwd: dir }, obsSeq: 0, runtimes: new Map(), orchestratorRuntime: { toolCount: 0 } } as any;
+  const handle = registerOrchestratorTelemetryListeners(pi as any, state);
+  await pi.fire("tool_call", { toolCallId: "leak", toolName: "read", input: {} }, {});
+  await pi.fire("turn_start", { turnIndex: 7 }, {});
+  const sizeBefore = existsSync(obsLog) ? readFileSync(obsLog, "utf8").length : 0;
+  assert.ok(active > 0);
+  handle.dispose();
+  assert.equal(active, 0, "every SDK-returned cleanup function should have run");
+  await pi.fire("tool_call", { toolCallId: "post", toolName: "read", input: {} }, {});
+  await pi.fire("tool_result", { toolCallId: "post", toolName: "read", content: [{ type: "text", text: "ok" }], isError: false }, {});
+  assert.equal((existsSync(obsLog) ? readFileSync(obsLog, "utf8").length : 0), sizeBefore, "no telemetry should fire after dispose() detached every listener");
 });
