@@ -114,5 +114,14 @@
     "telemetry",
     "observability"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "allowScripts": {
+    "@google/genai@2.21.0": true,
+    "esbuild@0.28.2": true,
+    "esbuild@0.28.1": true,
+    "protobufjs@7.6.6": true,
+    "@fission-ai/openspec@1.6.0": true,
+    "fsevents@2.3.3": true,
+    "node-pty@1.1.0": true
+  }
 }
