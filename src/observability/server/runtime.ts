@@ -556,12 +556,12 @@ function materializeTypedEvent(event: HiveTelemetryEvent) {
   // at the use site. Replacing `as any` with this interface keeps B-4's
   // strict-typing contract local to the audit site.
   interface RuntimeAggregates {
-    inputTokens?: unknown;
-    outputTokens?: unknown;
-    cacheReadTokens?: unknown;
-    cacheWriteTokens?: unknown;
-    reasoningTokens?: unknown;
-    costUsd?: unknown;
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+    reasoningTokens?: number;
+    costUsd?: number;
   }
   interface ModelCatalogEntry {
     provider?: string;
@@ -617,6 +617,13 @@ function materializeTypedEvent(event: HiveTelemetryEvent) {
       materializeDelegationEnd({
         eventId: event.event_id, sessionId, cwd: event.cwd, agent: p.from, parent: p.to, endedAt: event.ts,
         durationMs: Number(p.elapsedMs) || undefined,
+        // `Number(...) ?? 0` keeps the same `??` precedence as before (undefined
+        // values fall through to the `?? 0` tail) and preserves defense against
+        // sparse-payload contracts where the SDK might emit a string or null in
+        // place of a number. With RuntimeAggregates already typed `number`,
+        // the `Number(...)` wrapping is technically redundant for the typed path
+        // but kept as a one-shot coercion so a contractor ingest path that
+        // violates the shape doesn't blow up here.
         inputTokens: Number((isDelta ? d.inputTokens : rt.inputTokens ?? p.inputTokens) ?? 0),
         outputTokens: Number((isDelta ? d.outputTokens : rt.outputTokens ?? p.outputTokens) ?? 0),
         cacheReadTokens: Number((isDelta ? d.cacheReadTokens : rt.cacheReadTokens) ?? 0),
