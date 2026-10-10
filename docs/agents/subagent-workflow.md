@@ -54,16 +54,16 @@ For blocking calls (you need the answer before your next move), pass `run_in_bac
 
 ## Default agent types
 
-Four first-class types are available in this project. Three ship with `pi-subagents`; the fourth (`kieran-typescript-reviewer`) is a project-registered custom agent — see [Custom agents](#custom-agents) below for how it gets loaded (typically a `.pi/agents/kieran-typescript-reviewer.md` frontmatter file, or a compound-engineering skill routed through `Agent({ subagent_type: "kieran-typescript-reviewer" })`).
+Four first-class types are available in this project. Three ship with `pi-subagents`; the fourth (`Typescript-Reviewer`) is a project-registered custom agent — its definition lives at `.pi/agents/Typescript-Reviewer.md` (gitignored, since `.pi/` is the runtime hive state dir). The `kieran-typescript-review` skill supplies the body/persona; invoke it with `subagent_type: "Typescript-Reviewer"` pointed at code to review. See [Custom agents](#custom-agents) below for the override / disable mechanics.
 
 | Type | Tools | Model | Use for |
 |---|---|---|---|
 | `general-purpose` | All seven (read, bash, grep, find, ls, edit, write) | Inherits your model | Anything your main session can do, but isolated. The only one with `edit`/`write`. |
 | `Explore` | read, bash, grep, find, ls (read-only) | Haiku (falls back to inherit) | Fast read-only codebase exploration |
 | `Plan` | read, bash, grep, find, ls (read-only) | Inherits your model | Implementation planning, design docs |
-| `kieran-typescript-reviewer` (alias: `Typescript-Reviewer`) | read, bash, grep, find, ls (read-only) | Inherits your model (run with high `thinking`) | Strict TypeScript quality review — `any` usage, type safety, naming, module extraction, modern TS patterns, regressions. The Kieran persona; outputs a findings list, never mutates. |
+| `Typescript-Reviewer` (loaded by the `kieran-typescript-review` skill) | read, bash, grep, find, ls (read-only) | Inherits your model (run with high `thinking`) | Strict TypeScript quality review — `any` usage, type safety, naming, module extraction, modern TS patterns, regressions. The Kieran persona; outputs a findings list, never mutates. |
 
-`Explore` is the right default for research: it's read-only, fast, and uses a cheap model. `Plan` is for tasks where you want a structured plan before any work — also read-only; it produces a plan, it does not apply one. `general-purpose` is for anything that needs to mutate or run commands — it's a parent twin, so it inherits your system prompt and project conventions, and it is the **only** type that can write. `kieran-typescript-reviewer` is the project's read-only TypeScript reviewer — the Kieran persona, with the high-thinking bar it enforces; treat it as the review pass before merging a TypeScript change.
+`Explore` is the right default for research: it's read-only, fast, and uses a cheap model. `Plan` is for tasks where you want a structured plan before any work — also read-only; it produces a plan, it does not apply one. `general-purpose` is for anything that needs to mutate or run commands — it's a parent twin, so it inherits your system prompt and project conventions, and it is the **only** type that can write. `Typescript-Reviewer` is the project's read-only TypeScript reviewer — the Kieran persona, with the high-thinking bar it enforces; treat it as the review pass before merging a TypeScript change.
 
 All four can be **overridden** by dropping a same-named `.md` file under `.pi/agents/` (project) or `~/.pi/agent/agents/` (global), or **disabled** per-project with `enabled: false` in frontmatter. The three built-ins are safe to disable per-project if you want to force everything through a custom-defined agent; `general-purpose` is rarely disabled because the `fallbackSubagent` setting in `subagents.json` defaults to it.
 
@@ -75,7 +75,7 @@ Full schema:
 |---|---|---|---|---|
 | `prompt` | string | yes | — | The task. Write it as if to a capable agent with no other context. |
 | `description` | string | yes | — | 3–5 word summary; appears in the widget, FleetView, and notifications. |
-| `subagent_type` | string | yes | — | One of the four first-class types (`general-purpose`, `Explore`, `Plan`, `kieran-typescript-reviewer`) or another custom agent name defined under `.pi/agents/` or `~/.pi/agent/agents/`. |
+| `subagent_type` | string | yes | — | One of the four first-class types (`general-purpose`, `Explore`, `Plan`, `Typescript-Reviewer`) or another custom agent name defined under `.pi/agents/` or `~/.pi/agent/agents/`. |
 | `run_in_background` | bool | no | `true` | `false` blocks until the agent finishes and returns its full output inline. |
 | `name` | string | no | — | Memorable alias; the agent is then addressable as `@name` in addition to its type-derived handle. |
 | `model` | string | no | inherit | `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`). |
