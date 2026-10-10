@@ -25,7 +25,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { buildSummarizeProgressTool } from "../src/agents/tools/summarize-progress.ts";
 import type { AgentRuntime, AgentConfig, HiveState, WorkerGovernance } from "../src/core/types.ts";
 import type { BudgetLedger } from "../src/engine/budget/ledger.ts";
@@ -62,7 +62,11 @@ interface FakeRuntimeOpts {
 
 function makeRuntime(opts: FakeRuntimeOpts = {}): AgentRuntime {
   const sessionManager = makeFakeSessionManager();
-  const session: { sessionManager: FakeSessionManager } = { sessionManager };
+  // AgentSession grew to a 200+-property object across pi-coding-agent
+  // versions; the test only needs sessionManager. Cast through unknown
+  // (mirrors the governance cast below) so the type-checker accepts the
+  // stub without enumerating the full surface.
+  const session = { sessionManager } as unknown as AgentSession;
   const governance: WorkerGovernance | undefined = opts.budgetStrategy
     ? ({ budgetStrategy: opts.budgetStrategy } as unknown as WorkerGovernance)
     : undefined;
