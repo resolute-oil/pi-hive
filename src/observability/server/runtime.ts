@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
-import { agentRuns, parseAgentLog } from "../agent-log";
+import { agentRuns, parseAgentLog, type AgentLogEntry, type AgentLogPart } from "../agent-log";
 import { projectName } from "../../shared/project";
 import { tryResolveProjectIdentity } from "../../shared/project-identity";
 import { loadConfig } from "../../core/config";
@@ -171,7 +171,7 @@ export function readSource(logPath: string) {
   if (!source || !fs.existsSync(source.logPath)) return;
   let stat: fs.Stats;
   try { stat = fs.statSync(source.logPath); }
-  catch (error: any) { source.lastError = String(error?.message || error); return; }
+  catch (error) { source.lastError = String((error as { message?: unknown })?.message || error); return; }
 
   const missingIdentity = source.device == null || source.inode == null;
   const rotated = !missingIdentity && (source.device !== stat.dev || source.inode !== stat.ino);
@@ -208,8 +208,8 @@ export function readSource(logPath: string) {
       source.lastError = undefined;
       source.pendingTailBytes = 0;
       source.sourceLagBytes = 0;
-    } catch (error: any) {
-      source.lastError = String(error?.message || error);
+    } catch (error) {
+      source.lastError = String((error as { message?: unknown })?.message || error);
     }
     return;
   }
@@ -244,8 +244,8 @@ export function readSource(logPath: string) {
     });
     source.pendingTailBytes = result.pendingTailBytes;
     source.sourceLagBytes = Math.max(0, result.fileSize - source.offset);
-  } catch (error: any) {
-    source.lastError = String(error?.message || error);
+  } catch (error) {
+    source.lastError = String((error as { message?: unknown })?.message || error);
     source.sourceLagBytes = Math.max(0, stat.size - source.offset);
     source.pendingTailBytes = source.sourceLagBytes;
   }
@@ -908,16 +908,47 @@ export function agentLogPath(sessionId: string, agentName: string): { file?: str
   return { file: agent.sessionFile, status: agent.status };
 }
 
+// Shape of each JSONL row parseMainConversationLog reads. The on-disk schema is
+// loose (free-form from upstream), so only the fields we actually consult are
+// declared; everything else is reachable via index access if ever needed.
+interface MainConversationRow {
+  from?: string;
+  to?: string;
+  type?: string;
+  message?: string;
+  timestamp?: string;
+}
+
+// Entry produced by parseMainConversationLog: a single message bubble with a
+// single text part. Distinct from AgentLogEntry because main-session rows
+// carry `from`/`to`/`type`/`message` headings rather than pi's content array.
+interface MainConversationEntry {
+  kind: "message";
+  role: "user" | "assistant" | "system";
+  parts: Array<{ type: "text"; text: string }>;
+  ts: string | undefined;
+}
+
+interface MainConversationLog {
+  entries: MainConversationEntry[];
+  startOffset: number;
+  offset: number;
+  size: number;
+  hasMoreBefore: boolean;
+  hasMoreAfter: boolean;
+  truncated: boolean;
+}
+
 function parseMainConversationLog(
   file: string,
   options: { after?: number; before?: number; maxBytes?: number } = {},
-): { entries: any[]; startOffset: number; offset: number; size: number; hasMoreBefore: boolean; hasMoreAfter: boolean; truncated: boolean } {
+): MainConversationLog {
   const page = readJsonlPage(file, options);
-  const entries: any[] = [];
+  const entries: MainConversationEntry[] = [];
   for (const line of page.text.split("\n")) {
     if (!line.trim()) continue;
-    let row: any;
-    try { row = JSON.parse(line); } catch { continue; }
+    let row: MainConversationRow;
+    try { row = JSON.parse(line) as MainConversationRow; } catch { continue; }
     const from = String(row.from || "assistant");
     const type = String(row.type || "message");
     const role = from === "User" ? "user" : from === "System" ? "system" : "assistant";
@@ -936,7 +967,7 @@ function parseMainConversationLog(
 export interface ThinkingEntry { agent: string; ts: string; text: string; tokens: number; }
 const thinkingTailCache = new Map<string, { offset: number; size: number; entries: ThinkingEntry[] }>();
 
-function thinkingFromEntries(agent: string, entries: any[]): ThinkingEntry[] {
+function thinkingFromEntries(agent: string, entries: ReadonlyArray<AgentLogEntry>): ThinkingEntry[] {
   const out: ThinkingEntry[] = [];
   for (const e of entries) {
     if (e.kind !== "message" || !Array.isArray(e.parts)) continue;
@@ -944,7 +975,7 @@ function thinkingFromEntries(agent: string, entries: any[]): ThinkingEntry[] {
     const tokens = Number(u.reasoning || 0) || Number(u.output || 0) || 0;
     for (const p of e.parts) {
       if (p.type === "thinking" && p.text && p.text.trim()) {
-        out.push({ agent, ts: e.ts || "", text: p.text.trim(), tokens });
+        out.push({ agent, ts: String(e.ts || ""), text: p.text.trim(), tokens });
       }
     }
   }
@@ -978,7 +1009,31 @@ export function recentThinking(sessionId: string, perAgent = 12, overall = 200):
   return out.slice(0, overall);
 }
 
-export function readAgentLog(sessionId: string, agent: string, offset: number, runId: string, before?: number): any {
+// Shape of the page returned by readAgentLog. The pagination fields
+// (startOffset/hasMoreBefore/hasMoreAfter/truncated) are populated only when the
+// function actually read a file; early returns (no file / no runs) omit them.
+// Entries are heterogeneous depending on whether the source was the main
+// conversation log (MainConversationEntry) or a per-agent run log
+// (AgentLogEntry); downstream consumers (HTTP serializer + tests) only need
+// array length/iteration, so unknown is the honest shared type.
+interface AgentLogRunRef { id: string; label: string; }
+
+interface AgentLogPage {
+  entries: ReadonlyArray<unknown>;
+  offset: number;
+  size: number;
+  startOffset?: number;
+  hasMoreBefore?: boolean;
+  hasMoreAfter?: boolean;
+  truncated?: boolean;
+  status?: string;
+  exists: boolean;
+  runs: ReadonlyArray<AgentLogRunRef>;
+  run?: string;
+  running?: boolean;
+}
+
+export function readAgentLog(sessionId: string, agent: string, offset: number, runId: string, before?: number): AgentLogPage {
   const { file: currentFile, status, main } = agentLogPath(sessionId, agent);
   if (!currentFile) return { entries: [], offset: 0, size: 0, status: status || "unknown", exists: false, runs: [] };
   const pageOptions = before != null
@@ -1002,8 +1057,8 @@ export function readAgentLog(sessionId: string, agent: string, offset: number, r
   const chosen = runs.find((r) => r.id === runId) || runs[0];
   const parsed = parseAgentLog(chosen.file, pageOptions);
   if (!CAPTURE_THINKING) {
-    parsed.entries = parsed.entries.map((entry: any) => entry.kind === "message" && Array.isArray(entry.parts)
-      ? { ...entry, parts: entry.parts.filter((part: any) => part.type !== "thinking") }
+    parsed.entries = parsed.entries.map((entry: AgentLogEntry) => entry.kind === "message" && Array.isArray(entry.parts)
+      ? { ...entry, parts: entry.parts.filter((part: AgentLogPart) => part.type !== "thinking") }
       : entry);
   }
   return {
