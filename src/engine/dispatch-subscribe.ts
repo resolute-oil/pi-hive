@@ -25,6 +25,7 @@ import {
   textOfResult,
   truncateMiddle,
 } from "../core/utils";
+import { buildSessionInfoChangedPayload } from "./telemetry-payloads";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import type { CompactionResult } from "@earendil-works/pi-coding-agent";
 import type { AgentRuntime, HiveState } from "../core/types";
@@ -204,7 +205,7 @@ export function wireDispatchSubscription(
       case "session_info_changed": {
         emitHiveEvent(state, "session_info_changed", {
           agent: runtime.config.name,
-          name: event.name ? truncateMiddle(String(event.name), 200) : undefined,
+          ...buildSessionInfoChangedPayload(event),
         }, runtime.config.name);
         break;
       }
