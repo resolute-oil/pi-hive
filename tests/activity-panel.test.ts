@@ -3,11 +3,14 @@ import { test } from "node:test";
 import { formatElapsed, headerLine, metaOf, nameHistogram, renderAgentRow, statusIcon, workOf } from "../src/ui/tui/activity.ts";
 import type { AgentRuntime } from "../src/core/types.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 
 // Minimal theme stub. The widget uses theme.fg/bold to color tokens; for unit
 // tests we only care that the formatter runs and produces a line whose visible
-// width fits the panel.
-function theme() {
+// width fits the panel. Full Theme is a 24-property object now — cast the
+// stub rather than implement the whole surface area (the tests don't read
+// anything beyond `fg` and `bold`).
+function theme(): Theme {
   const wrap = (code: string, s: string) => `\x1b[${code}m${s}\x1b[0m`;
   return {
     fg: (name: string, s: string) => {
@@ -15,7 +18,7 @@ function theme() {
       return wrap(code, s);
     },
     bold: (s: string) => `\x1b[1m${s}\x1b[0m`,
-  };
+  } as unknown as Theme;
 }
 
 function runtime(partial: Partial<AgentRuntime>): AgentRuntime {
