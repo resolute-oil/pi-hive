@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../src/core/config.ts";
+import type { BudgetsConfig } from "../src/core/schema.ts";
 
 // Every documented top-level field with a non-default value. Mirrors
 // `tmp/audit-kitchen-sink.yaml` so this test exercises the same surface
@@ -152,6 +153,12 @@ test("loadConfig accepts a kitchen-sink YAML with every documented field", () =>
   // missing.
   const cwd = kitchenSinkFixture();
   const config = loadConfig(cwd);
+  // The loader's `loadConfig` types `settings.budgets` as
+  // `BudgetsConfig | { cap: number; ... } | undefined` because its return
+  // shape union-includes the raw-parsed fallback. Runtime guarantees
+  // `BudgetsConfig` for the kitchen sink (validator path), so narrow for
+  // the `resource:` discriminator assertions below.
+  const budgets = config.settings.budgets as BudgetsConfig | undefined;
 
   // settings.* defaults (the kitchen sink overrides every default value).
   assert.equal(config.settings.subagentOutputLimit, 12_000);
@@ -159,7 +166,7 @@ test("loadConfig accepts a kitchen-sink YAML with every documented field", () =>
   assert.deepEqual(config.settings.secretPaths, [".env", ".env.local"]);
   assert.equal(config.settings.distiller.enabled, true);
   assert.equal(config.settings.distiller.model, "anthropic/claude-haiku-4-5");
-  assert.equal(config.settings.telemetry.retentionDays, 30);
+  assert.equal(config.settings.telemetry?.retentionDays, 30);
   // `maxParallel` and `queueSize` are deliberately settable; the kitchen
   // sink sets both so the loader accepts the values verbatim.
   assert.equal(config.settings.maxParallel, 4);
@@ -167,16 +174,16 @@ test("loadConfig accepts a kitchen-sink YAML with every documented field", () =>
 
   // budgets lands with the validated (post-discriminator-injection) shape
   // and the configured `resource:` tags.
-  assert.ok(config.settings.budgets, "budgets validated and assigned to settings.budgets");
-  assert.equal(config.settings.budgets?.perWorker.tokens?.cap, 1000);
-  assert.equal(config.settings.budgets?.perWorker.tokens?.resource, "tokens");
-  assert.equal(config.settings.budgets?.perTeam.tokens?.cap, 10_000);
-  assert.equal(config.settings.budgets?.perTeam.tokens?.resource, "tokens");
-  assert.equal(config.settings.budgets?.perWorker.depth?.cap, 2);
-  assert.equal(config.settings.budgets?.perWorker.depth?.resource, "depth");
-  assert.equal(config.settings.budgets?.strategies?.onExhaustion.action, "abort");
-  assert.equal(config.settings.budgets?.strategies?.onApproachingLimit.threshold, 0.2);
-  assert.equal(config.settings.budgets?.strategies?.summary.maxTokens, 2000);
+  assert.ok(budgets, "budgets validated and assigned to settings.budgets");
+  assert.equal(budgets?.perWorker?.tokens?.cap, 1000);
+  assert.equal(budgets?.perWorker?.tokens?.resource, "tokens");
+  assert.equal(budgets?.perTeam?.tokens?.cap, 10_000);
+  assert.equal(budgets?.perTeam?.tokens?.resource, "tokens");
+  assert.equal(budgets?.perWorker?.depth?.cap, 2);
+  assert.equal(budgets?.perWorker?.depth?.resource, "depth");
+  assert.equal(budgets?.strategies?.onExhaustion?.action, "abort");
+  assert.equal(budgets?.strategies?.onApproachingLimit?.threshold, 0.2);
+  assert.equal(budgets?.strategies?.summary?.maxTokens, 2000);
 
   // Both teams parsed; the planning team's main and a single agent are
   // present, the hive team has main + 2 agents.
@@ -210,7 +217,7 @@ test("loadConfig accepts a kitchen-sink YAML without a settings: block (defaults
   assert.deepEqual(config.settings.secretPaths, [], "secretPaths defaults to empty");
   assert.equal(config.settings.distiller.enabled, false, "absent distiller: defaults to enabled=false (opt-in)");
   assert.equal(config.settings.distiller.model, "", "absent distiller.model stays empty");
-  assert.equal(config.settings.telemetry.retentionDays, 30, "default telemetry retention");
+  assert.equal(config.settings.telemetry?.retentionDays, 30, "default telemetry retention");
   assert.equal(config.settings.maxParallel, undefined, "no cap by default — dispatcher skips the parallel branch");
   assert.equal(config.settings.queueSize, undefined, "no queue by default — dispatcher skips the queue branch");
   // Top-level budgets is independent of settings: and still validates.
@@ -287,9 +294,9 @@ test("loadConfig accepts a kitchen-sink YAML without a telemetry: block", () => 
   writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), yaml);
 
   const config = loadConfig(cwd);
-  assert.equal(config.settings.telemetry.enabled, true, "default enabled=true");
-  assert.equal(config.settings.telemetry.retentionDays, 30, "default retentionDays=30");
-  assert.equal(config.settings.telemetry.dashboardAutoStart, true, "default dashboardAutoStart=true");
+  assert.equal(config.settings.telemetry?.enabled, true, "default enabled=true");
+  assert.equal(config.settings.telemetry?.retentionDays, 30, "default retentionDays=30");
+  assert.equal(config.settings.telemetry?.dashboardAutoStart, true, "default dashboardAutoStart=true");
 });
 
 test("loadConfig accepts a kitchen-sink YAML without a distiller: block (opt-in default)", () => {
