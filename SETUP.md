@@ -115,7 +115,7 @@ Create exactly this structure under the project root. Each agent lives in its ow
   sessions/                             # runtime-generated; do NOT hand-create. gitignore it.
 ```
 
-An `operations/` folder follows the same shape. Operations typically has at least one `coder`-typed member to perform the actual remote git/PR writes; the lead itself is `agent-type: lead` and is read-only per §7.1.
+An `operations/` folder follows the same shape. Operations sits in the `lead` tier and is read-only by type policy (§7.1). It owns the lifecycle that crosses the worktree boundary — HANDOFF rotation, worktree create/remove, preflight, push, PR open/close/merge — by routing each stage through at least one `coder`-typed member with `network: true` (typically `git-operator`). The lead is the single routing target and the single audit `groupName`; the member is the worker session that performs the write. A follow-up `agent-type: operations` tier may let the lead write directly; until it ships, this delegation pattern is the supported shape.
 
 Conventions:
 - Folder & file stems are the agent name in **kebab-case** (`Backend Dev` → `backend-dev/backend-dev.md`).
@@ -312,10 +312,12 @@ hive:
             - name: <Member>
               color: "#a6e3a1"
               path: .pi/hive/agents/<lead-b>/<sub-lead>/<member>/<member>.md
-      # Operations lead (optional). Owns worktree lifecycle, remote git, PR
-      # open/close, and the HANDOFF cycle. Routes its writes through
-      # coder-typed members — the lead itself is agent-type: lead and is
-      # read-only per §7.1.
+      # Operations lead (optional). Owns the cross-worktree lifecycle:
+      # worktree create/remove, remote git, PR open/close/merge, and the
+      # HANDOFF cycle. Sits in the `lead` tier (read-only per §7.1); every
+      # remote-write step lands in a `coder`-typed member with `network: true`
+      # (e.g. `git-operator`) that Operations delegates to. The `git-operator`
+      # member owns the actual `git push` / `gh pr *` calls.
       - name: Operations
         color: "#fab387"
         path: .pi/hive/agents/operations/operations.md
@@ -454,7 +456,7 @@ Agent type is **separate from the derived tree role** (orchestrator/lead/member)
 | `coder` | `code` / `docs` / `tasks` — **never `spec`** | no | only if it has a `commit:` field | Implements production code and tests **within its domain**. |
 | `tester` | tests (drawn by its domain `include`/`exclude` globs) | no | only with `commit:` | Writes tests, not production code. |
 | `reviewer` | **nothing (read-only)** — explicit inspection-command allowlist only | **yes** — `submit_review_verdict` (reviewer-only tool) | no | Reads and reviews; delegates tests to a tester; submits a structured red/yellow/green verdict. |
-| `lead` | **nothing (read-only)** — explicit inspection-command allowlist only | no | no | Delegates and coordinates. Includes the orchestrator. An Operations lead is `agent-type: lead` and inherits this read-only surface; it owns remote-git, PR, and worktree flows via its `coder`-typed members, not by editing the working tree directly. |
+| `lead` | **nothing (read-only)** — explicit inspection-command allowlist only | no | no | Delegates and coordinates. Includes the orchestrator. The `lead` tier is blocked from mutations at both the type-policy layer (`WRITABLE_CLASSES[lead] === []` in `src/engine/policy.ts`) and the bash gate (`readOnlyType === lead` in `src/engine/domain.ts`). Operations sits in this tier and owns the cross-worktree lifecycle (HANDOFF rotation, worktree create/remove, preflight, push, PR open/close/merge) by routing each lifecycle stage through a `coder`-typed member — typically `git-operator` — whose `domain:`/`network:` grant the actual write authority. The lead is the single audit `groupName`; the member is the worker session that touches refs and the GitHub API. |
 
 **Two layers gate every mutation; both must pass.** (1) The **domain** globs (§8) — "may this agent touch this path at all?" (2) The **type policy** — "may this *type* perform this *action* on this *kind of file?" So a `coder` whose domain allows the project root still cannot write an `openspec/changes/**` artifact (wrong type), and a `planner` cannot write `src/**` even if its domain allows it (wrong type × class).
 
@@ -643,7 +645,7 @@ You are the only user-facing voice. You route work, coordinate leads, preserve t
 
 ## Operating Principles
 - Do not pretend to inspect files or run commands yourself. Delegate substantive work to the team leads.
-- Delegate to the top-level team leads for coordinated work. For read-only inspections (asking a typed specialist to look at a specific file or component), you may also delegate directly to any agent whose `agent-type` is in {coder, tester, reviewer, planner}. `Operations` remains the preferred owner of HANDOFF cycle rotation, worktree create, preflight, push, and PR-open — prefer routing those there.
+- Delegate to the top-level team leads for coordinated work. For read-only inspections (asking a typed specialist to look at a specific file or component), you may also delegate directly to any agent whose `agent-type` is in {coder, tester, reviewer, planner}. `Operations` remains the preferred owner of HANDOFF cycle rotation, worktree create, preflight, push, and PR open/close/merge — prefer routing those there. Operations delegates each remote-write step to a `git-operator` (or other `coder`-typed) member under it; this is the current-runtime shape for the lifecycle lead, not a workaround.
 - Use the smallest useful pattern: one lead for bounded work, multiple leads for cross-cutting or high-risk work.
 - Give each delegation a focused objective, the expected output shape, and relevant constraints.
 - Ask for evidence and file paths when code is involved. Resolve disagreement explicitly.
@@ -654,7 +656,7 @@ Return: **Answer** (direct conclusion), **What I delegated** (when useful), **Ke
 
 ### 9b. Team lead (`agents/<lead>/<lead>.md`)
 
-If the team you're authoring is the Operations lead, see §9b.1.
+If the team you're authoring is the Operations lead, see §9b.1 for the persona template and the transitional `lead` + `git-operator` member pattern (the lead tier is read-only by type policy — every remote-write step is a delegated member dispatch, not a direct write from the lead session).
 
 ```markdown
 ---
@@ -743,16 +745,16 @@ context:
   - path: .pi/hive/knowledge/behavior-active-listener.md
     use-when: Always.
   - path: .pi/hive/knowledge/behavior-zero-micromanagement.md
-    use-when: Always. You coordinate the lifecycle, never perform remote writes yourself.
+    use-when: Always. You coordinate the lifecycle; the lead tier is read-only, so every remote-write step lands in a `git-operator` member.
   - path: .pi/hive/knowledge/operations-handoff-contract.md
-    use-when: Driving a HANDOFF cycle, worktree create/remove, preflight, push, or PR-open/close.
+    use-when: Driving a HANDOFF cycle, worktree create/remove, preflight, push, or PR-open/close/merge.
 skills:
   - path: .pi/hive/skills/git-worktree-lifecycle/SKILL.md
     use-when: Creating, removing, or resolving a `_conflict-<change-id>` worktree.
   - path: .pi/hive/skills/git-push-preflight/SKILL.md
     use-when: Pushing a worktree's branch to its upstream.
   - path: .pi/hive/skills/pull-request-lifecycle/SKILL.md
-    use-when: Opening, updating, or closing a PR.
+    use-when: Opening, updating, closing, or merging a PR.
 domain:
   - path: .worktrees/
     read: true
@@ -761,7 +763,7 @@ domain:
   - path: .git/
     read: true
     upsert: false
-    delete: false   # worktree list, branch refs, FETCH_HEAD — read-only
+    delete: false   # lead tier is read-only by type policy — refs/PR-state writes run in `git-operator`
   - path: .
     read: true
     upsert: false
@@ -774,29 +776,32 @@ routing-tags:
   - push
   - pull request
   - preflight
-consult-when: HANDOFF cycle rotation, worktree create/remove, preflight, git push, PR open/close.
+consult-when: HANDOFF cycle rotation, worktree create/remove, preflight, git push, PR open/close/merge.
 responsibilities:
   - Drive the HANDOFF cycle: rotate HANDOFF.md at hive→normal handoff.
-  - Own worktree lifecycle: `git worktree add .worktrees/<change-id>/…`, `git worktree remove`, and the `_conflict-<change-id>` reconciliation tree.
+  - Own the worktree lifecycle: route `git worktree add .worktrees/<change-id>/…`, `git worktree remove`, and the `_conflict-<change-id>` reconciliation through `git-operator`.
   - Run preflight: artifact-hash and CI-green checks before pushing.
-  - Open, update, and close PRs (`gh pr create` / `gh pr close`); never merge.
-  - Delegate every remote git and file-system edit to a coder-typed member.
+  - Open, update, close, and merge PRs (`gh pr create` / `gh pr close` / `gh pr merge`) through `git-operator`.
+  - Surface the destructive subset (`git push --force`, `git worktree remove`, `gh pr merge` to the default branch) to the Operator before the call — confirmation flow lives in `.pi/hive/knowledge/operations-handoff-contract.md`, not in pi-hive's runtime.
+  - Keep every lifecycle stage a separate member dispatch; never chain two writes into a single call.
 ---
 
 You are the Operations lead for this project's hive.
 
 ## Role
-You own the lifecycle that crosses the worktree boundary: HANDOFF rotation, worktree create/remove, preflight, push, and PR open/close. You are read-only yourself (`agent-type: lead`); all writes run in your coder-typed members. You never merge — that is the Operator's call.
+You own the lifecycle that crosses the worktree boundary: HANDOFF rotation, worktree create/remove, preflight, push, and PR open/close/merge. You are read-only yourself (`agent-type: lead`); every write and every network call runs in a `git-operator` member (`agent-type: coder`, `network: true`) that you delegate to. You are the single routing target and the single audit `groupName` for these flows — the member is the worker session, you are the coordinator.
 
 ## Conventions
 - One delegation per lifecycle stage; never chain two writes into a single member dispatch.
 - Always declare the `<change-id>` and any `_conflict-<id>` suffix in the delegation objective.
-- Surface `git push --force` and `git worktree remove` decisions to the Operator before the call.
+- Surface destructive operations (`git push --force`, `git worktree remove`, `gh pr merge` to the default branch) to the Operator before the member runs them; the confirmation flow is a project convention carried in `.pi/hive/knowledge/operations-handoff-contract.md` (e.g. an `ask_user` prompt or a comment in the dispatch objective), not a runtime gate.
 - Route HANDOFF-summary call (`hive_cycle_summary`) when entering/exiting hive mode.
 
 ## Response Contract
 Return: **Lifecycle stage**, **Member delegated**, **Inputs/outputs**, **Pre/post state**, **Operator confirmation needed** (if any).
 ```
+
+> **Transitional note.** The current runtime treats `lead` as fully read-only (`WRITABLE_CLASSES[lead] === []` and `readOnlyType === lead` at the bash gate), so the persona above routes every lifecycle write through a `git-operator` coder-typed member. A follow-up release will add an `agent-type: operations` tier that lets the lead itself perform `git push`, `gh pr create`/`close`/`merge`, and `git worktree add`/`remove` directly; once that lands, the same persona template can set `agent-type: operations` and grant its own `domain:`/`network:` instead of delegating to a member. Until then, treat this template as the canonical Operations shape.
 
 ### 9c. Member / specialist (`agents/<lead>/<member>/<member>.md`)
 
@@ -1007,7 +1012,7 @@ Naming: prefix by scope — `behavior-*` (cross-cutting), `<role>-*` (role-owned
 - [ ] Every agent `skills:` entry points to a Pi-loadable skill file or directory; only these explicit skills are exposed to that worker.
 - [ ] The local telemetry dashboard auto-starts when enabled (Bun required), binds to loopback by default, and requires bearer authentication for writes. `/hive:observe` force-restarts + opens it, `/hive:observe-stop` performs authenticated teardown, and `/hive:observe-prune <days>` prunes SQLite rows (not project JSONL). It is a shared daemon, survives individual session shutdown, adopts only an exact compatible identity, and exits after bounded idle time.
 - [ ] All YAML keys are kebab-case; no tabs; consistent 2-space indentation.
-- [ ] If `Operations` is a configured lead, its `agent-type` is `lead`, it has at least one `coder`-typed member that owns remote-git/PR writes, and its `routing-tags` include at least `handoff`, `worktree`, `push`, `pull request`, and `preflight` (matching §9b.1).
+- [ ] If `Operations` is a configured lead, its `agent-type` is `lead` (the lead tier is read-only at the type-policy layer — see §7.1), it has at least one `coder`-typed member with `network: true` (typically `git-operator`) that owns the actual remote-git/PR/merge calls, and its `routing-tags` include at least `handoff`, `worktree`, `push`, `pull request`, and `preflight` (matching §9b.1). The `Operations` lead does not list `edit`/`write` in its `tools:` block.
 
 **Quick scaffold sanity check** (run after building):
 ```bash
@@ -1027,6 +1032,7 @@ done
 
 - **Declaring tree roles or delegation permissions in frontmatter.** The *tree role* (orchestrator/lead/member) and delegation permissions are derived from the `members` nesting in `hive-config.yaml`. Don't add `role:` or `allowed-agents:` to frontmatter. (The `agent-type` capability field **is** required in frontmatter — that's a different axis; see §7.1. The agent-type axis widens `canDelegateTo` to reach typed specialists directly, but `lead`-typed agents stay tree-bound — they don't get the widening even though their `agent-type` is also declared in frontmatter.)
 - **Giving a lead or the orchestrator a mutating agent-type.** Leads (including the orchestrator) are `agent-type: lead`; registered mutation tools deny their writes. Route all edits to `coder`/`tester` members.
+- **Expecting the `Operations` lead itself to run `git push`, `gh pr create`/`close`/`merge`, or `git worktree add`/`remove`.** The `lead` tier is read-only at both the type-policy layer and the bash allowlist gate. Operations routes every lifecycle write through a `git-operator` (or other `coder`-typed) member under it; the member carries the `network: true` flag and the matching `upsert: true`/`delete: true` domain grant. Operations is the audit `groupName` and the single routing target — it is not the worker session that touches refs or the GitHub API. A follow-up `agent-type: operations` tier will let Operations write directly; until it ships, this delegation pattern is the only supported shape.
 - **Giving the orchestrator file tools.** It routes and synthesizes only.
 - **Granting `edit`/`write` without a matching `upsert` domain** (or vice versa) — the agent will be blocked or unable to act.
 - **Telling agents to read the whole shared conversation log.** `team_conversation` is scoped per-agent on purpose; bulk reads blow up context.
@@ -1038,4 +1044,6 @@ done
 - **Setting `budgets.per-worker.tokens.window: per-day`.** Only the team tier accepts `per-day` (it's a per-UTC-day cap, which is a team-aggregate concept). The worker tier forbids both `per-day` and `per-team-lifetime`; both names mean "this resource rolls over beyond one worker session." Pin per-day limits on the team tier instead.
 - **Setting `tokens.include: [...]` with non-`Usage` keys.** The only valid values are the Pi `Usage` keys: `input`, `output`, `cacheRead`, `cacheWrite`, `reasoning`. Anything else fails the typebox schema at load with an `expected one of input, output, cacheRead, cacheWrite, reasoning` error pointing at the index. Don't try to add a custom key for cache accounting — the SDK already reports the relevant signal under one of the five canonical keys.
 - **Setting both `budgets.per-worker.context.tokens` AND `budgets.per-worker.context.percent`.** The `context:` constraint accepts **exactly one** of `tokens:` (nominal cap) or `percent:` (fill on the 0–100 scale). Setting both, or neither, fails at config-load with a path-bearing error pointing at the offending tier. This is enforced by `validateBudgetsConfig` post-typebox (see `src/core/schema.ts`).
-- **Hand-rolling remote-git or PR work in a `coder` member that is not under Operations.** Remote writes that cross the worktree boundary (push, merge gate, PR open/close, HANDOFF rotation) belong under the Operations lead, not under Engineering or Validation. Treat those lifecycles as a single routing target so the audit log captures them under one `groupName`.
+- **Hand-rolling remote-git or PR work in a `coder` member that is not under Operations.** Remote writes that cross the worktree boundary (push, merge gate, PR open/close, HANDOFF rotation) belong under the Operations lead, not under Engineering or Validation. The actual `git push` / `gh pr *` calls run in Operations' `git-operator` member (or another `coder`-typed member under Operations); the audit log captures them under Operations' `groupName`. A `coder` outside Operations performing the same calls defeats the routing/audit invariant and is treated as a regression.
+- **`Operations` doing `push`/`pull request` work itself with no member.** Operations is `agent-type: lead` and read-only; every lifecycle write is a member dispatch. See §7.1 and §9b.1.
+- **Granting `network: true` to `Operations` itself.** The lead runs read-only; only the `git-operator` (or other executing) member needs network access.
