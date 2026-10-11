@@ -105,6 +105,22 @@ function itemTitle(item: ActivityItem): string {
     case "queue_update": return p.workerQueue != null ? `Worker queue: ${p.workerQueue}` : `Queue: ${p.steering ?? 0} steering · ${p.followUp ?? 0} follow-up`;
     case "budget_warning": return `${p.scope || "worker"} ${p.resource || "resource"} budget low`;
     case "budget_exhausted": return `${p.scope || "worker"} ${p.resource || "resource"} budget exhausted`;
+    // Per-delegation domain override lifecycle (U2). The grant/revoke event
+    // type is shown via the surrounding `tl-type` label; the title names the
+    // write-capable agent that issued the grant when it is an operations
+    // dispatcher (R8). The orchestrator fallback renders the prior default
+    // behavior (the literal event type) so existing consumers see no change
+    // for the common path, only operations-dispatched grants get the new
+    // distinguishing wording. See src/engine/dispatch.ts:498 and
+    // src/shared/telemetry.ts TelemetryAgentRole for the source.
+    case "domain_override.granted":
+      return p.dispatcherRole === "operations"
+        ? `Operations granted scope to ${p.worker || "worker"}`
+        : e.type;
+    case "domain_override.revoked":
+      return p.dispatcherRole === "operations"
+        ? `Operations revoked scope (${p.terminationReason || "return"})`
+        : e.type;
     default: return e.type;
   }
 }
@@ -137,6 +153,21 @@ function itemTruncated(item: ActivityItem): boolean {
   if (item.kind === "tool") return (item.end || item.start)?.payload?.truncated === true;
   if (item.kind === "event") return item.event?.payload?.truncated === true;
   return false;
+}
+
+// Distinguish the operations-dispatched domain-override lifecycle from
+// the orchestrator-dispatched shape (R8). The badge sits next to
+// `tl-type` on grant/revoke rows so a reader can tell at a glance
+// whether the write-capable agent (operations, capable of direct lifecycle
+// writes on the new tier) or the orchestrator issued the grant. The
+// orchestrator / missing role falls back to the prior plain rendering.
+function dispatcherRoleBadge(item: ActivityItem): { label: string; className: string } | null {
+  if (item.kind !== "event") return null;
+  const e = item.event;
+  if (e?.type !== "domain_override.granted" && e?.type !== "domain_override.revoked") return null;
+  const role = e?.payload?.dispatcherRole;
+  if (role === "operations") return { label: "operations", className: "role-badge role-badge-operations" };
+  return null;
 }
 export default function Activity(props: { search: string }) {
   const scopedEvents = useHive((s) => s.scopedEvents);
@@ -354,10 +385,12 @@ export default function Activity(props: { search: string }) {
               const succeeded = !errored && item.kind === "tool" && !!item.end;
               const summary = itemSummary(item);
               const truncated = itemTruncated(item);
+              const roleBadge = dispatcherRoleBadge(item);
               return (
                 <article key={item.id} className={`activity-box ${errored ? "err" : succeeded ? "ok" : ""}`} style={{ "--agent-color": color } as React.CSSProperties}>
                   <button type="button" className="activity-event-head" aria-expanded={expanded} onClick={() => toggle(item.id)}>
                     <span className="tl-type">{item.type}</span>
+                    {roleBadge && <span className={roleBadge.className} title="Operations-dispatched (the lifecycle lead on the agent-type: operations tier)">{roleBadge.label}</span>}
                     {errored ? <span className="outcome err" title="failed">✗</span>
                       : succeeded ? <span className="outcome ok" title="succeeded">✓</span> : null}
                     <b>{itemTitle(item)}</b>
