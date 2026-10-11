@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { auditAgentTypes } from "../src/core/agent-type-audit.ts";
+import { auditAgentTypes, inferAgentType } from "../src/core/agent-type-audit.ts";
 
 function fixture(config: string): string {
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-agent-audit-"));
@@ -71,4 +71,9 @@ hive:
   assert.equal(audit.rows.find((row) => row.name === "Inline Lead")?.valid, true);
   assert.equal(audit.rows.find((row) => row.name === "No Path Coder")?.valid, true);
   assert.equal(audit.rows.find((row) => row.name === "Missing File")?.declared, undefined);
+});
+
+test("inferAgentType suggests operations for lifecycle-flavored names", () => {
+  assert.equal(inferAgentType("Operations Lead", false, false), "operations");
+  assert.equal(inferAgentType("Lifecycle Lead", false, false), "operations");
 });

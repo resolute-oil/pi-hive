@@ -29,6 +29,7 @@ export function inferAgentType(name: string, hasReports: boolean, isOrchestrator
   const text = name.toLowerCase();
   // Order matters: "test"/"verify" is checked before "review"/"qa" so a
   // "QA Tester" resolves to tester, not reviewer.
+  if (/operations|lifecycle/i.test(text)) return "operations";
   if (/test|verif/.test(text)) return "tester";
   if (/review|audit|security|\bqa\b/.test(text)) return "reviewer";
   if (/plan|product|requirement|spec|design/.test(text)) return "planner";

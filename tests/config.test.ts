@@ -546,6 +546,13 @@ test("loadConfig hard-fails on an invalid agent-type", () => {
   assert.throws(() => loadConfig(cwd), /agent-type must be one of/);
 });
 
+test("loadConfig accepts agent-type: operations on the operations tier", () => {
+  const cwd = typedFixture("agent-type: lead", "agent-type: operations");
+  assert.doesNotThrow(() => loadConfig(cwd));
+  const cfg = loadConfig(cwd);
+  assert.equal(cfg.agents[0].agentType, "operations");
+});
+
 test("loadConfig rejects stages on a non-planner", () => {
   const cwd = typedFixture("agent-type: lead", "agent-type: coder\nstages: [design]");
   assert.throws(() => loadConfig(cwd), /stages is only valid on an agent-type: planner/);
