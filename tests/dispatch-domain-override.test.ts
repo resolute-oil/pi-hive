@@ -344,7 +344,26 @@ test("dispatchAgent U2 AE6/R7 — two concurrent dispatches produce two distinct
   assert.equal(grantIds.size, 2, "delegationIds must be distinct across concurrent dispatches");
   assert.deepEqual(grantIds, revokeIds, "every grant delegationId must have a matching revoke");
   for (const r of rs) assert.equal(r.payload.terminationReason, "return", "clean finish ⇒ return");
-  assert.equal(state.activeOverrides, undefined, "activeOverrides must be undefined after both revokes");
+  // End-state KTD4 plumbing: with save/restore (M1), each dispatch
+  // revokes by restoring whatever was active at ITS grant time. For
+  // concurrent dispatches, the LATER granter snapshots the EARLIER
+  // granter's grant, so if the later granter revokes last, the end
+  // state is the earlier granter's grant (saved by the later granter).
+  // The earlier granter's saved value was undefined, so if it revokes
+  // last the end state is undefined. The end state is therefore
+  // well-defined but order-dependent — either undefined (earlier
+  // granter revokes last) or one of the two grants (later granter
+  // revokes last, restoring the earlier granter's grant). Reject any
+  // value outside this set as a save/restore regression.
+  const finalState = state.activeOverrides;
+  const finalDelegationId = finalState?.delegationId;
+  const finalIsValid =
+    finalState === undefined ||
+    grantIds.has(finalDelegationId);
+  assert.ok(
+    finalIsValid,
+    `activeOverrides must be undefined or one of the two concurrent grants; got delegationId=${finalDelegationId} (grants=${[...grantIds].join(",")})`,
+  );
 });
 
 // ── AE2 termination paths — return, error, abort, budget-exhausted, queue-cancelled, crash ──
@@ -584,16 +603,46 @@ test("dispatchAgent U2 AE8 — nested delegate_agent produces two distinct grant
   // child's `dispatchAgent` call before resolving — this is the SDK's
   // `delegate_agent` tool running inside the parent's worker session
   // in production (single-threaded JS event loop).
-  const childCreate: CreateAgentSession = (async () => ({ session: cleanSession() })) as any;
+  //
+  // The child session is wrapped in a `capturingSession` so the test
+  // can observe `state.activeOverrides` mid-child-dispatch (capture
+  // #2 below): the override branch sets the child's grant BEFORE the
+  // try block runs `runPromptAndFinalize` → `session.prompt()`, so the
+  // very first thing this mock prompt observes is the child's grant
+  // active. After this mock resolves, the child's finally restores the
+  // parent's grant, which is what capture #3 observes inside the
+  // parent's prompt.
+  const activeOverridesSnapshots: Array<{ label: string; value: any }> = [];
+  const childCreate: CreateAgentSession = (async () => ({
+    session: capturingSession({
+      prompt: async () => {
+        activeOverridesSnapshots.push({ label: "inside-child-prompt-after-child-grant", value: state.activeOverrides });
+      },
+    }),
+  })) as any;
   const parentCreate: CreateAgentSession = (async () => ({
     session: capturingSession({
       prompt: async () => {
         await dispatchAgent(state, "Child", "child task", ctx, childCreate, undefined, undefined, childOverride);
+        // After the child's dispatch returns, the child's finally has
+        // restored `state.activeOverrides` to the parent's grant (the
+        // save/restore in dispatch.ts). The parent's prompt is still
+        // in flight, so the parent's grant is the live value here.
+        activeOverridesSnapshots.push({ label: "inside-parent-prompt-after-child-revoke", value: state.activeOverrides });
       },
     }),
   })) as any;
 
+  // Capture #1: before parent dispatch. No prior grant has set the
+  // field, so the live value is `undefined`.
+  activeOverridesSnapshots.push({ label: "before-parent-dispatch", value: state.activeOverrides });
+
   const result = await dispatchAgent(state, "Parent", "parent task", ctx, parentCreate, undefined, undefined, parentOverride);
+
+  // Capture #4: after both dispatchers return. The parent's finally
+  // restored to `undefined` (no grandparent), so the live value is
+  // `undefined` again.
+  activeOverridesSnapshots.push({ label: "after-both-return", value: state.activeOverrides });
 
   assert.equal(result.exitCode, 0, "nested parent dispatch should exit 0; output=" + result.output);
 
@@ -643,4 +692,28 @@ test("dispatchAgent U2 AE8 — nested delegate_agent produces two distinct grant
   // `activeOverrides` is undefined after both delegations end — no
   // global residue leaks to subsequent dispatches.
   assert.equal(state.activeOverrides, undefined, "activeOverrides must be undefined after the outer revoke");
+
+  // Save/restore round-trip across nested delegation — pin each of
+  // the four checkpoints' live value so the M1 fix can't silently
+  // regress to "always undefined" (the old finally) without the test
+  // catching it. Reads from the live `state` object; never mutates it.
+  // The captures are ordered: before parent → during child → after
+  // child returns (parent still in flight) → after both return.
+  const findSnap = (label: string) => {
+      const snap = activeOverridesSnapshots.find((s) => s.label === label);
+      assert.ok(snap, `capture #${label} must be recorded; got labels: ${activeOverridesSnapshots.map((s) => s.label).join(", ")}`);
+      return snap!;
+    };
+  const beforeParent = findSnap("before-parent-dispatch");
+  assert.equal(beforeParent.value, undefined, "before parent dispatch: activeOverrides must be undefined (no prior grant)");
+  const childInsidePrompt = findSnap("inside-child-prompt-after-child-grant");
+  assert.ok(childInsidePrompt.value, "during child prompt (after child grant fired, before child revoke): activeOverrides must be the child's grant");
+  assert.equal(childInsidePrompt.value.delegationId, childGrant.payload.delegationId, "during child prompt: activeOverrides.delegationId must match the child's grant");
+  assert.equal(childInsidePrompt.value.worker, "child", "during child prompt: activeOverrides.worker must be 'child'");
+  const parentInsidePrompt = findSnap("inside-parent-prompt-after-child-revoke");
+  assert.ok(parentInsidePrompt.value, "after child revoke but inside parent prompt: activeOverrides must be restored to the parent's grant");
+  assert.equal(parentInsidePrompt.value.delegationId, parentGrant.payload.delegationId, "after child revoke: activeOverrides.delegationId must match the parent's grant (save/restore round-trip)");
+  assert.equal(parentInsidePrompt.value.worker, "parent", "after child revoke: activeOverrides.worker must be 'parent'");
+  const afterBoth = findSnap("after-both-return");
+  assert.equal(afterBoth.value, undefined, "after both dispatchers return: activeOverrides must be undefined (parent restored to no-grant)");
 });

@@ -163,6 +163,12 @@ function preflightCheck(opts: {
         return { output: `Delegation blocked: domain_override entry "${entry.path}" targets reserved path: ${reservedDecision.reason}. The override cannot loosen the reserved-paths fence.`, exitCode: 1, elapsed: 0 };
       }
     }
+    // Hoisted from R14/R15 below: both predicates need the resolved
+    // governance object, so compute once at the top of the override
+    // branch and reuse. `effectiveWorkerGovernance` reads from the
+    // merged runtime + state config; calling it twice would duplicate
+    // that work for no benefit.
+    const governance = effectiveWorkerGovernance(state, runtime);
     // R14: budget expansion. If the merged scope would grant writes that
     // exceed the worker's static `tokenBudget`/`costBudgetUsd`/`maxRuns`
     // caps, reject. The static budget is the floor; the override cannot
@@ -174,7 +180,23 @@ function preflightCheck(opts: {
     // spend) is also caught: if the override widens writes, the effective
     // spend ceiling is unchanged but the worker's authority surface is
     // bigger — reject to surface the inconsistency.
-    const governance = effectiveWorkerGovernance(state, runtime);
+    // FIXME: this is a STRUCTURAL fingerprint guardrail, not a real cost
+    // check. The predicate rejects purely on "expanded write scope" +
+    // "structural path-set" — it does NOT compare estimated tool-token
+    // consumption against `state.config.settings.workerBudgets`. A real
+    // budget-expansion check would have to model per-call tool-token cost
+    // against the worker's configured `tokenBudget` / `costBudgetUsd` /
+    // `maxRuns` to detect that the override multiplies the spend ceiling.
+    // That modeling is out of scope for this PR; the structural check is
+    // a coarse-grained fence that catches the obvious widen-write-while-
+    // raise-cap pattern without claiming to be a sound budget verifier.
+    // Limitation, made explicit: an orchestrator that legitimately wants
+    // to grant `tokenBudget: 100_000` on a path NOT in the worker's
+    // static upsert set will be blocked here, even though the override
+    // does not actually inflate the configured budget. The check treats
+    // budget-presence + write-expansion as a single rejection event so
+    // static config can't drift into "wider writes, same ceiling" without
+    // surfacing the inconsistency at dispatch time.
     const staticUpsertPaths = new Set((runtime.config.domain || []).filter((scope) => scope.upsert || scope.delete).map((scope) => scope.path));
     const expandedPaths = override.filter((entry) => (entry.upsert || entry.delete) && !staticUpsertPaths.has(entry.path));
     if (expandedPaths.length > 0 && (governance.tokenBudget !== undefined || governance.costBudgetUsd !== undefined || governance.maxRuns !== undefined)) {
@@ -184,8 +206,9 @@ function preflightCheck(opts: {
     // `currentDelegationDepth() + 1 > policy.worker.depth.cap` inside the
     // inner `delegateAgentFn` (which throws BudgetExhaustedError). Mirror
     // the check here so the pre-flight rejection message is the canonical
-    // "delegation blocked" shape, not the budget-exhausted shape.
-    const depthCap = effectiveWorkerGovernance(state, runtime).maxDelegationDepth;
+    // "delegation blocked" shape, not the budget-exhausted shape. Reuses
+    // the hoisted `governance` local from R14.
+    const depthCap = governance.maxDelegationDepth;
     if (depthCap !== undefined && currentDelegationDepth() + 1 > depthCap) {
       return { output: `Delegation blocked: domain_override cannot exceed the worker delegation depth cap (${depthCap}). Current depth is ${currentDelegationDepth()}.`, exitCode: 1, elapsed: 0 };
     }
@@ -406,11 +429,14 @@ export async function dispatchAgent(
   // event fires, and `state.activeOverrides` is never set, so downstream
   // enforcement reads the static config unchanged.
   //
-  // KTD4 plumbing: the merged scope lives on `state.activeOverrides`
-  // (read by `enforceDomainForTool` via U3; not mutated by U2 again
-  // until the finally block clears it). Nested delegations (AE8)
-  // overwrite this field on entry; the outer scope is restored when the
-  // inner delegation revokes.
+  // KTD4 plumbing: `state.activeOverrides` is the merged scope that
+  // `enforceDomainForTool` reads at every tool call (via U3); this
+  // override branch is the SOLE writer of that field. Nested
+  // delegations (AE8) save the outer scope on entry and restore it on
+  // inner revoke, so the parent's merged-scope view is intact for the
+  // parent's remaining tool turns after the child returns. The first
+  // entry (no parent grant) snapshots `undefined` and restores
+  // `undefined`, preserving the prior post-grant cleanup.
   //
   // Q8 lock: `staticReference` is a sha256 digest of `runtime.config.domain`
   // captured at GRANT TIME only. The auditor's job is to recompute
@@ -420,6 +446,13 @@ export async function dispatchAgent(
   const overrideActive = Array.isArray(override) && override.length > 0;
   let delegationId: string | undefined;
   let staticReference: string | undefined;
+  // Holds the prior value of `state.activeOverrides` (parent's grant
+  // when nested, `undefined` otherwise) so the R5 restore in the
+  // finally block hands the KTD4 plumbing back rather than blanking
+  // it. Declared up here so the override branch can set it and the
+  // outer finally block can read it (the override branch closes
+  // before the `try` block opens).
+  let savedActiveOverrides: typeof state.activeOverrides;
   if (overrideActive) {
     delegationId = randomUUID();
     const staticDomain = (runtime.config.domain || []) as DomainScope[];
@@ -432,11 +465,15 @@ export async function dispatchAgent(
     // scope[capability]) sees a consistent shape.
     const mergedScope: DomainScope[] = staticDomain.map((scope) => ({ ...scope }));
     for (const entry of override as OverrideEntry[]) {
+      // `OverrideEntrySchema` declares `upsert` and `delete` as
+      // non-optional `Type.Boolean()` (see src/tools/delegate_agent.ts),
+      // so typebox validation guarantees booleans by the time we
+      // reach this loop — no `Boolean()` coercion needed.
       const row: DomainScope = {
         path: entry.path,
         read: true,
-        upsert: Boolean(entry.upsert),
-        delete: Boolean(entry.delete),
+        upsert: entry.upsert,
+        delete: entry.delete,
       };
       if (entry.include) row.include = entry.include;
       if (entry.exclude) row.exclude = entry.exclude;
@@ -445,6 +482,13 @@ export async function dispatchAgent(
     staticReference = createHash("sha256")
       .update(JSON.stringify(staticDomain))
       .digest("hex");
+    // Save the prior value (parent's grant when nested, `undefined`
+    // otherwise) so nested dispatchers restore the outer scope on
+    // revoke rather than blanking it. See the KTD4 plumbing comment
+    // above and AE8 for the round-trip. The local lives at function
+    // scope (with the other `let`s above) so the finally block can
+    // see it regardless of which block declared it.
+    savedActiveOverrides = state.activeOverrides;
     state.activeOverrides = {
       delegationId,
       worker: agentSlug(runtime.config),
@@ -475,7 +519,9 @@ export async function dispatchAgent(
   // `budgetExhausted` / `queueCancelled` / `crashed` so the finally
   // block can map each termination path to the union's six reasons
   // exactly. All three are declared OUTSIDE the `try` so they're
-  // visible from `finally`.
+  // visible from `finally`. `savedActiveOverrides` lives up next to
+  // `delegationId` / `staticReference` (see comment there) so the
+  // override branch can set it before the `try` opens.
   let errorMessage: string | undefined;
   let abortedByParent = false;
   let budgetExhausted = false;
@@ -968,11 +1014,14 @@ export async function dispatchAgent(
         revokedAt: new Date().toISOString(),
         terminationReason,
       }, caller);
-      // R5 restore: clear the KTD4 plumbing so `enforceDomainForTool`
-      // falls back to reading `runtime.config.domain` for subsequent
-      // calls. Nested delegations (AE8) re-set this field on entry;
-      // the outer scope is restored when the inner revokes.
-      state.activeOverrides = undefined;
+      // R5 restore: hand the KTD4 plumbing back to whatever held it
+      // at grant time — `undefined` for a top-level dispatcher, the
+      // parent's merged-scope view for a nested child. Save/restore
+      // keeps the parent's authority surface intact across nested
+      // dispatch, so the parent's remaining tool turns after the child
+      // returns see the correct merged scope. See AE8's
+      // parent-scope-restore captures.
+      state.activeOverrides = savedActiveOverrides;
     }
   }
 }
