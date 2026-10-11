@@ -47,7 +47,7 @@ test("classify resolves language-agnostic classes with OpenSpec before tasks/doc
 // ── Type-policy matrix ─────────────────────────────────────────────────────
 
 test("checkTypePolicy: every type may read any class", () => {
-  const types: AgentType[] = ["planner", "coder", "tester", "reviewer", "lead"];
+  const types: AgentType[] = ["planner", "coder", "tester", "reviewer", "lead", "operations"];
   for (const type of types) {
     assert.equal(checkTypePolicy(type, "code", "read").ok, true);
     assert.equal(checkTypePolicy(type, "spec", "read").ok, true);
@@ -81,6 +81,25 @@ test("checkTypePolicy: reviewer and lead may not mutate any class", () => {
   }
 });
 
+test("checkTypePolicy: operations may write code/docs/tasks (lifecycle scope), not spec", () => {
+  // The lifecycle lead (operations) needs `code` class writes for `.git/`,
+  // `.worktrees/`, and `.pi/hive/agents/operations/*.yaml`; `docs` for
+  // HANDOFF.md and the persona markdown; `tasks` for todo files inside
+  // the lifecycle scope. Spec stays planner-only — operations never
+  // writes OpenSpec artifacts.
+  for (const cls of ["code", "docs", "tasks"] as const) {
+    assert.equal(checkTypePolicy("operations", cls, "upsert").ok, true, `operations may upsert ${cls}`);
+    assert.equal(checkTypePolicy("operations", cls, "delete").ok, true, `operations may delete ${cls}`);
+  }
+  assert.equal(checkTypePolicy("operations", "spec", "upsert").ok, false, "operations may not upsert spec");
+  assert.equal(checkTypePolicy("operations", "spec", "delete").ok, false, "operations may not delete spec");
+});
+
+test("checkTypePolicy: operations may not submit verdicts (reviewer-only)", () => {
+  // Even though operations is write-capable, verdicts are reviewer-only.
+  assert.equal(checkTypePolicy("operations", null, "verdict").ok, false);
+});
+
 test("checkTypePolicy: only reviewers may submit verdicts", () => {
   assert.equal(checkTypePolicy("reviewer", null, "verdict").ok, true);
   assert.equal(checkTypePolicy("coder", null, "verdict").ok, false);
@@ -88,7 +107,7 @@ test("checkTypePolicy: only reviewers may submit verdicts", () => {
 });
 
 test("checkTypePolicy: command (non-mutating bash) allowed for all types", () => {
-  for (const type of ["planner", "coder", "tester", "reviewer", "lead"] as AgentType[]) {
+  for (const type of ["planner", "coder", "tester", "reviewer", "lead", "operations"] as AgentType[]) {
     assert.equal(checkTypePolicy(type, null, "command").ok, true);
   }
 });
@@ -235,6 +254,166 @@ test("enforce: reviewer upsert blocked by type even when in-domain", () => {
   const reason = block(state, "Rev", { toolName: "write", input: { path: "src/x.ts" } });
   assert.match(reason ?? "", /may not upsert files/);
   assert.match(reason ?? "", /read-only/);
+});
+
+// AE5 / R11 second line of defense: even when U2's preflight has
+// populated `state.activeOverrides` for a reviewer-typed worker with an
+// override that grants `upsert: true` on a path the static config
+// forbids, the type-policy layer in `enforceDomainForTool` still
+// rejects the mutation. U2's pre-flight stops reviewer-write at the
+// dispatch site (see dispatch-domain-override.test.ts AE5/R11); this
+// test pins the in-process guard so a future refactor that bypasses
+// preflight (e.g., a `delegate_agent` call from inside a worker
+// session, or a future custom tool path) cannot silently let a
+// reviewer upsert through. The merged scope deliberately allows the
+// path the test writes to — the type layer must still win.
+test("enforce: reviewer upsert blocked by type even when override grants the path (AE5/R11)", () => {
+  // Static blocks all writes. The override grants upsert at a path
+  // inside the override scope; domain layer would pass (and would have
+  // passed without the override too, if static allowed it) — only the
+  // type-policy check stands between the reviewer and a write.
+  const reviewerRuntime = runtime("Rev", { agentType: "reviewer", domain: [{ path: ".", read: true, upsert: false, delete: false }] });
+  const state = stateWith([reviewerRuntime]) as any;
+  state.activeOverrides = {
+    delegationId: "dov-test-ae5",
+    worker: "rev",
+    mergedScope: [{ path: ".worktrees/feat-x/src/", upsert: true, delete: false }],
+    staticReference: "0".repeat(64),
+  };
+  const reason = block(state, "Rev", { toolName: "write", input: { path: ".worktrees/feat-x/src/app.ts" } });
+  assert.ok(reason, "reviewer override-path write must still be rejected");
+  // Type-layer signature ("may not upsert files" / "read-only") — NOT
+  // the domain-layer signature ("cannot modify"), so we know the
+  // override is widening the domain check rather than shadowing the
+  // type check.
+  assert.match(reason, /may not upsert files/);
+  assert.match(reason, /read-only/);
+  assert.doesNotMatch(reason, /cannot modify/, "denial must come from the type-policy layer, not the domain layer");
+  // Sanity: `enforceDomainForTool` is a pure read — it does not clear
+  // or mutate `state.activeOverrides`. The dispatch `finally` (U2) is
+  // responsible for clearing it; this test covers the read-side only.
+  assert.ok(state.activeOverrides, "enforceDomainForTool must not clear state.activeOverrides; U2's finally does");
+});
+
+// AE5 / R11 — concurrency path: the same guard applies when the
+// merged scope is threaded through the explicit 4th arg instead of
+// `state.activeOverrides`. The type layer is independent of how the
+// merged scope arrived (closure capture vs shared field), so the
+// reviewer's read-only fence cannot be widened by either KTD4
+// variant.
+test("enforce: reviewer upsert blocked by type even when effectiveDomain (4th arg) grants the path (AE5/R11, KTD4 thread)", () => {
+  const state = stateWith([runtime("Rev", { agentType: "reviewer", domain: [{ path: ".", read: true, upsert: false, delete: false }] })]);
+  const effectiveDomain = [{ path: ".worktrees/feat-x/src/", read: true, upsert: true, delete: false }];
+  // Pass the merged scope via the 4th arg; bypass shared `state` to
+  // also prove concurrency-safe callers (closure capture) hit the
+  // same fence.
+  const reason = runAsAgent("Rev", () =>
+    enforceDomainForTool(state as any, { toolName: "write", input: { path: ".worktrees/feat-x/src/app.ts" } } as any, ctx, effectiveDomain)?.reason,
+  );
+  assert.ok(reason, "threaded override + reviewer write must still be rejected");
+  assert.match(reason ?? "", /may not upsert files/);
+  assert.match(reason ?? "", /read-only/);
+  assert.doesNotMatch(reason ?? "", /cannot modify/, "denial must come from the type-policy layer, not the domain layer");
+});
+
+// ── operations tier — direct lifecycle writes are allowed ─────────────
+//
+// The new `agent-type: operations` tier grants WRITABLE_CLASSES
+// `["code", "docs", "tasks"]` (same file classes as `coder`; see
+// src/engine/policy.ts). The persona's `domain:` block constrains the
+// PATH scope to `.git/`, `.worktrees/`, `.pi/hive/agents/operations/`.
+// This set of tests pins the type-layer guarantee: operations may write
+// lifecycle paths in-domain, application-source paths OUT of domain stay
+// blocked at the domain layer (not the type layer — operations CAN write
+// code-class files, it just doesn't have the domain grant for `src/`,
+// `app/`, or `tests/`).
+
+test("enforce: operations may write lifecycle paths in-domain (.worktrees/, .pi/hive/agents/operations/, HANDOFF.md)", () => {
+  const lifecycleDomain = [
+    { path: ".worktrees/", read: true, upsert: true, delete: true },
+    { path: ".pi/hive/agents/operations/", read: true, upsert: true, delete: true },
+    { path: "HANDOFF.md", read: true, upsert: true, delete: false },
+  ];
+  const state = stateWith([runtime("Ops", { agentType: "operations", domain: lifecycleDomain })]);
+  // Each lifecycle path passes both layers: type-layer (operations is
+  // code/docs/tasks-authorized) + domain-layer (the path is in-scope).
+  // NOTE: `.git/` is reserved-path-fenced (any segment named `.git` is
+  // reserved per src/engine/reserved-paths.ts:73), so the persona's
+  // `.git/` domain entry is honored for read-only inspections + bash
+  // commands (e.g. `git push` resolves to `.` at the bash layer, no
+  // `.git` segment), but file-tool writes to `.git/...` are reserved.
+  // That matches what the git-operator member's existing
+  // coder-typed runtime already has — the persona template's
+  // `.git/` domain grant covers the bash surface (push, fetch,
+  // worktree add, etc.) not the file-tool surface.
+  assert.equal(block(state, "Ops", { toolName: "write", input: { path: ".worktrees/feat-x/file.ts" } }), undefined);
+  assert.equal(block(state, "Ops", { toolName: "edit", input: { path: ".pi/hive/agents/operations/operations-mental-model.yaml" } }), undefined);
+  assert.equal(block(state, "Ops", { toolName: "write", input: { path: "HANDOFF.md" } }), undefined);
+});
+
+test("enforce: operations upsert on application source (src/) is blocked at the DOMAIN layer, not the type layer", () => {
+  // Operations has WRITABLE_CLASSES["operations"] = ["code", "docs", "tasks"],
+  // so `src/foo.ts` (code-class) PASSES the type check. The persona's
+  // domain does NOT grant upsert on src/, so the domain layer rejects
+  // it. This is the load-bearing shape of the new tier — type policy
+  // decides WHAT KINDS, domain decides WHICH PATHS, and Operations'
+  // persona template narrows the path set to the lifecycle surface.
+  const lifecycleOnly = [
+    { path: ".git/", read: true, upsert: true, delete: true },
+    { path: ".worktrees/", read: true, upsert: true, delete: true },
+    { path: ".pi/hive/agents/operations/", read: true, upsert: true, delete: true },
+  ];
+  const state = stateWith([runtime("Ops", { agentType: "operations", domain: lifecycleOnly })]);
+  const reason = block(state, "Ops", { toolName: "write", input: { path: "src/foo.ts" } });
+  assert.ok(reason, "out-of-domain application source must be blocked for operations");
+  assert.match(reason ?? "", /cannot modify/, "the denial must come from the DOMAIN layer, not the type layer");
+  assert.doesNotMatch(reason ?? "", /may not upsert files/, "operations IS authorized to upsert code-class files");
+});
+
+test("enforce: operations may not write spec artifacts (planner-only) even when domain widens", () => {
+  // Operations is write-capable for code/docs/tasks but NOT spec. The
+  // type layer denies spec writes for operations regardless of the
+  // persona's domain. This keeps OpenSpec artifacts planner-only.
+  const wideDomain = [{ path: ".", read: true, upsert: true, delete: true }];
+  const state = stateWith([runtime("Ops", { agentType: "operations", domain: wideDomain })]);
+  const reason = block(state, "Ops", { toolName: "write", input: { path: "openspec/changes/x/proposal.md" } });
+  assert.ok(reason, "operations must be blocked from spec writes regardless of domain");
+  assert.match(reason ?? "", /may not upsert spec files/, "denial must come from the type layer (operations not in spec-writable set)");
+});
+
+test("enforce: operations bash is NOT routed through readOnlyCommandDecision (write-capable path)", () => {
+  // The bash gate's readOnlyType fence at src/engine/domain.ts:836
+  // covers `reviewer | lead`; `operations` is excluded so its bash
+  // commands pass through the standard kind/domain/type checks
+  // instead of the inspection allowlist. Sanity: a write-class bash
+  // that targets an in-domain lifecycle path passes (not blocked at
+  // the readOnlyType fence); the same write bash to a path outside
+  // the persona's domain is blocked at the domain layer, NOT the
+  // readOnlyType fence.
+  const lifecycleOnly = [
+    { path: ".git/", read: true, upsert: true, delete: true },
+    { path: ".worktrees/", read: true, upsert: true, delete: true },
+    { path: ".pi/hive/agents/operations/", read: true, upsert: true, delete: true },
+  ];
+  const state = stateWith([runtime("Ops", { agentType: "operations", domain: lifecycleOnly })]);
+  // `git worktree add .worktrees/feat-x/src` extracts
+  // `.worktrees/feat-x/src` as the bash path token. The type layer
+  // sees class="code" (operations is code-authorized) and passes; the
+  // domain layer sees `.worktrees/feat-x/src` matches the
+  // `.worktrees/` upsert rule and passes. This is the canonical
+  // lifecycle write — a reviewer/lead would have been denied at the
+  // readOnlyType fence (git mutations aren't in the inspection
+  // allowlist), operations is not.
+  assert.equal(
+    block(state, "Ops", { toolName: "bash", input: { command: "git worktree add .worktrees/feat-x/src" } }),
+    undefined,
+    "operations must run git worktree add when .worktrees/ is in domain",
+  );
+  // Same command targeting application source: domain layer fires
+  // (not the readOnlyType fence — operations is not read-only).
+  const appReason = block(state, "Ops", { toolName: "bash", input: { command: "git checkout -- src/app.ts" } });
+  assert.ok(appReason, "out-of-domain bash must be blocked");
+  assert.doesNotMatch(appReason ?? "", /read-only/, "denial must NOT come from the read-only inspection allowlist");
 });
 
 test("enforce: planner blocked from code, allowed spec", () => {

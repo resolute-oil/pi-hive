@@ -3,7 +3,8 @@ import { Theme, defineTool as definePiTool, withFileMutationQueue } from "@earen
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { Type, type TSchema } from "typebox";
 import { resolve } from "node:path";
-import type { AgentType, HiveState, ReviewVerdictLevel } from "../core/types";
+import type { AgentType, HiveState, OverrideEntry, ReviewVerdictLevel } from "../core/types";
+import { OverrideEntrySchema } from "../core/types";
 import {
   extractFinalAnswer,
   hexAnsi,
@@ -191,12 +192,26 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       agent: Type.String({ description: "Configured agent name (one of your delegation targets)." }),
       task: Type.String({ description: "Focused task for that agent. Include the exact question and expected output." }),
       isReadOnly: Type.Optional(Type.Boolean({ description: "Restrict delegation to direct reports only. Set false when the delegation is for a write-capable target you want to keep tree-bound (e.g. forcing operations-routed tasks to the operations lead rather than a coder). Default (omitted or true) preserves the type-based widening for read-only inspection delegations." })),
+      // Per-dispatch domain override. Captured here at the tool surface so
+      // `dispatchAgent` (U2) can merge it onto the worker's static `domain:`
+      // for the lifetime of the call. An empty array `[]` is forwarded as-is
+      // and treated by `preflightCheck` as "no override" (R12 / AE3). The
+      // reserved-paths fence and the reviewer-type policy remain binding —
+      // the typebox accepts the shape uniformly; the dispatcher rejects
+      // entries that would loosen either fence.
+      domain_override: Type.Optional(Type.Array(OverrideEntrySchema, { description: "Per-call write grants layered onto the worker's static `domain:` block. Each entry grants (upsert, delete) on a path relative to APP_ROOT; optional include/exclude globs narrow the rule. Empty array `[]` means 'no override' (R12). Reserved-path entries (`.env*`, `.pi/hive/sessions/`, `**/*.key`) are rejected pre-spawn even if the static config would allow them — the override cannot loosen the reserved-paths fence." })),
     }),
     async execute(_toolCallId: string, params: unknown, signal: AbortSignal | undefined, onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
-      const p = (params || {}) as { agent?: string; task?: string; isReadOnly?: boolean };
+      const p = (params || {}) as { agent?: string; task?: string; isReadOnly?: boolean; domain_override?: OverrideEntry[] };
       const agent = String(p.agent || "").trim();
       const task = String(p.task || "").trim();
       const isReadOnly = p.isReadOnly;
+      // Capture the override at the tool surface; U2 widens `dispatchAgent`
+      // to receive it as the 8th positional. `[]` is a valid value (R12
+      // / AE3) and must be forwarded as-is rather than dropped, so we
+      // distinguish "omitted" (undefined) from "explicit empty" by passing the
+      // array through unconditionally.
+      const domainOverride = p.domain_override;
       if (!agent || !task) {
         const available = agentRoster(state);
         const missing = [!agent ? "agent" : "", !task ? "task" : ""].filter(Boolean).join(" and ");
@@ -205,8 +220,8 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
           details: { ok: false, status: "error", reason: "missing parameters", missing, available },
         };
       }
-      onUpdate?.({ content: [{ type: "text", text: `Delegating to ${agent}${isReadOnly === false ? " (read-only restricted)" : ""}...` }], details: { agent, task, status: "running" } });
-      const result = await dispatchAgent(state, agent, task, ctx, undefined, signal, isReadOnly);
+      onUpdate?.({ content: [{ type: "text", text: `Delegating to ${agent}${isReadOnly === false ? " (read-only restricted)" : ""}${domainOverride !== undefined ? ` (override=${domainOverride.length} entr${domainOverride.length === 1 ? "y" : "ies"})` : ""}...` }], details: { agent, task, status: "running" } });
+      const result = await dispatchAgent(state, agent, task, ctx, undefined, signal, isReadOnly, domainOverride);
       // Fire-and-forget memory distillation on success. Non-blocking: the
       // worker's answer returns immediately; the distiller reads a snapshot, so
       // re-delegating the same agent never races it.
@@ -223,7 +238,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       };
     },
     renderCall(args: unknown, theme: Theme) {
-      const a = (args || {}) as { agent?: string; task?: string; isReadOnly?: boolean };
+      const a = (args || {}) as { agent?: string; task?: string; isReadOnly?: boolean; domain_override?: OverrideEntry[] };
       const agent = a.agent || "?";
       const task = String(a.task || "");
       // Surface any flag the caller explicitly set, using `hasOwnProperty` so
@@ -238,6 +253,14 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       // that.
       const flagParts: string[] = [];
       if (Object.prototype.hasOwnProperty.call(a, "isReadOnly")) flagParts.push(`isReadOnly=${a.isReadOnly}`);
+      // Render the override count when the caller sets the param, mirroring
+      // the `isReadOnly` pattern. An empty array `[]` still renders (R12 —
+      // empty is a valid "explicit no override" call) so they can see the
+      // caller chose to pass the flag; paths are not dumped to keep the call
+      // line bounded (U2 surfaces the merged scope in the worker's prompt).
+      if (Object.prototype.hasOwnProperty.call(a, "domain_override") && Array.isArray(a.domain_override)) {
+        flagParts.push(`domain_override=${a.domain_override.length}`);
+      }
       const header = theme.fg("toolTitle", theme.bold("delegate_agent ")) +
         agentColored(agent, theme) +
         (flagParts.length ? theme.fg("dim", ` [${flagParts.join(", ")}]`) : "");

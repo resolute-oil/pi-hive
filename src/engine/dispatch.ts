@@ -2,7 +2,12 @@ import { type AgentSession, type ExtensionContext, type ToolDefinition } from "@
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { TYPE_SCOPED_TOOL_NAMES } from "../core/constants";
-import type { AgentRuntime, HiveState } from "../core/types";
+// U2: per-delegation domain override needs a UUID for `delegationId`
+// (paired grant/revoke audit trail) and a sha256 digest for
+// `staticReference` (records which static config the override layered
+// onto so an auditor can detect drift post-hoc — see design §4.8 / R8).
+import { createHash, randomUUID } from "node:crypto";
+import type { AgentRuntime, DomainScope, HiveState, OverrideEntry } from "../core/types";
 import {
   modelFrom,
   normalizeWorkerTools,
@@ -22,6 +27,7 @@ import { addHiveActivity } from "../ui/tui/activity";
 import { resolveConfiguredPath } from "../core/safe-path";
 import { acquireWorkerSlot, releaseWorkerSlot } from "./worker-queue";
 import { effectiveWorkerGovernance } from "./budget/policy";
+import { checkReservedPath } from "./reserved-paths";
 import { WorkerRunLifecycle } from "./worker-lifecycle";
 import { modelKey, resolveModel, type ResolvedModel } from "./model-resolution";
 import { delegateAgent as delegateAgentFn, BudgetExhaustedError, type DelegateAgentThinkingLevel, registerWorkerHandleForProduction, unregisterWorkerHandleForProduction, bindReloadAgentConfigState } from "./budget/worker-tools";
@@ -61,6 +67,14 @@ function startElapsedTimer(state: HiveState, runtime: AgentRuntime): NodeJS.Time
 // dispatchAgent either short-circuits with or falls through to the
 // slot acquisition below. Extracted from dispatchAgent so dispatch.ts
 // stays under the ≤600 LOC refactor target.
+//
+// U2 widening: `domainOverride` is the per-call write grant forwarded from
+// the `delegate_agent` tool surface. The five rejection predicates below
+// run ONLY when the override is non-empty (the empty-array case is R12
+// "explicit no override" and must not trigger any validator branch).
+// Each predicate emits a structured `preflightResult` tuple on rejection;
+// dispatch short-circuits above the snapshot/grant block, so no grant
+// event fires and the static config is untouched.
 function preflightCheck(opts: {
   state: HiveState;
   ctx: ExtensionContext;
@@ -70,6 +84,7 @@ function preflightCheck(opts: {
   caller: string;
   task: string;
   isReadOnly?: boolean;
+  domainOverride?: OverrideEntry[];
 }): { output: string; exitCode: number; elapsed: number } | undefined {
   const { state, ctx, runtime, caller, task, isReadOnly } = opts;
   // Plan mode delegates to planners, leads, AND reviewers (Phase 5.1 decision):
@@ -104,6 +119,99 @@ function preflightCheck(opts: {
   }
   if (runtime.status === "running") {
     return { output: `${runtime.config.name} is already running.`, exitCode: 1, elapsed: runtime.elapsedMs };
+  }
+  // U2 validator branch: per-delegation domain override (R6, R11, R10,
+  // R9, R14, R15). Five rejection predicates, all-or-nothing (the first
+  // rejection wins so the audit log shows the most specific failure).
+  // Empty / undefined override is R12 "no override" and skips this branch
+  // entirely. On rejection: short-circuit with a structured result tuple
+  // that names both the call site parameter (`isReadOnly` / path / entry)
+  // AND the rejection reason — the orchestrator's `delegate_agent`
+  // surface surfaces this verbatim per R6.
+  const override = opts.domainOverride;
+  if (override && override.length > 0) {
+    // R9: isReadOnly + write. A read-only delegation cannot grant writes.
+    // Named first so the rejection message names both params.
+    if (isReadOnly === true) {
+      const hasWrite = override.some((entry) => entry.upsert || entry.delete);
+      if (hasWrite) {
+        return { output: `Delegation blocked: domain_override is incompatible with isReadOnly=true. isReadOnly=true forbids write entries (upsert/delete). Drop the write entries or pass isReadOnly=false.`, exitCode: 1, elapsed: 0 };
+      }
+    }
+    // R11: reviewer-typed workers may not be granted writes. The type
+    // policy already blocks reviewer mutations at the tool layer; the
+    // override cannot loosen that fence.
+    if (runtime.config.agentType === "reviewer") {
+      const hasWrite = override.some((entry) => entry.upsert || entry.delete);
+      if (hasWrite) {
+        return { output: `Delegation blocked: domain_override cannot grant writes to reviewer-typed worker "${runtime.config.name}" (agent-type reviewer is read-only by type policy).`, exitCode: 1, elapsed: 0 };
+      }
+    }
+    // R10: reserved-path entry. Every entry's `path` runs through the
+    // same `checkReservedPath` predicate `enforceDomainForTool` uses at
+    // every tool call, so the override cannot loosen the reserved-paths
+    // fence.
+    for (const entry of override) {
+      const reservedDecision = checkReservedPath(ctx.cwd, entry.path, "upsert", {
+        secretPaths: state.config?.settings.secretPaths,
+        // The path was passed at the tool surface; the worker will need
+        // CREATE authority so allowMissing mirrors `enforceDomainForTool`'s
+        // upsert call.
+        allowMissing: true,
+      });
+      if (!reservedDecision.ok) {
+        return { output: `Delegation blocked: domain_override entry "${entry.path}" targets reserved path: ${reservedDecision.reason}. The override cannot loosen the reserved-paths fence.`, exitCode: 1, elapsed: 0 };
+      }
+    }
+    // Hoisted from R14/R15 below: both predicates need the resolved
+    // governance object, so compute once at the top of the override
+    // branch and reuse. `effectiveWorkerGovernance` reads from the
+    // merged runtime + state config; calling it twice would duplicate
+    // that work for no benefit.
+    const governance = effectiveWorkerGovernance(state, runtime);
+    // R14: budget expansion. If the merged scope would grant writes that
+    // exceed the worker's static `tokenBudget`/`costBudgetUsd`/`maxRuns`
+    // caps, reject. The static budget is the floor; the override cannot
+    // multiply the worker's lifetime spend ceiling. We compare on a
+    // structural basis — if any override entry grants `upsert` or
+    // `delete` on a path OUTSIDE the worker's static domain upsert set,
+    // the override expands write scope, which the budget cap may not
+    // have anticipated. Cap tightening (shrinking the cap below current
+    // spend) is also caught: if the override widens writes, the effective
+    // spend ceiling is unchanged but the worker's authority surface is
+    // bigger — reject to surface the inconsistency.
+    // FIXME: this is a STRUCTURAL fingerprint guardrail, not a real cost
+    // check. The predicate rejects purely on "expanded write scope" +
+    // "structural path-set" — it does NOT compare estimated tool-token
+    // consumption against `state.config.settings.workerBudgets`. A real
+    // budget-expansion check would have to model per-call tool-token cost
+    // against the worker's configured `tokenBudget` / `costBudgetUsd` /
+    // `maxRuns` to detect that the override multiplies the spend ceiling.
+    // That modeling is out of scope for this PR; the structural check is
+    // a coarse-grained fence that catches the obvious widen-write-while-
+    // raise-cap pattern without claiming to be a sound budget verifier.
+    // Limitation, made explicit: an orchestrator that legitimately wants
+    // to grant `tokenBudget: 100_000` on a path NOT in the worker's
+    // static upsert set will be blocked here, even though the override
+    // does not actually inflate the configured budget. The check treats
+    // budget-presence + write-expansion as a single rejection event so
+    // static config can't drift into "wider writes, same ceiling" without
+    // surfacing the inconsistency at dispatch time.
+    const staticUpsertPaths = new Set((runtime.config.domain || []).filter((scope) => scope.upsert || scope.delete).map((scope) => scope.path));
+    const expandedPaths = override.filter((entry) => (entry.upsert || entry.delete) && !staticUpsertPaths.has(entry.path));
+    if (expandedPaths.length > 0 && (governance.tokenBudget !== undefined || governance.costBudgetUsd !== undefined || governance.maxRuns !== undefined)) {
+      return { output: `Delegation blocked: domain_override expands write scope beyond ${runtime.config.name}'s static budget (token/cost/run caps). The override cannot raise the worker's spend ceiling.`, exitCode: 1, elapsed: 0 };
+    }
+    // R15: depth-cap. The `delegateAgent` budget path enforces
+    // `currentDelegationDepth() + 1 > policy.worker.depth.cap` inside the
+    // inner `delegateAgentFn` (which throws BudgetExhaustedError). Mirror
+    // the check here so the pre-flight rejection message is the canonical
+    // "delegation blocked" shape, not the budget-exhausted shape. Reuses
+    // the hoisted `governance` local from R14.
+    const depthCap = governance.maxDelegationDepth;
+    if (depthCap !== undefined && currentDelegationDepth() + 1 > depthCap) {
+      return { output: `Delegation blocked: domain_override cannot exceed the worker delegation depth cap (${depthCap}). Current depth is ${currentDelegationDepth()}.`, exitCode: 1, elapsed: 0 };
+    }
   }
   return undefined;
 }
@@ -280,6 +388,16 @@ export async function dispatchAgent(
   createSession: CreateAgentSession = createAgentSession,
   abortSignal?: AbortSignal,
   isReadOnly?: boolean,
+  // U2: forward the per-call write grant from the `delegate_agent` tool
+  // surface. This parameter is the load-bearing input to the snapshot/
+  // merge/grant/revoke lifecycle that runs around every dispatch. Empty
+  // or undefined is R12 "no override" — the validator branch is skipped,
+  // no grant event fires, the static config is untouched. The body uses
+  // it to (a) thread it into preflightCheck (so R10/R11/R9/R14/R15
+  // rejection predicates see it) and (b) layer it onto runtime.config.domain
+  // for the merged scope the worker enforces against for the call's
+  // lifetime.
+  domainOverride?: OverrideEntry[],
 ): Promise<{ output: string; exitCode: number; elapsed: number }> {
   if (!state.config || !state.session) throw new Error("hive is not initialized");
   const caller = currentAgentName();
@@ -300,16 +418,126 @@ export async function dispatchAgent(
   // caller short-circuits with, or undefined to fall through to the slot
   // acquisition below.
   const preflightResult = preflightCheck({
-    state, ctx, agentName, agentSlug: agentSlug(runtime.config), runtime, caller, task, isReadOnly,
+    state, ctx, agentName, agentSlug: agentSlug(runtime.config), runtime, caller, task, isReadOnly, domainOverride,
   });
   if (preflightResult) return preflightResult;
-  const delegationDepth = currentDelegationDepth() + 1;
-  // The error/abort bookkeeping has to live at function scope so the
-  // setup-failure catch (inside the delegateAgent try below) can mutate
-  // errorMessage and still see it from the cleanup tail at the bottom of
-  // the function.
+  // ── U2: per-delegation domain override snapshot/grant (R4, R5, R7, R8) ──
+  // The override is a per-call write grant captured at the `delegate_agent`
+  // tool surface and merged onto `runtime.config.domain` for the
+  // delegation's lifetime. Empty / undefined override is R12 ("no
+  // override") — the snapshot/grant block is skipped entirely, no grant
+  // event fires, and `state.activeOverrides` is never set, so downstream
+  // enforcement reads the static config unchanged.
+  //
+  // KTD4 plumbing: `state.activeOverrides` is the merged scope that
+  // `enforceDomainForTool` reads at every tool call (via U3); this
+  // override branch is the SOLE writer of that field. Nested
+  // delegations (AE8) save the outer scope on entry and restore it on
+  // inner revoke, so the parent's merged-scope view is intact for the
+  // parent's remaining tool turns after the child returns. The first
+  // entry (no parent grant) snapshots `undefined` and restores
+  // `undefined`, preserving the prior post-grant cleanup.
+  //
+  // Q8 lock: `staticReference` is a sha256 digest of `runtime.config.domain`
+  // captured at GRANT TIME only. The auditor's job is to recompute
+  // against the recorded value to detect that the override layered onto a
+  // different static config than expected.
+  const override = domainOverride;
+  const overrideActive = Array.isArray(override) && override.length > 0;
+  let delegationId: string | undefined;
+  let staticReference: string | undefined;
+  // Holds the prior value of `state.activeOverrides` (parent's grant
+  // when nested, `undefined` otherwise) so the R5 restore in the
+  // finally block hands the KTD4 plumbing back rather than blanking
+  // it. Declared up here so the override branch can set it and the
+  // outer finally block can read it (the override branch closes
+  // before the `try` block opens).
+  let savedActiveOverrides: typeof state.activeOverrides;
+  if (overrideActive) {
+    delegationId = randomUUID();
+    const staticDomain = (runtime.config.domain || []) as DomainScope[];
+    // Deep-clone the static config (so the worker session sees its own
+    // copy, not a shared mutation target) and append each override entry
+    // as a new `DomainScope` row. `read: true` honors Q1's
+    // read-preservation invariant: the override is a write grant, but
+    // the merged scope row also exposes reads on the same path so the
+    // worker's tool-call enforcement (which reads via `domainAllows` →
+    // scope[capability]) sees a consistent shape.
+    const mergedScope: DomainScope[] = staticDomain.map((scope) => ({ ...scope }));
+    for (const entry of override as OverrideEntry[]) {
+      // `OverrideEntrySchema` declares `upsert` and `delete` as
+      // non-optional `Type.Boolean()` (see src/tools/delegate_agent.ts),
+      // so typebox validation guarantees booleans by the time we
+      // reach this loop — no `Boolean()` coercion needed.
+      const row: DomainScope = {
+        path: entry.path,
+        read: true,
+        upsert: entry.upsert,
+        delete: entry.delete,
+      };
+      if (entry.include) row.include = entry.include;
+      if (entry.exclude) row.exclude = entry.exclude;
+      mergedScope.push(row);
+    }
+    staticReference = createHash("sha256")
+      .update(JSON.stringify(staticDomain))
+      .digest("hex");
+    // Save the prior value (parent's grant when nested, `undefined`
+    // otherwise) so nested dispatchers restore the outer scope on
+    // revoke rather than blanking it. See the KTD4 plumbing comment
+    // above and AE8 for the round-trip. The local lives at function
+    // scope (with the other `let`s above) so the finally block can
+    // see it regardless of which block declared it.
+    savedActiveOverrides = state.activeOverrides;
+    state.activeOverrides = {
+      delegationId,
+      worker: agentSlug(runtime.config),
+      mergedScope,
+      staticReference,
+    };
+    // R8 grant event. `dispatcherRole` reflects the caller's agent-type
+    // when the caller is `operations` (the lifecycle lead — the
+    // canonical author of `domain_override` per the AE5/R11 fence at
+    // `:147`); every other caller — orchestrator, lead, member — falls
+    // back to `"orchestrator"` as the safe default. Closes the Kieran
+    // L2 finding (the runtime previously hardcoded `"orchestrator"`
+    // because `TelemetryAgentRole` did not include `"operations"`; the
+    // union was widened in src/shared/telemetry.ts to accept the new
+    // tier).
+    const callerRuntime = resolveRuntime(state, currentAgentName());
+    const dispatcherRole: "orchestrator" | "operations" =
+      callerRuntime?.config.agentType === "operations" ? "operations" : "orchestrator";
+    emitHiveEvent(state, "domain_override.granted", {
+      delegationId,
+      dispatcher: currentAgentName(),
+      dispatcherRole,
+      worker: agentSlug(runtime.config),
+      changeId: currentChangeId() ?? null,
+      grantedAt: new Date().toISOString(),
+      overrideEntries: override,
+      staticReference,
+    }, caller);
+  }
+  // ── U2: failure-state locals for the body-wrap finally block ──────────
+  // `errorMessage` and `abortedByParent` were already function-scope
+  // locals for the inner catches to mutate; U2 extends the set with
+  // `budgetExhausted` / `queueCancelled` / `crashed` so the finally
+  // block can map each termination path to the union's six reasons
+  // exactly. All three are declared OUTSIDE the `try` so they're
+  // visible from `finally`. `savedActiveOverrides` lives up next to
+  // `delegationId` / `staticReference` (see comment there) so the
+  // override branch can set it before the `try` opens.
   let errorMessage: string | undefined;
   let abortedByParent = false;
+  let budgetExhausted = false;
+  let queueCancelled = false;
+  let crashed = false;
+  try {
+    // `delegationDepth` is captured here (inside the body wrap) so the
+    // existing runPromptAndFinalize plumbing can read it. The constant
+    // value depends on `currentDelegationDepth()`, which is the depth
+    // BEFORE entering this call.
+    const delegationDepth = currentDelegationDepth() + 1;
   // Budget pre-flight (Wave 2 fixup): delegateAgent now owns the budget gate
   // (resolveWorkerBudgetPolicy → BudgetLedger.restore → checkBudgetPolicy),
   // the depth-cap (T2.3), and the installBudgetEventHooks wiring. The
@@ -333,6 +561,10 @@ export async function dispatchAgent(
       : slot === "queue-full"
         ? `Worker queue is full (${state.config.settings.queueSize}).`
         : "Delegation cancelled while waiting for a worker slot.";
+    // U2: any slot-acquisition failure maps to `queue-cancelled` so the
+    // revoke event's `terminationReason` discriminates between this
+    // pre-worker-start failure and post-spawn terminations.
+    queueCancelled = true;
     return { output: reason, exitCode: 1, elapsed: 0 };
   }
   // Resolved at dispatch time and threaded through runPromptAndFinalize +
@@ -465,6 +697,11 @@ export async function dispatchAgent(
       // Budget pre-flight refused — emit budget_exhausted and return the
       // legacy {output, exitCode: 1} shape so the delegate_agent tool caller
       // gets a failed tool result per Pi docs §2.
+      // U2: surface `budget-exhausted` to the body-wrap finally so the
+      // revoke event discriminates this from a generic error
+      // (`errorMessage` is NOT set on this path — the catch returns
+      // immediately without falling through to `errorMessage = ...`).
+      budgetExhausted = true;
       releaseWorkerSlot(state);
       // Record the rejection on the runtime so the
       // hive_explain_rejection LLM tool can answer "why was my
@@ -722,6 +959,75 @@ export async function dispatchAgent(
     // path; the Map entry is otherwise unreachable.
     unregisterWorkerHandleForProduction(runtime.config.name);
     throw error;
+  }
+  } catch (error) {
+    // U2 outer catch: marks the dispatch as `crashed` so the finally
+    // below maps this termination to `"crash"`. The re-throw preserves
+    // existing dispatch semantics — the caller (the `delegate_agent`
+    // tool surface) sees the throw via the standard tool-error path.
+    // Inner catches (the delegateAgentFn try and the
+    // runPromptAndFinalize try above) already convert most throws
+    // into a returned `{output, exitCode: 1}` shape via
+    // `emitSetupFailure` / the dispatch-lifecycle catch, so this
+    // catch fires only on throws that escape both — the truly
+    // unhandled paths the design calls out as "crash".
+    crashed = true;
+    throw error;
+  } finally {
+    // U2 revoke + KTD4 clear. Runs on every termination path of
+    // `dispatchAgent` (return, error, abort, budget-exhausted,
+    // queue-cancelled, crash). Skipped entirely when no override was
+    // granted (R12: empty/undefined override => no grant event => no
+    // revoke). The `delegationId` and `caller` captures close over
+    // the function-scope locals declared above so the audit payload
+    // matches the grant event one-for-one.
+    if (overrideActive && delegationId) {
+      // Order of predicates is significant: most-specific first.
+      //   1. `crashed`        — outer catch fired, no inner conversion
+      //   2. `budgetExhausted`— BudgetExhaustedError caught above
+      //   3. `queueCancelled` — slot acquisition didn't return "acquired"
+      //   4. `abortedByParent` — parent signal tripped; checked BEFORE
+      //                         `errorMessage` because abort paths
+      //                         also set `errorMessage` to an abort-
+      //                         related message inside
+      //                         runPromptAndFinalize.
+      //   5. `errorMessage`   — any post-grant error path
+      //   6. default           — `"return"` (clean finish)
+      let terminationReason: "return" | "error" | "abort" | "crash" | "budget-exhausted" | "queue-cancelled";
+      if (crashed) {
+        terminationReason = "crash";
+      } else if (budgetExhausted) {
+        terminationReason = "budget-exhausted";
+      } else if (queueCancelled) {
+        terminationReason = "queue-cancelled";
+      } else if (abortedByParent) {
+        terminationReason = "abort";
+      } else if (errorMessage || runtime.status === "error") {
+        // `errorMessage` (function-scope) carries the setup-failure
+        // signals (delegateAgentFn catch + partial-session branch).
+        // `runtime.status === "error"` is the post-prompt signal set
+        // by `runPromptAndFinalize` after it catches a thrown prompt
+        // (its OWN `errorMessage` local in dispatch-lifecycle.ts is
+        // NOT visible here). Either indicates a non-clean
+        // termination that isn't an abort/budget/queue event.
+        terminationReason = "error";
+      } else {
+        terminationReason = "return";
+      }
+      emitHiveEvent(state, "domain_override.revoked", {
+        delegationId,
+        revokedAt: new Date().toISOString(),
+        terminationReason,
+      }, caller);
+      // R5 restore: hand the KTD4 plumbing back to whatever held it
+      // at grant time — `undefined` for a top-level dispatcher, the
+      // parent's merged-scope view for a nested child. Save/restore
+      // keeps the parent's authority surface intact across nested
+      // dispatch, so the parent's remaining tool turns after the child
+      // returns see the correct merged scope. See AE8's
+      // parent-scope-restore captures.
+      state.activeOverrides = savedActiveOverrides;
+    }
   }
 }
 

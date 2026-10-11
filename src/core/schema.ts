@@ -90,7 +90,7 @@ function validateAgent(agent: AgentConfig, label: string, seen: Map<string, stri
 
 // Validate the agent-type contract for one node. Runs AFTER frontmatter
 // enrichment (agent-type lives in the .md, not hive-config.yaml). agent-type is
-// REQUIRED and must be one of the five types; a clean break is acceptable
+// REQUIRED and must be one of the six types; a clean break is acceptable
 // because only a couple of repos use pi-hive today.
 function validateAgentType(agent: AgentConfig, label: string) {
   const type = agent.agentType;

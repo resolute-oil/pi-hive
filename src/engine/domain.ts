@@ -4,7 +4,7 @@ import { dirname, relative, resolve } from "node:path";
 import type { AgentRuntime, DomainScope, HiveState } from "../core/types";
 import { currentAgentName } from "./session";
 import { resolveRuntime } from "./agent-lookup";
-import { agentMatches } from "../core/utils";
+import { agentMatches, agentSlug } from "../core/utils";
 import { globToRegExp, globSpecificity, toPosixPath } from "./glob";
 import { classify } from "./file-class";
 import { checkPlannerStages, checkTypePolicy, type PolicyAction, type PolicyDecision } from "./policy";
@@ -106,7 +106,7 @@ function domainScopeMatch(ctx: ExtensionContext, scope: DomainScope, target: str
 //     narrower "upsert tests only" rule.
 //   - On an exact specificity tie, DENY wins (fail safe).
 //   - If no scope matches, the default is DENY.
-export function domainAllows(ctx: ExtensionContext, runtime: AgentRuntime, rawPath: string, capability: "read" | "upsert" | "delete", options?: { allowMissing?: boolean }): boolean {
+export function domainAllows(ctx: ExtensionContext, runtime: AgentRuntime, rawPath: string, capability: "read" | "upsert" | "delete", options?: { allowMissing?: boolean; effectiveDomain?: DomainScope[] }): boolean {
   if (hasForeignAbsoluteSyntax(rawPath)) return false;
   const target = resolveDomainPath(ctx, rawPath);
   let bestSpecificity = -1;
@@ -117,7 +117,15 @@ export function domainAllows(ctx: ExtensionContext, runtime: AgentRuntime, rawPa
   // because bash path tokens are heuristics, not authoritative
   // existence checks; the shell surfaces "no such file" at run time.
   const allowMissing = options?.allowMissing ?? (capability === "upsert");
-  for (const scope of runtime.config.domain || []) {
+  // U3 (R5/R7 enforcement half): when the caller threads a per-delegation
+  // merged scope via `options.effectiveDomain`, enforce against it instead
+  // of the agent's static `runtime.config.domain`. Falls through to the
+  // static config when omitted so every existing call site keeps working
+  // unchanged. The merged scope is `static ∪ override` (U2 builds it that
+  // way); narrowing to override-only would silently drop any static
+  // allowance the worker's `.md` granted.
+  const activeScope = options?.effectiveDomain ?? (runtime.config.domain || []);
+  for (const scope of activeScope) {
     const match = domainScopeMatch(ctx, scope, target, allowMissing);
     if (!match.matches) continue;
     const opinion = scope[capability];
@@ -748,7 +756,7 @@ function enforceTypePolicyForPath(runtime: AgentRuntime, ctx: ExtensionContext, 
   return undefined;
 }
 
-export function enforceDomainForTool(state: HiveState, event: ToolCallEvent, ctx: ExtensionContext): { block: true; reason: string } | undefined {
+export function enforceDomainForTool(state: HiveState, event: ToolCallEvent, ctx: ExtensionContext, effectiveDomain?: DomainScope[]): { block: true; reason: string } | undefined {
   // Use runtimeForCaller so the main session ("Orchestrator") resolves to its
   // configured runtime instead of silently no-oping (G4). Zero behavior change
   // today (the main session has no file/bash tools in plan/hive mode) — this
@@ -756,6 +764,34 @@ export function enforceDomainForTool(state: HiveState, event: ToolCallEvent, ctx
   // enforcement.
   const runtime = runtimeForCaller(state, currentAgentName());
   if (!runtime) return undefined;
+
+  // U3 — KTD4 plumbing read (R5 enforcement half + R7 concurrency). Three
+  // resolution steps in priority order:
+  //   1. `effectiveDomain` — the explicit 4th positional; threading
+  //      mechanism so a per-worker-session closure can hand the merged
+  //      scope straight to the read site without going through the
+  //      shared `state` field. This is the concurrency-safe path (AE6)
+  //      because each worker session can capture its own scope and pass
+  //      it in; nothing on the shared `state` object is touched.
+  //   2. `state.activeOverrides` — U2's transient field. Read only when
+  //      the active override's `worker` matches THIS worker, so a stale
+  //      or wrong-worker override cannot leak across dispatches.
+  //   3. Undefined — falls through to `runtime.config.domain` inside
+  //      `domainAllows`, preserving pre-U2 behavior for callers that
+  //      never set the field (telemetry-listeners top-level call, etc.).
+  const overrideScope = effectiveDomain
+    ?? (state.activeOverrides?.worker === agentSlug(runtime.config)
+      ? state.activeOverrides.mergedScope
+      : undefined);
+  // Pre-build the per-capability options objects once so each branch
+  // below can read/upsert/bash pick whichever variant it needs without
+  // restating the resolution. Read/upsert callers omit `allowMissing`
+  // (defaults to upsert-allow); bash passes `{ allowMissing: true }`
+  // because bash tokens are regex heuristics, not existence checks.
+  const domainOptions = overrideScope !== undefined ? { effectiveDomain: overrideScope } : undefined;
+  const bashDomainOptions = overrideScope !== undefined
+    ? { allowMissing: true, effectiveDomain: overrideScope }
+    : { allowMissing: true };
 
   const toolName = String(event.toolName || "");
   // `event.input` is a union of every tool variant's input shape. The Custom
@@ -773,7 +809,7 @@ export function enforceDomainForTool(state: HiveState, event: ToolCallEvent, ctx
       if (reservedBlock) return { block: true, reason: reservedBlock };
       const typeBlock = enforceTypePolicyForPath(runtime, ctx, path, "read");
       if (typeBlock) return { block: true, reason: typeBlock };
-      if (!domainAllows(ctx, runtime, path, "read")) {
+      if (!domainAllows(ctx, runtime, path, "read", domainOptions)) {
         return { block: true, reason: `${runtime.config.name} cannot read ${path}. Read domains: ${formatDomainRules(runtime, "read")}` };
       }
     }
@@ -785,7 +821,7 @@ export function enforceDomainForTool(state: HiveState, event: ToolCallEvent, ctx
       if (reservedBlock) return { block: true, reason: reservedBlock };
       const typeBlock = enforceTypePolicyForPath(runtime, ctx, path, "upsert");
       if (typeBlock) return { block: true, reason: typeBlock };
-      if (!domainAllows(ctx, runtime, path, "upsert")) {
+      if (!domainAllows(ctx, runtime, path, "upsert", domainOptions)) {
         return { block: true, reason: `${runtime.config.name} cannot modify ${path}. Upsert domains: ${formatDomainRules(runtime, "upsert")}` };
       }
     }
@@ -797,6 +833,18 @@ export function enforceDomainForTool(state: HiveState, event: ToolCallEvent, ctx
     // the SDK's runtime contract; the Custom variant can't have toolName
     // === "bash" by definition.
     const command = String((event.input as { command?: string }).command || "");
+    // `operations` is write-capable (the same file classes as `coder` per
+    // WRITABLE_CLASSES — see src/engine/policy.ts). It deliberately does
+    // NOT enter the read-only-command allowlist below — `git push`,
+    // `gh pr create`, `git worktree add|remove`, `tar xf`, `patch -p1`,
+    // `npm install`, and the rest of the lifecycle surface are all
+    // mutations and must pass through the standard kind/domain/type
+    // checks below. The persona's `domain:` block + the `commit:` field
+    // gate are the constraints, not the inspection allowlist. The new
+    // `agent-type: operations` tier was added in the same commit that
+    // re-read this line; `lead` stays read-only because the default
+    // persona template is read-only by design. Operations is NOT added
+    // to this `readOnlyType` fence.
     const readOnlyType = runtime.config.agentType === "reviewer" || runtime.config.agentType === "lead";
 
     // Read-only types get a positive allowlist before the broader mutation and
@@ -867,7 +915,7 @@ export function enforceDomainForTool(state: HiveState, event: ToolCallEvent, ctx
       // agent's granted scope?), not existence (does this file exist?).
       // Reserved-path and type-policy layers above already enforce the
       // strict rules for sensitive locations and write-capable types.
-      if (!domainAllows(ctx, runtime, path, capability, { allowMissing: true })) {
+      if (!domainAllows(ctx, runtime, path, capability, bashDomainOptions)) {
         return { block: true, reason: `${runtime.config.name} cannot ${capability} ${path} via bash. Allowed ${capability} domains: ${formatDomainRules(runtime, capability)}` };
       }
     }

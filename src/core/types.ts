@@ -5,6 +5,12 @@ import type { ChildProcess } from "node:child_process";
 import type { PlanStage } from "../shared/openspec-artifacts";
 export type { PlanStage } from "../shared/openspec-artifacts";
 
+// `Static<typeof XxxSchema>` lets us derive the typebox-driven JSON shape
+// alongside the schema. The pattern is established by `BudgetsConfig` in
+// `src/core/schema.ts`; mirroring it here keeps the type/schema pair
+// discoverable in one place and avoids hand-rolled `interface` drift.
+import { Type, type Static } from "typebox";
+
 export type AgentStatus = "idle" | "running" | "done" | "error" | "queued";
 // The three session modes:
 //   normal — plain Pi chat: no hive tools, no domain/type enforcement.
@@ -27,7 +33,15 @@ export function canonicalMode(mode: string | undefined): HiveMode {
 // boundary) by the type-policy layer: it decides which ACTIONS an agent may
 // perform on which KIND of file. Distinct from the derived tree role
 // (orchestrator/lead/member) which only governs delegation.
-export type AgentType = "planner" | "coder" | "tester" | "reviewer" | "lead";
+//
+// `operations` is the lifecycle lead (worktree, remote-git, PR, persona
+// self-maintenance). Its WRITABLE_CLASSES match `coder`'s, but the persona's
+// `domain:` block is expected to constrain operations to the lifecycle
+// scope (`.git/`, `.worktrees/`, `.pi/hive/agents/operations/`) — the type
+// policy decides WHAT KINDS of files an agent may touch; the domain layer
+// decides WHICH PATHS. Operations is tree-bound at the canDelegateTo layer
+// just like `lead`; it does not receive the typed-specialist widening.
+export type AgentType = "planner" | "coder" | "tester" | "reviewer" | "lead" | "operations";
 
 export interface KnowledgeRef {
   path: string;
@@ -84,6 +98,27 @@ export interface DomainScope {
   description?: string;
   allowOutsideProject?: boolean;
 }
+
+// Per-dispatch domain override. Captured at the `delegate_agent` tool
+// surface (U1) and merged onto the worker's static `domain:` config inside
+// `dispatchAgent` (U2). The merged scope is `static ∪ override` for the
+// lifetime of the call, then restored via `try`/`finally`. The
+// reserved-paths fence and the reviewer-type policy are enforced BEFORE
+// the merge at every tool call (the override cannot loosen either fence).
+//
+// Shape lifted verbatim from the design doc's Q4 lock: every override is
+// a (path, upsert, delete) triple, with optional include/exclude globs
+// that narrow the rule to matching files under `path` (matched relative
+// to it). `read` is intentionally absent — the override is a per-call
+// write-grant tool; static read scope is unchanged.
+export const OverrideEntrySchema = Type.Object({
+  path: Type.String({ description: "Filesystem path (relative to APP_ROOT) to which the override grants writes. Resolved at dispatch time; the worker session enforces against this path for the call's lifetime." }),
+  upsert: Type.Boolean({ description: "True to allow file creation or update at `path`. Required (not defaulted) so the caller sees the full action set on the wire." }),
+  delete: Type.Boolean({ description: "True to allow file deletion at `path`. Required (not defaulted) so the caller sees the full action set on the wire." }),
+  include: Type.Optional(Type.Array(Type.String(), { description: "Optional allow-globs that narrow the override to matching files under `path` (matched relative to `path`)." })),
+  exclude: Type.Optional(Type.Array(Type.String(), { description: "Optional deny-globs that narrow the override by removing matching files under `path` (matched relative to `path`). Excludes win over includes." })),
+});
+export type OverrideEntry = Static<typeof OverrideEntrySchema>;
 
 export interface AgentConfig {
   // Stable machine identifier. If omitted, derived from `name` as a kebab slug.
@@ -430,6 +465,21 @@ export interface HiveState {
   // branch point for the hive→normal restore. Reset on each entry transition so
   // its presence reliably means "a snapshot was taken for the current cycle."
   hiveCycleSnapshotLeafId?: string;
+  // KTD4 plumbing for per-delegation domain override (U2): the merged
+  // scope the active delegation holds for the lifetime of its call. U2
+  // sets this in `dispatchAgent` after `preflightCheck` passes, U3 reads
+  // it from `enforceDomainForTool` against this same field, U2 clears it
+  // in the dispatch `finally` block on every termination path. Nested
+  // delegations (AE8) overwrite this field with the inner scope — the
+  // outer scope is restored when the inner delegation revokes. Undefined
+  // means "no active override; enforcement reads `runtime.config.domain`
+  // only" (the pre-U2 behavior).
+  activeOverrides?: {
+    delegationId: string;
+    worker: string;
+    mergedScope: DomainScope[];
+    staticReference: string;
+  };
 }
 
 // ── Budget refactor (Wave 0 contract stubs) ─────────────────────────────────

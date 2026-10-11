@@ -40,7 +40,7 @@ They must be denied:
 
 Tests and builds are considered potentially mutating because arbitrary project scripts can write files or run networked processes. A reviewer or lead may run them only in a disposable checkout explicitly provisioned and isolated by trusted orchestration; pi-hive does not currently provide that environment, so they are denied in normal worker sessions. `tester` or another write-capable worker must run project tests.
 
-These restrictions are policy controls for cooperative agents, not a sandbox. See Accepted risks.
+These restrictions are policy controls for cooperative agents, not a sandbox. See Accepted risks. The `Operations` lead sits on the new `agent-type: operations` tier with `WRITABLE_CLASSES = ["code", "docs", "tasks"]` (per `src/engine/policy.ts:36`). Its persona's `domain:` block grants the path scope (`.git/`, `.worktrees/`, `.pi/hive/agents/operations/`, `HANDOFF.md` per the canonical template at [SETUP.md §9b.1](./SETUP.md#9b1-operations-lead-agentsoperationsoperationsmd)). Lifecycle writes happen in Operations' own session, not routed through a `git-operator` member. The bash surface on this tier is excluded from the `reviewer | lead` read-only-command allowlist at `src/engine/domain.ts:848`. Only `reviewer` and `lead` remain in the read-only fence.
 
 ## Path and symlink semantics
 

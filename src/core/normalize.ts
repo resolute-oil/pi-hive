@@ -1,7 +1,7 @@
 import type { AgentType, DomainScope, KnowledgeRef, PlanStage } from "./types";
 import { ARTIFACT_ORDER } from "../shared/openspec-artifacts";
 
-export const AGENT_TYPES: readonly AgentType[] = ["planner", "coder", "tester", "reviewer", "lead"];
+export const AGENT_TYPES: readonly AgentType[] = ["planner", "coder", "tester", "reviewer", "lead", "operations"];
 export const PLAN_STAGES: readonly PlanStage[] = ARTIFACT_ORDER;
 
 // Parse an agent-type value from frontmatter/config. Returns the lowercased
