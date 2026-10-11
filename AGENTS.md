@@ -1,40 +1,49 @@
 # pi-hive Development Guide
 
+## Scope
+
+This file carries two independent scopes of rules. Each section heading tags its scope.
+
+- **Session rules** govern the orchestrator (the agent) working in THIS repository. They cover worktree use, push permissions, agent tool choice, commit discipline, gate commands, and maintainer behavior.
+- **Extension rules** describe what the pi-hive package does or refuses to do when user projects install it. They cover the package's runtime shape, default dashboard bind, telemetry scope, and opt-in gating.
+
+Session rules do not bind the extension. Extension rules do not bind the orchestrator. User projects that install pi-hive inherit the extension's defaults and configurable rules, set via `SETUP.md` and the persona `.md` files. Their maintainers decide their project's session behavior. This file is the pi-hive maintainers' rulebook for the pi-hive repo, not a downstream consumer guide.
+
 ## Project purpose
 
 `pi-hive` is a Pi package that provides a hierarchical multi-agent orchestration extension plus a local telemetry dashboard.
 
 The extension must stay safe to install globally: it should do nothing unless the current project opts in with `.pi/hive/hive-config.yaml`.
 
-## Repository boundaries
+## Repository boundaries [SESSION]
 
 - This checkout's `origin` is the fork (`resolute-oil/pi-hive`); `upstream` is the source repo (`demetere/pi-hive`) and is owned by someone else.
 - **NEVER push code, commits, branches, or PRs to `upstream`.** All `git push`, `gh pr create`, and merge activity goes through `origin` only. Opening a PR against the source repo is treated as the same class of mistake as writing to a foreign filesystem.
-- `git fetch upstream` is allowed for reading recent history so we know what `origin/main` is behind, but the result is informational — nothing in this checkout ever lands there.
+- `git fetch upstream` is allowed for reading recent history so we know what `origin/main` is behind, but the result is informational. Nothing in this checkout ever lands there.
 - If a fix genuinely needs the source repo, surface that to the human and stop. Do not work around the boundary with admin tokens, SSH keys, or other repos that happen to have write access.
 
-## Subagent tool selection
+## Subagent tool selection [SESSION]
 
 Use the `Agent` and `SubagentWorkflow` tools from the globally-installed `@tintinweb/pi-subagents` extension for subagent work in this project. Full guide: [`docs/agents/subagent-workflow.md`](docs/agents/subagent-workflow.md).
 
 **Do not use the `subagent` tool or any skill-driven subagent from `compound-engineering-pi`.** That tool spawns skill-based subagents and is not the right delegation mechanism here. The `Agent` tool from `@tintinweb/pi-subagents` is the only subagent-spawning tool you should reach for in this project. If a request looks like it needs `subagent` (skill-driven fan-out), route it through `Agent` or `SubagentWorkflow` instead.
 
-**Always run subagents in the background.** Pass `run_in_background: true` on every `Agent` call. The orchestrator should keep moving — issuing follow-up tool calls, editing files, drafting follow-up agent prompts — while a subagent works, and only block when the next step is genuinely impossible without that subagent's output. Synchronous (`run_in_background: false`) is reserved for the rare case where the orchestrator's very next tool call depends on the result and there is literally nothing else to do in the meantime. Defaulting to synchronous wastes the whole reason agents exist; treat it as a code smell. `SubagentWorkflow` runs its child agents asynchronously by construction — the rule above applies to direct `Agent` calls, where the temptation to block is real.
+**Always run subagents in the background.** Pass `run_in_background: true` on every `Agent` call. The orchestrator should keep moving, issuing follow-up tool calls, editing files, drafting follow-up agent prompts, while a subagent works, and only block when the next step is genuinely impossible without that subagent's output. Synchronous (`run_in_background: false`) is reserved for the rare case where the orchestrator's very next tool call depends on the result and there is literally nothing else to do in the meantime. Defaulting to synchronous wastes the whole reason agents exist; treat it as a code smell. `SubagentWorkflow` runs its child agents asynchronously by construction. The rule above applies to direct `Agent` calls, where the temptation to block is real.
 
-This rule is here because synchronous blocking slipped into a prior session — the orchestrator halted on a single long-running `Agent` call instead of staging follow-up work behind it. Subagents are how this project gets parallelism; blocking the orchestrator to wait defeats the design.
+This rule is here because synchronous blocking slipped into a prior session. The orchestrator halted on a single long-running `Agent` call instead of staging follow-up work behind it. Subagents are how this project gets parallelism; blocking the orchestrator to wait defeats the design.
 
-## User prompts with `ask_user`
+## User prompts with `ask_user` [SESSION]
 
 Use the `ask_user` tool to gate high-stakes or ambiguous decisions before continuing. Full decision-handshake protocol: read `/Users/cgrant/.pi/agent/npm/node_modules/pi-ask-user/skills/ask-user/references/ask-user-skill-extension-spec.md` before asking. The spec is authoritative; the summary below covers the common case.
 
 - **Trigger.** Ask for architecture trade-offs, schema/migration paths, security/compliance posture, requirements ambiguity, or non-trivial scope cuts. Skip for pure refactors with identical behavior, formatting-only edits, or anything the user has already decided.
-- **Display mode.** Always pass `displayMode: "inline"` on every `ask_user` call. The pop-up overlay interrupts the conversation flow; this project's preference is inline. The default `displayMode` (when omitted) is the user's configured preference, which is overlay — so the parameter must be set explicitly. (The `ask_user_question` tool does not accept `displayMode` and is for legacy flows only — prefer `ask_user` for new work.)
+- **Display mode.** Always pass `displayMode: "inline"` on every `ask_user` call. The pop-up overlay interrupts the conversation flow; this project's preference is inline. The default `displayMode` (when omitted) is the user's configured preference, which is overlay, so the parameter must be set explicitly. (The `ask_user_question` tool does not accept `displayMode` and is for legacy flows only.) Prefer `ask_user` for new work.
 - **One question at a time.** Classify the boundary as `high_stakes` / `ambiguous` / `both` / `clear`; gather evidence with tools first; summarize 3–7 bullets of context; ask one focused question; restate the chosen option and proceed.
 - **Retry policy.** Max 2 `ask_user` calls per boundary. After the second, stop and report blocked for `high_stakes` decisions; for ambiguous-only, proceed only with explicit user delegation using the most reversible default.
 
 This rule is here because the inline-display preference and the one-question-at-a-time discipline have slipped in past sessions.
 
-## Pi package rules
+## Pi package rules [EXTENSION]
 
 - Package entrypoint is `index.ts` and must remain declared in `package.json` under `pi.extensions`.
 - Runtime Pi imports belong in `peerDependencies` with `"*"` ranges: `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, and `typebox`.
@@ -42,7 +51,7 @@ This rule is here because the inline-display preference and the one-question-at-
 - After editing `ui/web/src/**`, run `just dashboard-build` before packaging.
 - Before publishing or tagging, run `just ci`.
 
-## Extension behavior
+## Extension behavior [EXTENSION]
 
 - Do not register commands, tools, hooks, background servers, file watchers, or UI widgets unless `.pi/hive/hive-config.yaml` exists in the active project.
 - Do not start long-lived processes from the extension factory. Start them from commands/session hooks. Clean up session-owned processes on session shutdown; deliberately shared daemons must provide authenticated explicit teardown and a bounded idle timeout.
@@ -50,31 +59,32 @@ This rule is here because the inline-display preference and the one-question-at-
 - Custom tools that mutate files must use Pi's file mutation queue.
 - Tool output must be bounded/truncated so it cannot flood model context.
 
-## Telemetry/dashboard
+## Telemetry/dashboard [EXTENSION]
 
 - The dashboard server is local-only by default: `127.0.0.1:43191`.
 - Keep telemetry files under `.pi/hive/sessions/` for project state and `~/.pi/agent/hive/` for the global registry/database.
 - Do not send telemetry to third-party services.
 - Keep Bun-specific code isolated to dashboard/server paths so the core extension can load even when Bun is unavailable.
 
-## Policy enforcement limits (accepted risk)
+## Policy enforcement limits (accepted risk) [SESSION]
 
-- The bash policy classifies mutations by matching known commands (`rm`, `mv`, `git restore`, `find -delete`, `dd of=`, `rsync`, …). File changes made *through* a general-purpose interpreter — `node -e`, `python -c`, `sh script.sh`, `npm run <script>` — are **statically unpoliceable**: the enforcer cannot see writes hidden inside interpreted code. This is a known, accepted limit, stated in the worker operating-contract prompt so agents treat it as a trust boundary, not a loophole. Do not rely on the bash classifier to contain a hostile interpreter invocation.
-- Bash **read** checks fail OPEN on bare filenames. `extractBashPathTokens` only recognizes path-like tokens containing a `/` (or an absolute path), so `cat secrets.env` / `less .env` (no slash) produce no token and skip the read-domain check. Mutations still fail CLOSED (classification keys off the command verb, not the path). Tightening this would false-positive on ordinary bash arguments — every word looks like a filename — so it is left as documented accepted risk, alongside the interpreter limit.
+- The bash policy classifies mutations by matching known commands (`rm`, `mv`, `git restore`, `find -delete`, `dd of=`, `rsync`, …). File changes made *through* a general-purpose interpreter, `node -e`, `python -c`, `sh script.sh`, `npm run <script>`, are **statically unpoliceable**: the enforcer cannot see writes hidden inside interpreted code. This is a known, accepted limit, stated in the worker operating-contract prompt so agents treat it as a trust boundary, not a loophole. Do not rely on the bash classifier to contain a hostile interpreter invocation.
+- Bash **read** checks fail OPEN on bare filenames. `extractBashPathTokens` only recognizes path-like tokens containing a `/` (or an absolute path), so `cat secrets.env` / `less .env` (no slash) produce no token and skip the read-domain check. Mutations still fail CLOSED (classification keys off the command verb, not the path). Tightening this would false-positive on ordinary bash arguments. Every word looks like a filename. So it is left as documented accepted risk, alongside the interpreter limit.
 
-## Repository hygiene
+## Repository hygiene [SESSION]
 
 - Do not commit `node_modules/`, `.tgz` package artifacts, runtime sessions, logs, or local telemetry databases.
 - Use Conventional Commits for commit messages, for example `feat: add hive policy checks`, `fix(dashboard): preserve runtime counters`, or `docs: update setup guide`.
 - For audit remediation backlog tasks (`Txx`), completion includes committing, pushing, and opening a PR after required checks pass. Do not begin the next task until that PR exists.
-- **Never merge a pull request without explicit user permission.** Committing, pushing, and creating PRs is allowed; merging requires the user to instruct it each time. A PR is "ready" when it is open and its checks have passed — it is not "done" until the user merges. Do not run `gh pr merge`, do not click the GitHub merge button, and do not auto-merge via branch protection or repo settings on the agent's own initiative.
-- Do not add AI attribution trailers or generated-by notices to commits, docs, package text, or release notes.
+- **Never merge a pull request without explicit user permission.** Committing, pushing, and creating PRs is allowed; merging requires the user to instruct it each time. A PR is "ready" when it is open and its checks have passed. It is not "done" until the user merges. Do not run `gh pr merge`, do not click the GitHub merge button, and do not auto-merge via branch protection or repo settings on the agent's own initiative.
+- **No AI attribution of any kind** in commits, docs, package text, or release notes. Bans trailers (`Co-authored-by:`, `Assisted-by:`, `Generated-by:`, and any footer-style attribution), commit-message body attribution such as "Generated by…", author or email fields set to anything that flags content as AI-produced (the next bullet covers the mechanism), and any other AI marker.
+- **Do not override the Git author or committer identity on commits.** Use the maintainer's configured identity (`git config user.name` / `user.email` as set on this machine). Banned mechanisms: `git commit --author=…`, `git -c user.name=…` / `git -c user.email=…`, the `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` / `GIT_COMMITTER_NAME` / `GIT_COMMITTER_EMAIL` environment variables, edits to `~/.gitconfig` or the repo's `.git/config`, and any per-invocation identity override. `git commit --reset-author` is permitted because it falls back to the configured identity.
 - Prefer complete, production-ready changes: no TODO placeholders, no debug logs, and no unexplained temporary behavior.
-- **Destructive git operations require explicit Operator approval.** Before any of the following, ASK the Operator first with the exact impact stated: "I want to run `X` which will lose `Y`. OK?" — and WAIT for an explicit yes before running the command.
-  - `git reset --hard` (any target). Loses uncommitted changes to tracked files in the current worktree, and rewrites the working tree from the index. `git reset` (without `--hard`) is fine — it only moves the branch ref.
+- **Destructive git operations require explicit Operator approval.** Before any of the following, ASK the Operator first with the exact impact stated: "I want to run `X` which will lose `Y`. OK?", and WAIT for an explicit yes before running the command.
+  - `git reset --hard` (any target). Loses uncommitted changes to tracked files in the current worktree, and rewrites the working tree from the index. `git reset` (without `--hard`) is fine. It only moves the branch ref.
   - `git worktree remove <path>` (without `--force`). Deletes the worktree directory on disk. Loses uncommitted changes in the worktree's working tree and any index changes there. The worktree is removed from `git worktree list` but the branch ref survives unless explicitly deleted.
   - `git clean -fdx` or any `rm -rf` on a directory that may contain uncommitted work, session files, telemetry databases, or build outputs that aren't gitignored.
-  - `git branch -D` (force-delete). Loses the branch ref. `git branch -d` is fine for merged branches — it refuses to delete unmerged branches.
+  - `git branch -D` (force-delete). Loses the branch ref. `git branch -d` is fine for merged branches. It refuses to delete unmerged branches.
   - `git push --force` or `git push --force-with-lease` to any remote, ever (per the existing upstream/push rule).
   - **The gitignored personal files and directories that exist on disk and must NEVER be deleted** (the `.gitignore` makes them invisible to git, so a `git clean -fdx` would happily remove them):
     - `HANDOFF.md` at the repo root (`.gitignore` line 32)
@@ -87,16 +97,16 @@ This rule is here because the inline-display preference and the one-question-at-
     - `git branch -D <name>` is reversible from the reflog (`git reflog show <name>`). State: "Will delete the local ref for <name>. The branch's tip is reachable via reflog for 90 days unless `git gc` runs."
 - **If a destructive operation seems necessary, default to asking.** The cost of asking is one turn; the cost of not asking is potentially losing work the user has spent hours on. There is no "obvious enough to just do it" threshold for these operations.
 
-- **All file edits go in a git worktree, never in the main working tree.** Even single-line docs changes, chore updates, and small fixes must be done in a worktree under `APP_ROOT/.worktrees/`, not as siblings of `APP_ROOT` and not directly on `main`. The `.worktrees/` directory is gitignored so `git add .` from a parent path can't drag a sibling checkout into a commit. Create with `git worktree add .worktrees/<branch> <base>` from `APP_ROOT`, then `just install` to populate a real `node_modules/` inside the worktree (do NOT symlink `node_modules` — the symlink target is brittle and the workflow itself is being phased out).
+- **All file edits go in a git worktree, never in the main working tree.** Even single-line docs changes, chore updates, and small fixes must be done in a worktree under `APP_ROOT/.worktrees/`, not as siblings of `APP_ROOT` and not directly on `main`. The `.worktrees/` directory is gitignored so `git add .` from a parent path can't drag a sibling checkout into a commit. Create with `git worktree add .worktrees/<branch> <base>` from `APP_ROOT`, then `just install` to populate a real `node_modules/` inside the worktree (do NOT symlink `node_modules`, the symlink target is brittle and the workflow itself is being phased out).
 
   Clean up with `git worktree remove .worktrees/<branch>` after the branch merges. This rule applies to every agent session that touches this repo, including the one writing this rule.
 
-- **Always use `just install` to populate `node_modules/`, never `npm install <pkg>` as a shortcut.** `just install` runs `npm install` at the repo root and in `ui/web/`, and npm 7+ auto-installs peer dependencies (`typebox`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`) by default. When a peer dep is missing, the only correct remediation is `just install` from inside the worktree — it pulls the dep from the registry and writes a real `node_modules/`. Do not run `npm install <pkg> --no-save`, `npm install --legacy-peer-deps`, or any other direct `npm install <pkg>` to fix a missing dep; doing so creates a worktree that diverges from CI and from the project's contract, and bypasses the justfile targets the rest of the project relies on. This rule applies in every worktree, every fresh clone, and every time `node_modules/` is missing or stale.
+- **Always use `just install` to populate `node_modules/`, never `npm install <pkg>` as a shortcut.** `just install` runs `npm install` at the repo root and in `ui/web/`, and npm 7+ auto-installs peer dependencies (`typebox`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`) by default. When a peer dep is missing, the only correct remediation is `just install` from inside the worktree. It pulls the dep from the registry and writes a real `node_modules/`. Do not run `npm install <pkg> --no-save`, `npm install --legacy-peer-deps`, or any other direct `npm install <pkg>` to fix a missing dep; doing so creates a worktree that diverges from CI and from the project's contract, and bypasses the justfile targets the rest of the project relies on. This rule applies in every worktree, every fresh clone, and every time `node_modules/` is missing or stale.
 
 - **`bash` and `edit` tool calls default to the main working tree.**
   Each `bash` invocation starts in `APP_ROOT` (the bare checkout on
   `main`); the cwd resets between calls, so prefix any in-worktree
-  command with `cd APP_ROOT/.worktrees/<branch>` — `cd` does not
+  command with `cd APP_ROOT/.worktrees/<branch>`. `cd` does not
   persist. The `edit` tool must use the absolute worktree path; never
   pass an APP_ROOT path. Applies to every shell command (`sed`,
   `git mv`, `rm`, `mv`, etc.) and to `edit`. To install dependencies, run `just install` (see the rule above), never `npm install <pkg>`. The rule
@@ -104,15 +114,15 @@ This rule is here because the inline-display preference and the one-question-at-
   your place* while doing it. Failing it silently pollutes `main`'s
   working tree.
 
-## Browser testing
+## Browser testing [SESSION]
 
 - A remote ChromeDriver is available at `http://localhost:9515` (W3C WebDriver). The Pi sandbox cannot launch Chrome locally, so any layout, CSS, or DOM-behavior check must drive this driver. `GET /status` returns `{ready: true}` once it has a browser booted.
 - Sessions are created by `POST /session` with `capabilities.alwaysMatch.browserName: "chrome"` and `goog:chromeOptions.args: ["--headless=new", "--disable-gpu", "--no-sandbox", "--window-size=W,H"]`. The response wraps the new id under `value.sessionId` (W3C shape, not the legacy top-level `sessionId`).
 - Script results from `POST /session/{id}/execute/sync` are wrapped: numbers/booleans come back as `{value: N}`, but objects are returned as the plain object. `JSON.stringify` the script return value before parsing so the protocol's coercion does not produce `[object Object]` on error paths.
-- The dashboard serves content-addressed assets (`/pl-review/assets/review.{html,css,js}`) with `cache-control: public, max-age=31536000, immutable`, so a CSS or JS fix requires a dashboard-server restart, not just a browser reload, to clear the in-memory `cachedReviewAssets`. Hit `POST /shutdown` with the daemon bearer to stop a test server, then start a fresh one on a free port (e.g. `HIVE_TELEMETRY_PORT=43195`) so the user's 43191 instance keeps running.
-- `POST /review-sessions` requires the dashboard bearer token from `GET /bootstrap.json` plus matching `host`, `origin`, and `referer` headers; without all four the mint is rejected before any HTML is served. The minted URL embeds the nonce — if the proposal file changes, the nonce is invalidated (409 "review artifact changed"), so re-mint before re-running a browser check.
+- *(Extension contract, used during test setup.)* The dashboard serves content-addressed assets (`/pl-review/assets/review.{html,css,js}`) with `cache-control: public, max-age=31536000, immutable`, so a CSS or JS fix requires a dashboard-server restart, not just a browser reload, to clear the in-memory `cachedReviewAssets`. Hit `POST /shutdown` with the daemon bearer to stop a test server, then start a fresh one on a free port (e.g. `HIVE_TELEMETRY_PORT=43195`) so the user's 43191 instance keeps running.
+- *(Extension contract, used during test setup.)* `POST /review-sessions` requires the dashboard bearer token from `GET /bootstrap.json` plus matching `host`, `origin`, and `referer` headers; without all four the mint is rejected before any HTML is served. The minted URL embeds the nonce. If the proposal file changes, the nonce is invalidated (409 "review artifact changed"), so re-mint before re-running a browser check.
 
-## Useful commands
+## Useful commands [SESSION]
 
 ```sh
 just dashboard-build
@@ -120,7 +130,7 @@ just verify
 just pack-dry-run
 just pi-dev
 
-# Worktree (from APP_ROOT) — required for ALL file edits
+# Worktree (from APP_ROOT) - required for ALL file edits
 git worktree add .worktrees/<branch> <base>
 cd .worktrees/<branch>
 just install    # populates node_modules in the worktree
@@ -140,3 +150,4 @@ Install with:
   pi install npm:@tintinweb/pi-subagents@latest
   pi install npm:pi-ask-user
 <!-- END COMPOUND PI TOOL MAP -->
+<!-- The block above is auto-injected by pi-compound-engineering (scope [SESSION]). The BEGIN/END markers are owned by that package and cannot be retagged from this file. -->
