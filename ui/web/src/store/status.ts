@@ -146,6 +146,10 @@ export function buildEventStatus(events: HiveEvent[]): AgentStatusBySession {
       // surfaced as a merge interaction when WT-1 narrowed `HiveEvent.type`
       // from `HiveEventType | string` to `HiveEventType`, exposing the
       // previously-silent gaps in this switch.
+      // Domain-override audit events (granted/revoked) are logged for
+      // traceability but do not affect agent status.
+      case "domain_override.granted":
+      case "domain_override.revoked":
       case "error":
       case "user_message":
       case "assistant_message":

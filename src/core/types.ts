@@ -457,6 +457,21 @@ export interface HiveState {
   // branch point for the hive→normal restore. Reset on each entry transition so
   // its presence reliably means "a snapshot was taken for the current cycle."
   hiveCycleSnapshotLeafId?: string;
+  // KTD4 plumbing for per-delegation domain override (U2): the merged
+  // scope the active delegation holds for the lifetime of its call. U2
+  // sets this in `dispatchAgent` after `preflightCheck` passes, U3 reads
+  // it from `enforceDomainForTool` against this same field, U2 clears it
+  // in the dispatch `finally` block on every termination path. Nested
+  // delegations (AE8) overwrite this field with the inner scope — the
+  // outer scope is restored when the inner delegation revokes. Undefined
+  // means "no active override; enforcement reads `runtime.config.domain`
+  // only" (the pre-U2 behavior).
+  activeOverrides?: {
+    delegationId: string;
+    worker: string;
+    mergedScope: DomainScope[];
+    staticReference: string;
+  };
 }
 
 // ── Budget refactor (Wave 0 contract stubs) ─────────────────────────────────

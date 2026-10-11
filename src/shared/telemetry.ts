@@ -77,7 +77,17 @@ export type HiveTelemetryEventType =
   // server-runtime ingest boundary (and on the dashboard store) so event
   // counts/lists stay meaningful; kept in the union so the filter check is
   // typeable. Production emit sites should never write this type.
-  | "delegation_progress";
+  | "delegation_progress"
+  // Per-delegation domain override lifecycle (U2). Emitted at grant time
+  // (after `preflightCheck` passes, before worker session creation) and at
+  // revoke time (in the dispatch `finally` block, on every termination
+  // path). Paired on `delegationId`; the field set is documented in the
+  // domain-override design doc §4.8. The union members were registered
+  // during U2 (deviation: plan §"Implementation Units" assigns this to U4)
+  // because `emitHiveEvent` calls in U2's body wrap would fail typecheck
+  // without them; U4 will own listener wiring + ingest-surface tests.
+  | "domain_override.granted"
+  | "domain_override.revoked";
 
 export type TelemetryAgentStatus = "idle" | "running" | "waiting" | "done" | "error";
 export type TelemetryAgentRole = "orchestrator" | "lead" | "member";

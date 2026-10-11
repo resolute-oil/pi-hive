@@ -670,6 +670,10 @@ function materializeTypedEvent(event: HiveTelemetryEvent) {
     // surfaced as a merge interaction when WT-1 widened `HiveTelemetryEventType`
     // (added `delegation_progress` and a few other recent members) without
     // touching this switch.
+    // Domain-override audit events (granted/revoked) are logged for
+    // traceability but intentionally do not materialize a hot entity.
+    case "domain_override.granted":
+    case "domain_override.revoked":
     case "session_start":
     case "user_message": // Phase 2.2: dropped typed messages table
     case "assistant_message": // Phase 2.2: dropped typed messages table
