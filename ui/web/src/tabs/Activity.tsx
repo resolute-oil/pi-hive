@@ -111,7 +111,7 @@ function itemTitle(item: ActivityItem): string {
     // dispatcher (R8). The orchestrator fallback renders the prior default
     // behavior (the literal event type) so existing consumers see no change
     // for the common path, only operations-dispatched grants get the new
-    // distinguishing wording. See src/engine/dispatch.ts:498 and
+    // distinguishing wording. See src/engine/dispatch.ts:510 and
     // src/shared/telemetry.ts TelemetryAgentRole for the source.
     case "domain_override.granted":
       return p.dispatcherRole === "operations"

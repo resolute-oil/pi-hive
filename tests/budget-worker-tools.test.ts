@@ -618,7 +618,7 @@ test("BudgetExhaustedError propagates through dispatchAgent's caller (no silent 
 
 // ── Test 12 (T2.2): dispatch.ts refactor verification ─────────────────────
 
-test("T2.2: src/engine/dispatch.ts delegates to delegateAgent (file ≤650 LOC, references the new function, and the dispatcher actually calls it — not just imports it)", async () => {
+test("T2.2: src/engine/dispatch.ts delegates to delegateAgent (file ≤1100 LOC, references the new function, and the dispatcher actually calls it, not just imports it)", async () => {
   const fs = await import("node:fs/promises");
   const path = await import("node:path");
   const dispatchPath = path.join(import.meta.dirname, "..", "src", "engine", "dispatch.ts");
