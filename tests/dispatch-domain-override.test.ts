@@ -535,3 +535,112 @@ test("dispatchAgent U2 AE2/crash — unhandled throw from post-grant setup escap
   assert.equal(rs[0].payload.terminationReason, "crash", "post-grant throw escaping all inner catches ⇒ crash");
   assert.equal(state.activeOverrides, undefined, "finally clears KTD4 even on crash");
 });
+
+// ── AE8 / R5 / R7 — nested delegate_agent each has its own lifetime ────
+
+test("dispatchAgent U2 AE8 — nested delegate_agent produces two distinct grant/revoke pairs joined by delegationId", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-uo-nested-"));
+  // Parent + child share the same static config — the spec's "B has its
+  // own effective scope built from parent's static + B's override"
+  // describes this baseline. Distinct override subdirs (app/ vs test/)
+  // so each grant event carries a different `overrideEntries`, which is
+  // how a downstream audit query can reconstruct which override was
+  // active during each delegation without consulting the dispatch call.
+  const staticDomain: DomainScope[] = [{ path: "src/", read: true, upsert: false, delete: false }];
+  const parent = runtimeFor({ name: "Parent", sessionFile: join(dir, "p.jsonl"), domain: staticDomain });
+  const child = runtimeFor({ name: "Child", sessionFile: join(dir, "c.jsonl"), domain: staticDomain });
+  // The orchestrator → lead → worker tree requires the parent to have
+  // permission to delegate to the child. The default `runtimeFor`
+  // helper produces a `role: "member"` config which `canDelegateTo`'s
+  // tree-only branch rejects with "X is not configured to delegate to
+  // other agents" — this is the SAME rejection that blocks a real
+  // "member"-role worker from spawning a child via the
+  // `delegate_agent` tool. Promote the parent to `role: "lead"` and
+  // declare the child in `allowedAgents` so the nested dispatch
+  // passes `canDelegateTo` (production-parallel: orchestrator or lead
+  // dispatching into their subtree).
+  (parent.config as AgentConfig).role = "lead";
+  (parent.config as AgentConfig).allowedAgents = ["child"];
+  const state = fixture({ dir, worker: parent });
+  // The single-worker fixture only puts the primary worker in
+  // `state.runtimes`; both `resolveRuntime` and `agentRoster` (used by
+  // the early-return guard at dispatch.ts:120 and preflightCheck's
+  // "Unknown agent" branch) read from this map, so the child runtime
+  // has to land in the SAME map the orchestrator reads from.
+  // `state.config.agents` is consulted by `allConfiguredAgents` /
+  // permission checks; matching the runtimes map keeps the test's
+  // view of the agent roster internally consistent.
+  state.runtimes.set("child", child);
+  state.config.agents.push(child.config);
+  const ctx = { ...baseCtx, cwd: dir } as any;
+
+  const parentOverride: OverrideEntry[] = [{ path: ".worktrees/x/app/", upsert: true, delete: false }];
+  const childOverride: OverrideEntry[] = [{ path: ".worktrees/x/test/", upsert: true, delete: false }];
+
+  // The child's session factory is a clean one-shot (no nested
+  // recursion — terminating the chain with `cleanSession`'s
+  // `agent_end` so `runPromptAndFinalize` sees a clean finish). The
+  // parent's session factory's `prompt()` synchronously awaits the
+  // child's `dispatchAgent` call before resolving — this is the SDK's
+  // `delegate_agent` tool running inside the parent's worker session
+  // in production (single-threaded JS event loop).
+  const childCreate: CreateAgentSession = (async () => ({ session: cleanSession() })) as any;
+  const parentCreate: CreateAgentSession = (async () => ({
+    session: capturingSession({
+      prompt: async () => {
+        await dispatchAgent(state, "Child", "child task", ctx, childCreate, undefined, undefined, childOverride);
+      },
+    }),
+  })) as any;
+
+  const result = await dispatchAgent(state, "Parent", "parent task", ctx, parentCreate, undefined, undefined, parentOverride);
+
+  assert.equal(result.exitCode, 0, "nested parent dispatch should exit 0; output=" + result.output);
+
+  const events = readEmittedEvents(state.session.observabilityLog);
+  const gs = grants(events);
+  const rs = revokes(events);
+  assert.equal(gs.length, 2, "expected two grants (one per delegation); got " + gs.length);
+  assert.equal(rs.length, 2, "expected two revokes (one per delegation); got " + rs.length);
+
+  // Identify each grant by the worker slug it was emitted for, then
+  // pin delegationId distinctness — AE8's "B has its own" requires
+  // each nested dispatch to mint a fresh UUID, NOT share with its
+  // parent. Sharing would break AE9's downstream join.
+  const parentGrant = gs.find((g) => g.payload.worker === "parent");
+  const childGrant = gs.find((g) => g.payload.worker === "child");
+  assert.ok(parentGrant, "parent grant must be present");
+  assert.ok(childGrant, "child grant must be present");
+  assert.notEqual(parentGrant.payload.delegationId, childGrant.payload.delegationId, "nested delegations must mint distinct delegationIds");
+
+  // Each revoke pairs with its grant on delegationId (AE9 round-trip —
+  // the "join on delegationId" the design's audit query depends on).
+  const parentRevoke = rs.find((r) => r.payload.delegationId === parentGrant.payload.delegationId);
+  const childRevoke = rs.find((r) => r.payload.delegationId === childGrant.payload.delegationId);
+  assert.ok(parentRevoke, "parent revoke must match parent grant by delegationId");
+  assert.ok(childRevoke, "child revoke must match child grant by delegationId");
+  for (const r of [parentRevoke, childRevoke]) {
+    assert.equal(r.payload.terminationReason, "return", "both clean finishes ⇒ return");
+  }
+
+  // Each grant event's `overrideEntries` matches the override passed to
+  // its dispatch — the audit log can reconstruct which override was
+  // active during each delegation purely from `granted` + `revoked`
+  // pairs, without consulting the original `delegate_agent` call.
+  assert.deepEqual(parentGrant.payload.overrideEntries, parentOverride, "parent grant overrideEntries must match the dispatched override");
+  assert.deepEqual(childGrant.payload.overrideEntries, childOverride, "child grant overrideEntries must match the dispatched override");
+
+  // The static config is the same for both nested siblings (parent and
+  // child share `runtime.config.domain`), so both `staticReference`
+  // digests must be identical — confirms AE10's "recompute against
+  // the recorded value" rule across nested siblings and pins the
+  // audit log's claim that B's effective scope is built from the SAME
+  // static the parent had.
+  assert.equal(parentGrant.payload.staticReference, childGrant.payload.staticReference, "shared static config ⇒ identical staticReference across siblings");
+  assert.equal(parentGrant.payload.staticReference.length, 64, "staticReference must be a sha256 hex digest (64 chars)");
+
+  // KTD4 plumbing restored: the outer's revoke clears the field last.
+  // `activeOverrides` is undefined after both delegations end — no
+  // global residue leaks to subsequent dispatches.
+  assert.equal(state.activeOverrides, undefined, "activeOverrides must be undefined after the outer revoke");
+});
