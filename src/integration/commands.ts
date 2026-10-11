@@ -57,6 +57,53 @@ const defaultCommandDeps: CommandDeps = {
   fetch: globalThis.fetch.bind(globalThis),
 };
 
+/**
+ * Register commands that work without a project hive-config. Today only
+ * `/hive:version` qualifies: its handler reads git metadata from the
+ * extension's own source directory, so a project that has not opted in can
+ * still run the command to confirm the extension is loaded.
+ *
+ * `registerCommands` is gated on the config-existence check in `index.ts`;
+ * callers must invoke this function before that gate so the diagnostic
+ * stays available.
+ */
+export function registerAlwaysOnCommands(pi: ExtensionAPI) {
+  // Show the running pi-hive source version (git SHA + branch + dirty
+  // status) so users can verify the server picked up the latest commits
+  // without restarting. The long-running `pi -e .` doesn't hot-reload
+  // src/engine/* (HANDOFF pitfall #1), so after a code change the only
+  // way to confirm a restart actually loaded the new code is to ask the
+  // running process what its source SHA is, which is exactly what this
+  // command does.
+  pi.registerCommand("hive:version", {
+    description: "Show the running pi-hive source version (git SHA + branch + dirty status)",
+    handler: async (_args: string, ctx: ExtensionContext) => {
+      const { execFileSync } = await import("node:child_process");
+      const git = (args: string[]): string =>
+        execFileSync("git", args, { cwd: EXTENSION_ROOT, encoding: "utf8" }).trim();
+      let message: string;
+      try {
+        const sha = git(["rev-parse", "HEAD"]);
+        const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]);
+        const status = git(["status", "--short"]);
+        const dirty = status ? `dirty (${status.split("\n").length} files)` : "clean";
+        const shortSha = sha.slice(0, 7);
+        const branchDisplay = branch === "HEAD" ? `detached @ ${shortSha}` : branch;
+        const subject = git(["log", "-1", "--format=%s"]);
+        message = `pi-hive ${branchDisplay} @ ${shortSha} — ${dirty}\nLatest commit: ${subject}\nFull SHA: ${sha}`;
+      } catch (e: any) {
+        message = `pi-hive version check failed: ${e.message}. (Is this a git checkout, or a packaged install?)`;
+      }
+      if (ctx.hasUI) ctx.ui.notify(message, "info");
+    },
+  });
+}
+
+/**
+ * Register every `/hive` command that needs an active hive-config. The one
+ * exception is `/hive:version`, which lives in {@link registerAlwaysOnCommands}
+ * so projects without a config can still verify the extension is loaded.
+ */
 export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: Partial<CommandDeps> = {}) {
   const deps: CommandDeps = { ...defaultCommandDeps, ...overrides };
   // Three explicit mode commands + a cycle key (normal → plan → hive → normal).
@@ -88,36 +135,6 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: 
     handler: async (_args: string, ctx: ExtensionContext) => {
       const result = renderHiveDoctor(state, ctx.cwd, EXTENSION_ROOT);
       if (ctx.hasUI) ctx.ui.notify(result.text, result.severity);
-    },
-  });
-
-  // Show the running pi-hive source version (git SHA + branch + dirty
-  // status) so users can verify the server picked up the latest commits
-  // without restarting. The long-running `pi -e .` doesn't hot-reload
-  // src/engine/* (HANDOFF pitfall #1), so after a code change the only
-  // way to confirm a restart actually loaded the new code is to ask the
-  // running process what its source SHA is — which is exactly what this
-  // command does.
-  pi.registerCommand("hive:version", {
-    description: "Show the running pi-hive source version (git SHA + branch + dirty status)",
-    handler: async (_args: string, ctx: ExtensionContext) => {
-      const { execFileSync } = await import("node:child_process");
-      const git = (args: string[]): string =>
-        execFileSync("git", args, { cwd: EXTENSION_ROOT, encoding: "utf8" }).trim();
-      let message: string;
-      try {
-        const sha = git(["rev-parse", "HEAD"]);
-        const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]);
-        const status = git(["status", "--short"]);
-        const dirty = status ? `dirty (${status.split("\n").length} files)` : "clean";
-        const shortSha = sha.slice(0, 7);
-        const branchDisplay = branch === "HEAD" ? `detached @ ${shortSha}` : branch;
-        const subject = git(["log", "-1", "--format=%s"]);
-        message = `pi-hive ${branchDisplay} @ ${shortSha} — ${dirty}\nLatest commit: ${subject}\nFull SHA: ${sha}`;
-      } catch (e: any) {
-        message = `pi-hive version check failed: ${e.message}. (Is this a git checkout, or a packaged install?)`;
-      }
-      if (ctx.hasUI) ctx.ui.notify(message, "info");
     },
   });
 
