@@ -474,6 +474,14 @@
   .outcome { @apply inline-grid place-items-center w-[15px] h-[15px] rounded-full text-[9px] font-bold flex-none; }
   .outcome.ok { color: var(--done); background: var(--done-soft); }
   .outcome.err { color: var(--crit); background: var(--crit-soft); }
+  /* Per-delegation domain-override dispatcher-role badge (R8). Pairs with
+     the `tl-type` label on grant/revoke rows. Operations is the lifecycle
+     lead on the new tier; the brand-tinted pill mirrors the design
+     vocabulary used elsewhere for "this is the persona that owns a
+     capability", while still being visually distinct from the run-toned
+     `tl-type` so the two read separately at a glance. */
+  .role-badge { @apply inline-grid place-items-center rounded-full px-[7px] py-[1px] text-[9.5px] font-bold tracking-[.04em] uppercase border flex-none; }
+  .role-badge-operations { color: var(--brand); background: var(--brand-bg); border-color: var(--accent-border); }
   /* agent thinking rows: 2-line preview collapsed, full text expanded */
   .think-text { @apply text-[12.5px] mt-1.5 leading-relaxed; color: var(--ink-dim); white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .think-text.expanded { -webkit-line-clamp: unset; display: block; }
