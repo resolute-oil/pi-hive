@@ -30,6 +30,8 @@ Runtime behavior:
 - Each worker runs as a **separate in-process Pi `AgentSession`** with its own transcript, tool allow-list, resource loader, and **enforced filesystem domains + agent-type policy**.
 - After a worker finishes, a cheap-model **distiller** consolidates that agent's durable `*-mental-model.yaml` out-of-band.
 
+Typical software hives also include an Operations lead at this level that owns the worktree, remote-git, and PR lifecycle; it is treated identically to the other top-level leads (same `agent-type: lead`, same read-only posture) but routes a focused subset of tasks from the orchestrator. See §9b.1 for the template.
+
 ### Session modes (normal / plan / hive)
 The session runs in one of three modes; the main Pi session changes identity with the mode:
 - **normal** — plain Pi chat. No hive tools, **no enforcement**. The hive is dormant.
@@ -56,7 +58,7 @@ Delegation permission follows the same tree: **a node may delegate to its direct
 
 Before writing anything, the agent should help the user converge on a tree. Good hives mirror **how the work actually divides**, not an org chart. Heuristics:
 
-- **Teams = phases or concerns of the work**, not job titles. Typical software hive: a *Planning/Requirements* team, an *Engineering* team, a *Validation/QA* team. A data project might have *Ingestion*, *Modeling*, *Analysis*. A writing project might have *Research*, *Drafting*, *Editing*.
+- **Teams = phases or concerns of the work**, not job titles. Typical software hive: a *Planning/Requirements* team, an *Engineering* team, a *Validation/QA* team — and, when the team needs lifecycle automation, an *Operations* team that owns worktrees, remote git, and PR lifecycle. A data project might have *Ingestion*, *Modeling*, *Analysis*. A writing project might have *Research*, *Drafting*, *Editing*.
 - **Members = the distinct specialist lenses** a lead needs. Engineering often splits into Frontend / Backend (and Backend may nest a Database sub-lead). Validation splits into QA / Security.
 - **Keep it as small as it can be.** Every worker is an `AgentSession` and a prompt; more agents = more cost and coordination. Start with 2–4 leads, 1–3 members each. Add depth only where a member genuinely owns a sub-area with its own reports.
 - **A lead with one member is a smell** — either inline that work into the lead or add the missing sibling.
@@ -68,7 +70,8 @@ Before writing anything, the agent should help the user converge on a tree. Good
 Ask conversationally; batch related questions. Don't proceed to scaffolding until you have answers (or the user says "use sensible defaults").
 
 1. **Project domain & stack.** "What is this project, and what's the tech stack?" (Drives team naming, domains, and the per-agent knowledge files.)
-2. **Teams (top-level leads).** "What top-level teams should the hive have? For each, what does it own?" Offer a default for the project type if they're unsure (e.g. for an app: Planning, Engineering, Validation).
+2. **Teams (top-level leads).** "What top-level teams should the hive have? For each, what does it own?" Offer a default for the project type if they're unsure (e.g. for an app: Planning, Engineering, Validation; for an app with a worktree/PR lifecycle: Planning, Operations, Engineering, Validation).
+- **Lifecycle scope.** "Which side-effects cross the worktree boundary — remote pushes, PR open/close, merge gates — and who owns them?" The answer is usually "the Operations lead"; document it explicitly so the team has a single routing target for those flows.
 3. **Members per team.** "For each team, what specialist members does the lead need?" Probe for the natural splits (frontend/backend, qa/security, etc.). Ask whether any member needs its own sub-members (a sub-lead).
 4. **Filesystem domains.** For every agent that touches files: "Which directories may this agent **read**, and which may it **write** (`upsert`) or **delete**?" This is the security boundary (see §8). Leads usually get read-only over the repo + write to docs/specs; coders get write to their code area.
 5. **Tools per agent.** "Should this agent edit files (`edit`/`write`), run shell (`bash`), or only read/search?" Default members to `read, grep, find, ls` + the hive tools; grant `edit`/`write` only to agents that implement. Grant `bash` sparingly.
@@ -111,6 +114,8 @@ Create exactly this structure under the project root. Each agent lives in its ow
     <skill-name>/SKILL.md               # standard skill frontmatter + instructions
   sessions/                             # runtime-generated; do NOT hand-create. gitignore it.
 ```
+
+An `operations/` folder follows the same shape. Operations typically has at least one `coder`-typed member to perform the actual remote git/PR writes; the lead itself is `agent-type: lead` and is read-only per §7.1.
 
 Conventions:
 - Folder & file stems are the agent name in **kebab-case** (`Backend Dev` → `backend-dev/backend-dev.md`).
@@ -307,6 +312,18 @@ hive:
             - name: <Member>
               color: "#a6e3a1"
               path: .pi/hive/agents/<lead-b>/<sub-lead>/<member>/<member>.md
+      # Operations lead (optional). Owns worktree lifecycle, remote git, PR
+      # open/close, and the HANDOFF cycle. Routes its writes through
+      # coder-typed members — the lead itself is agent-type: lead and is
+      # read-only per §7.1.
+      - name: Operations
+        color: "#fab387"
+        path: .pi/hive/agents/operations/operations.md
+        routing-tags: [handoff, worktree, push, "pull request", preflight]
+        members:
+          - name: Git Operator
+            color: "#94e2d5"
+            path: .pi/hive/agents/operations/git-operator/git-operator.md
 ```
 
 > **Both blocks are required.** `hive-config.yaml` must define *both* a `hive:` team block and a `planning:` team block — the loader hard-throws otherwise. There is no top-level `orchestrator:` / `agents:` shape: keeping the two hierarchies explicit is deliberate so a project cannot silently run plan mode against its coding tree.
@@ -375,7 +392,7 @@ These extension tools can be granted via an agent's `tools` list:
 
 | Tool | Grant to | Purpose |
 |---|---|---|
-| `delegate_agent` | **leads only** (anyone with members) | Delegate a focused task to a direct report, or to a typed specialist (`coder`/`tester`/`reviewer`/`planner`) for a read-only inspection. `lead`-typed targets stay tree-bound. The core fan-out tool. |
+| `delegate_agent` | **leads only** (anyone with members) | Delegate a focused task to a direct report, or to a typed specialist (`coder`/`tester`/`reviewer`/`planner`) for a read-only inspection. `lead`-typed targets stay tree-bound. The core fan-out tool. Accepts an optional `domain_override` (see §7.1.1) so orchestrator and Operations personas can grant a per-dispatch write scope inside a worktree. |
 | `route_agent` | leads / orchestrator | Score which agent should handle a task before delegating. |
 | `team_status` | any | Inspect live session, active runs, per-agent tokens/cost. |
 | `team_conversation` | any | Read **one named agent's** transcript (scoped; requires an `agent` arg). Used to inspect e.g. what a reviewer found. |
@@ -437,7 +454,7 @@ Agent type is **separate from the derived tree role** (orchestrator/lead/member)
 | `coder` | `code` / `docs` / `tasks` — **never `spec`** | no | only if it has a `commit:` field | Implements production code and tests **within its domain**. |
 | `tester` | tests (drawn by its domain `include`/`exclude` globs) | no | only with `commit:` | Writes tests, not production code. |
 | `reviewer` | **nothing (read-only)** — explicit inspection-command allowlist only | **yes** — `submit_review_verdict` (reviewer-only tool) | no | Reads and reviews; delegates tests to a tester; submits a structured red/yellow/green verdict. |
-| `lead` | **nothing (read-only)** — explicit inspection-command allowlist only | no | no | Delegates and coordinates. Includes the orchestrator. |
+| `lead` | **nothing (read-only)** — explicit inspection-command allowlist only | no | no | Delegates and coordinates. Includes the orchestrator. An Operations lead is `agent-type: lead` and inherits this read-only surface; it owns remote-git, PR, and worktree flows via its `coder`-typed members, not by editing the working tree directly. |
 
 **Two layers gate every mutation; both must pass.** (1) The **domain** globs (§8) — "may this agent touch this path at all?" (2) The **type policy** — "may this *type* perform this *action* on this *kind of file?" So a `coder` whose domain allows the project root still cannot write an `openspec/changes/**` artifact (wrong type), and a `planner` cannot write `src/**` even if its domain allows it (wrong type × class).
 
@@ -478,6 +495,12 @@ The default delegation gate (`canDelegateTo` in `src/engine/domain.ts`) is the t
 
 **Opting out of the widening (Option B).** `delegate_agent` accepts an optional `isReadOnly` boolean. When the caller passes `isReadOnly: false`, the type-based widening is BLOCKED and only tree-match delegation succeeds. Default behavior (omitted or `true`) preserves the widening so existing flows don't change. Use this when the caller KNOWS the delegation is for a write-capable target and wants to keep the delegation in the lead tree — e.g. the orchestrator explicitly routing a worktree-class task to `operations` rather than a `coder`. Tree-match delegations are unaffected by `isReadOnly`. `lead`-typed agents stay tree-bound regardless of the flag (they're never in the widening set).
 
+**Per-dispatch write scope (`domain_override`).** `delegate_agent` accepts an optional `domain_override: OverrideEntry[]` parameter. Each `OverrideEntry` is `{ path: string; upsert: boolean; delete: boolean; include?: string[]; exclude?: string[] }` — a strict subset of `DomainScope` (see §8) that reuses `upsert` / `delete` / `include` / `exclude` and intentionally omits `read`. Only the **orchestrator** and **Operations** personas can pass it; lead and worker personas cannot. Lead agents stay tree-bound and are unaffected. Use `domain_override` when the worker must write into a path the static `domain:` block cannot name — most commonly a per-change worktree subdir like `.worktrees/<change-id>/app/`. See §8.1 for the operator-side lifecycle that creates the worktree and merges back.
+
+**Validation rules (the override is a domain-layer delta, not a fence loosener).** `dispatchAgent()` runs the override through `preflightCheck` before the worker session starts; any rejection returns a structured error and the worker never spawns (the grant event is not emitted). The five predicates: (1) no entry grants a **reserved path** (`.git/**`, `.env*`, `**/*.key`, `**/*.pem`, `config/master.key`, `config/credentials*`, `.pi/hive/sessions/**`, plus every entry in `settings.secret-paths` — see §5); (2) no entry grants `upsert: true` or `delete: true` to a `reviewer`-typed worker; (3) the merged scope does not exceed the agent's static `budgets:` cap; (4) the merged scope does not violate the configured `depth.cap`; (5) `isReadOnly: true` plus any write-bearing entry is rejected as inconsistent state. An empty `domain_override: []` is treated as no override — no grant event, no scope widening.
+
+**Audit trail.** Every dispatch emits two Hive telemetry events through `emitHiveEvent`: a `domain_override.granted` record (with `delegationId`, `dispatcher`, `dispatcherRole`, `worker`, `changeId`, `grantedAt`, `overrideEntries`, `staticReference`) immediately before the worker runs, and a `domain_override.revoked` record (with `delegationId`, `revokedAt`, `terminationReason` — one of `return` / `error` / `abort` / `crash` / `budget-exhausted` / `queue-cancelled`) on every termination path, including orchestrator crash. To reconstruct the effective scope for a past dispatch, join the two events on `delegationId` in the dashboard's session archive (see `README.md` "Hive telemetry"). The `staticReference` field is a digest of the static `domain:` block at grant time — re-deriving it from the worker's `.md` lets an auditor detect a drift between the recorded grant and the current config.
+
 ---
 
 ## 8. Domains — the enforced filesystem boundary (security-critical)
@@ -485,6 +508,8 @@ The default delegation gate (`canDelegateTo` in `src/engine/domain.ts`) is the t
 `domain` scopes are **enforced at the registered tool layer**: `read`/`grep`/`find`/`ls`/`edit`/`write` and recognized path-bearing/mutating `bash` calls outside an agent's domains are blocked. Domain and type policy are meaningful controls for cooperative agents, but not process or OS sandboxing; interpreter-wrapped writes are statically unpoliceable.
 
 Each scope: `{ path, read, upsert, delete, include, exclude, description }`.
+
+The `domain_override` parameter on `delegate_agent` (§7.1.1) uses `OverrideEntry = { path, upsert, delete, include?, exclude? }` — the `DomainScope` shape minus `read` and `description`. The `read` field is intentionally absent because the override never narrows the agent's read scope; the `description` field is a config-only annotation that does not need to be repeated at dispatch time.
 
 - `read`, `upsert`, and `delete` are **required on every scope**. They must be explicit `true` or `false`; omission is a config error.
 - `read: true` — may read under this path. `upsert: true` — may create/modify (`edit`, `write`, `mv/cp/touch/mkdir/…`). `delete: true` — may delete (`rm`, etc.).
@@ -555,6 +580,21 @@ Always pair UI/role restrictions with the matching backend/domain restriction �
 
 ---
 
+## 8.1 Worktree workflow (dispatch-site writes into a per-change subdir)
+
+pi-hive is designed so coding agents mutate only inside a per-change worktree subdir at `APP_ROOT/.worktrees/<change-id>/<subdir>/`, never into `APP_ROOT` directly during hive mode. The operator's role in this workflow is to **create the worktree, dispatch into it with a per-delegation scope, merge, and clean up** — pi-hive itself does not manage worktree lifecycle.
+
+**Why a worktree.** The static `domain:` block in each worker `.md` cannot express paths containing a `<change-id>` segment that doesn't exist until `/hive:execute <change-id>` creates the worktree. The `domain_override` parameter on `delegate_agent` (see §7.1.1) closes that gap: the orchestrator or Operations persona names the per-dispatch paths inside the worktree, the runtime enforces them, and the static config reverts on return. Reserved-paths and reviewer-type policy remain binding; an override that would grant a reserved path (`.env*`, `.pi/hive/sessions/**`, etc.) is rejected at the pre-flight gate and would also be blocked at the reserve-paths fence.
+
+**Operator lifecycle.**
+
+1. **Create.** From `APP_ROOT`, run `git worktree add .worktrees/<change-id> -b <branch>` (the operator picks the branch name; it should match the OpenSpec change id when using the spec workflow). For conflict-resolution runs, use the `_conflict-<change-id>` suffix; both patterns are accepted by the override pre-flight gate.
+2. **Dispatch.** The orchestrator (or Operations persona — see §9b.1) calls `delegate_agent` to a worker and supplies a `domain_override` listing the paths inside the worktree the worker may write. See §7.1.1 for the parameter shape, validation rules, and audit events. The Operations persona is the preferred owner of the create/preflight/push/PR-open cycle (see §9b.1).
+3. **Inspect.** Every grant/revoke pair is logged as a Hive telemetry event; join `domain_override.granted` and `domain_override.revoked` on `delegationId` in the dashboard's session archive (see `README.md` "Hive telemetry") to reconstruct any past delegation's effective scope.
+4. **Merge and clean up.** Merge the worktree branch back into the integration branch, then run `git worktree remove .worktrees/<change-id>`. pi-hive does not auto-cleanup worktrees; the operator owns this step.
+
+---
+
 ## 9. Copy-paste agent templates
 
 ### 9a. Orchestrator (`agents/orchestrator.md`)
@@ -603,7 +643,7 @@ You are the only user-facing voice. You route work, coordinate leads, preserve t
 
 ## Operating Principles
 - Do not pretend to inspect files or run commands yourself. Delegate substantive work to the team leads.
-- Delegate to the top-level team leads for coordinated work. For read-only inspections (asking a typed specialist to look at a specific file or component), you may also delegate directly to any agent whose `agent-type` is in {coder, tester, reviewer, planner}. `operations` remains the preferred owner of HANDOFF cycle rotation, worktree create, preflight, push, and PR-open — prefer routing those there.
+- Delegate to the top-level team leads for coordinated work. For read-only inspections (asking a typed specialist to look at a specific file or component), you may also delegate directly to any agent whose `agent-type` is in {coder, tester, reviewer, planner}. `Operations` remains the preferred owner of HANDOFF cycle rotation, worktree create, preflight, push, and PR-open — prefer routing those there.
 - Use the smallest useful pattern: one lead for bounded work, multiple leads for cross-cutting or high-risk work.
 - Give each delegation a focused objective, the expected output shape, and relevant constraints.
 - Ask for evidence and file paths when code is involved. Resolve disagreement explicitly.
@@ -613,6 +653,8 @@ Return: **Answer** (direct conclusion), **What I delegated** (when useful), **Ke
 ```
 
 ### 9b. Team lead (`agents/<lead>/<lead>.md`)
+
+If the team you're authoring is the Operations lead, see §9b.1.
 
 ```markdown
 ---
@@ -675,6 +717,85 @@ You are the <Lead Name> for this project's hive.
 
 ## Response Contract
 Return: <the lead's deliverable shape — goals/scope/decisions, or findings/risks/next-step>.
+```
+
+### 9b.1 Operations lead (`agents/operations/operations.md`)
+
+```markdown
+---
+name: Operations
+model: inherit
+thinking: medium
+agent-type: lead
+tools:
+  - read
+  - grep
+  - find
+  - ls
+  - delegate_agent
+  - route_agent
+  - team_status
+  - team_conversation
+  - hive_sdd_status
+context:
+  - path: .pi/hive/knowledge/behavior-conversational-response.md
+    use-when: Always.
+  - path: .pi/hive/knowledge/behavior-active-listener.md
+    use-when: Always.
+  - path: .pi/hive/knowledge/behavior-zero-micromanagement.md
+    use-when: Always. You coordinate the lifecycle, never perform remote writes yourself.
+  - path: .pi/hive/knowledge/operations-handoff-contract.md
+    use-when: Driving a HANDOFF cycle, worktree create/remove, preflight, push, or PR-open/close.
+skills:
+  - path: .pi/hive/skills/git-worktree-lifecycle/SKILL.md
+    use-when: Creating, removing, or resolving a `_conflict-<change-id>` worktree.
+  - path: .pi/hive/skills/git-push-preflight/SKILL.md
+    use-when: Pushing a worktree's branch to its upstream.
+  - path: .pi/hive/skills/pull-request-lifecycle/SKILL.md
+    use-when: Opening, updating, or closing a PR.
+domain:
+  - path: .worktrees/
+    read: true
+    upsert: false
+    delete: false
+  - path: .git/
+    read: true
+    upsert: false
+    delete: false   # worktree list, branch refs, FETCH_HEAD — read-only
+  - path: .
+    read: true
+    upsert: false
+    delete: false
+    exclude:
+      - ".worktrees/_conflict-*"
+routing-tags:
+  - handoff
+  - worktree
+  - push
+  - pull request
+  - preflight
+consult-when: HANDOFF cycle rotation, worktree create/remove, preflight, git push, PR open/close.
+responsibilities:
+  - Drive the HANDOFF cycle: rotate HANDOFF.md at hive→normal handoff.
+  - Own worktree lifecycle: `git worktree add .worktrees/<change-id>/…`, `git worktree remove`, and the `_conflict-<change-id>` reconciliation tree.
+  - Run preflight: artifact-hash and CI-green checks before pushing.
+  - Open, update, and close PRs (`gh pr create` / `gh pr close`); never merge.
+  - Delegate every remote git and file-system edit to a coder-typed member.
+---
+
+You are the Operations lead for this project's hive.
+
+## Role
+You own the lifecycle that crosses the worktree boundary: HANDOFF rotation, worktree create/remove, preflight, push, and PR open/close. You are read-only yourself (`agent-type: lead`); all writes run in your coder-typed members. You never merge — that is the Operator's call.
+
+## Conventions
+- One delegation per lifecycle stage; never chain two writes into a single member dispatch.
+- Always declare the `<change-id>` and any `_conflict-<id>` suffix in the delegation objective.
+- Surface `git push --force` and `git worktree remove` decisions to the Operator before the call.
+- Route HANDOFF-summary call (`hive_cycle_summary`) when entering/exiting hive mode.
+
+## Response Contract
+Return: **Lifecycle stage**, **Member delegated**, **Inputs/outputs**, **Pre/post state**, **Operator confirmation needed** (if any).
 ```
 
 ### 9c. Member / specialist (`agents/<lead>/<member>/<member>.md`)
@@ -849,7 +970,7 @@ Recommended starters to create (adapt to the project):
 - `behavior-active-listener.md` — use inlined context; `team_conversation(agent)` only for a specific transcript. **Do not tell agents to bulk-read the shared log** (it's unbounded).
 - `behavior-zero-micromanagement.md` — leads delegate, don't hoard implementation.
 - `<project>-architecture.md` — a reference map of the codebase/stack.
-- Role procedures as skills, e.g. `skills/backend-change-review/SKILL.md`, `skills/qa-test-matrix/SKILL.md`, `skills/security-threat-check/SKILL.md`.
+- Role procedures as skills, e.g. `skills/backend-change-review/SKILL.md`, `skills/qa-test-matrix/SKILL.md`, `skills/security-threat-check/SKILL.md`. For an Operations lead, also include `skills/git-worktree-lifecycle/SKILL.md` and `skills/pull-request-lifecycle/SKILL.md`.
 
 For `skills:`, prefer standard Agent Skills: a directory with `SKILL.md` and `name`/`description` frontmatter. Hive does not scan ambient project/user skill roots for agents; list every skill path the agent should see explicitly.
 
@@ -886,6 +1007,7 @@ Naming: prefix by scope — `behavior-*` (cross-cutting), `<role>-*` (role-owned
 - [ ] Every agent `skills:` entry points to a Pi-loadable skill file or directory; only these explicit skills are exposed to that worker.
 - [ ] The local telemetry dashboard auto-starts when enabled (Bun required), binds to loopback by default, and requires bearer authentication for writes. `/hive:observe` force-restarts + opens it, `/hive:observe-stop` performs authenticated teardown, and `/hive:observe-prune <days>` prunes SQLite rows (not project JSONL). It is a shared daemon, survives individual session shutdown, adopts only an exact compatible identity, and exits after bounded idle time.
 - [ ] All YAML keys are kebab-case; no tabs; consistent 2-space indentation.
+- [ ] If `Operations` is a configured lead, its `agent-type` is `lead`, it has at least one `coder`-typed member that owns remote-git/PR writes, and its `routing-tags` include at least `handoff`, `worktree`, `push`, `pull request`, and `preflight` (matching §9b.1).
 
 **Quick scaffold sanity check** (run after building):
 ```bash
@@ -916,3 +1038,4 @@ done
 - **Setting `budgets.per-worker.tokens.window: per-day`.** Only the team tier accepts `per-day` (it's a per-UTC-day cap, which is a team-aggregate concept). The worker tier forbids both `per-day` and `per-team-lifetime`; both names mean "this resource rolls over beyond one worker session." Pin per-day limits on the team tier instead.
 - **Setting `tokens.include: [...]` with non-`Usage` keys.** The only valid values are the Pi `Usage` keys: `input`, `output`, `cacheRead`, `cacheWrite`, `reasoning`. Anything else fails the typebox schema at load with an `expected one of input, output, cacheRead, cacheWrite, reasoning` error pointing at the index. Don't try to add a custom key for cache accounting — the SDK already reports the relevant signal under one of the five canonical keys.
 - **Setting both `budgets.per-worker.context.tokens` AND `budgets.per-worker.context.percent`.** The `context:` constraint accepts **exactly one** of `tokens:` (nominal cap) or `percent:` (fill on the 0–100 scale). Setting both, or neither, fails at config-load with a path-bearing error pointing at the offending tier. This is enforced by `validateBudgetsConfig` post-typebox (see `src/core/schema.ts`).
+- **Hand-rolling remote-git or PR work in a `coder` member that is not under Operations.** Remote writes that cross the worktree boundary (push, merge gate, PR open/close, HANDOFF rotation) belong under the Operations lead, not under Engineering or Validation. Treat those lifecycles as a single routing target so the audit log captures them under one `groupName`.

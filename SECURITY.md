@@ -40,7 +40,7 @@ They must be denied:
 
 Tests and builds are considered potentially mutating because arbitrary project scripts can write files or run networked processes. A reviewer or lead may run them only in a disposable checkout explicitly provisioned and isolated by trusted orchestration; pi-hive does not currently provide that environment, so they are denied in normal worker sessions. `tester` or another write-capable worker must run project tests.
 
-These restrictions are policy controls for cooperative agents, not a sandbox. See Accepted risks.
+These restrictions are policy controls for cooperative agents, not a sandbox. See Accepted risks. An Operations lead remains bound by this policy; lifecycle work (worktree, push, PR) runs in `coder`-typed members it delegates to.
 
 ## Path and symlink semantics
 

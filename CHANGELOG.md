@@ -223,6 +223,10 @@ without a corresponding section.
   stay tree-bound regardless of the flag. Implements the deferred hardening
   flagged in the PR #10 plan.
 
+### Added
+
+- `delegate_agent` now accepts an optional `domain_override: OverrideEntry[]` parameter so the orchestrator and Operations personas can grant a worker a per-dispatch write scope inside a worktree (`.worktrees/<change-id>/...`). The override is captured-and-merged with the static `domain:` block at `dispatchAgent()` entry, enforced at every tool call, and reverted on every termination path (return, error, abort, crash, budget-exhausted, queue-cancelled). Reserved-path and reviewer-type policy stay binding; pre-flight rejects reserved-path grants, reviewer writes, budget/depth-cap expansion, and `isReadOnly` + write inconsistency. Each grant emits a `domain_override.granted` Hive telemetry event paired with a `domain_override.revoked` on termination (see `README.md` "Hive telemetry"). See `SETUP.md §7.1.1` for the parameter contract and `SETUP.md §8.1` for the operator worktree lifecycle.
+
 ## [0.1.0] - 2026-07-05
 
 ### Added
