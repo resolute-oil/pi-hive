@@ -2,7 +2,7 @@ import { type AgentSession, type ExtensionContext, type ToolDefinition } from "@
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { TYPE_SCOPED_TOOL_NAMES } from "../core/constants";
-import type { AgentRuntime, HiveState } from "../core/types";
+import type { AgentRuntime, HiveState, OverrideEntry } from "../core/types";
 import {
   modelFrom,
   normalizeWorkerTools,
@@ -280,6 +280,13 @@ export async function dispatchAgent(
   createSession: CreateAgentSession = createAgentSession,
   abortSignal?: AbortSignal,
   isReadOnly?: boolean,
+  // U1: forward the per-call domain override from the `delegate_agent` tool
+  // surface. U2 picks this up — snapshot the worker's static config, merge,
+  // fire grant telemetry, run the call, fire revoke telemetry, restore in
+  // `try`/`finally`. Reserved for that wiring; the body ignores it for now
+  // (intentionally unused in this unit — U1 only widens the signature so
+  // the call site typechecks without an `as any` cast).
+  _domainOverride?: OverrideEntry[],
 ): Promise<{ output: string; exitCode: number; elapsed: number }> {
   if (!state.config || !state.session) throw new Error("hive is not initialized");
   const caller = currentAgentName();

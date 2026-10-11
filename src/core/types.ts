@@ -5,6 +5,12 @@ import type { ChildProcess } from "node:child_process";
 import type { PlanStage } from "../shared/openspec-artifacts";
 export type { PlanStage } from "../shared/openspec-artifacts";
 
+// `Static<typeof XxxSchema>` lets us derive the typebox-driven JSON shape
+// alongside the schema. The pattern is established by `BudgetsConfig` in
+// `src/core/schema.ts`; mirroring it here keeps the type/schema pair
+// discoverable in one place and avoids hand-rolled `interface` drift.
+import { Type, type Static } from "typebox";
+
 export type AgentStatus = "idle" | "running" | "done" | "error" | "queued";
 // The three session modes:
 //   normal — plain Pi chat: no hive tools, no domain/type enforcement.
@@ -84,6 +90,27 @@ export interface DomainScope {
   description?: string;
   allowOutsideProject?: boolean;
 }
+
+// Per-dispatch domain override. Captured at the `delegate_agent` tool
+// surface (U1) and merged onto the worker's static `domain:` config inside
+// `dispatchAgent` (U2). The merged scope is `static ∪ override` for the
+// lifetime of the call, then restored via `try`/`finally`. The
+// reserved-paths fence and the reviewer-type policy are enforced BEFORE
+// the merge at every tool call (the override cannot loosen either fence).
+//
+// Shape lifted verbatim from the design doc's Q4 lock: every override is
+// a (path, upsert, delete) triple, with optional include/exclude globs
+// that narrow the rule to matching files under `path` (matched relative
+// to it). `read` is intentionally absent — the override is a per-call
+// write-grant tool; static read scope is unchanged.
+export const OverrideEntrySchema = Type.Object({
+  path: Type.String({ description: "Filesystem path (relative to APP_ROOT) to which the override grants writes. Resolved at dispatch time; the worker session enforces against this path for the call's lifetime." }),
+  upsert: Type.Boolean({ description: "True to allow file creation or update at `path`. Required (not defaulted) so the caller sees the full action set on the wire." }),
+  delete: Type.Boolean({ description: "True to allow file deletion at `path`. Required (not defaulted) so the caller sees the full action set on the wire." }),
+  include: Type.Optional(Type.Array(Type.String(), { description: "Optional allow-globs that narrow the override to matching files under `path` (matched relative to `path`)." })),
+  exclude: Type.Optional(Type.Array(Type.String(), { description: "Optional deny-globs that narrow the override by removing matching files under `path` (matched relative to `path`). Excludes win over includes." })),
+});
+export type OverrideEntry = Static<typeof OverrideEntrySchema>;
 
 export interface AgentConfig {
   // Stable machine identifier. If omitted, derived from `name` as a kebab slug.
