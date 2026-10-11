@@ -115,8 +115,6 @@ Create exactly this structure under the project root. Each agent lives in its ow
   sessions/                             # runtime-generated; do NOT hand-create. gitignore it.
 ```
 
-An `operations/` folder follows the same shape. Operations is the lifecycle tier (§7.1: `agent-type: operations`) and is directly authoritative for the lifecycle surface declared in its persona's `domain:` block — HANDOFF rotation, worktree create/remove, preflight, push, PR open/close/merge. The persona performs those writes itself; the `network: true` flag enables the project's PR CLI (`gh` for GitHub, `glab` for GitLab, equivalents for Bitbucket/Gitea). Operations is the single routing target and the single audit `groupName`; it does not need a `git-operator` member on the new tier.
-
 Conventions:
 - Folder & file stems are the agent name in **kebab-case** (`Backend Dev` → `backend-dev/backend-dev.md`).
 - The mental-model file is loaded **by convention** as the sibling `<stem>-mental-model.yaml`. You never reference it in frontmatter.
