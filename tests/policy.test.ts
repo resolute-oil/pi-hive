@@ -237,6 +237,66 @@ test("enforce: reviewer upsert blocked by type even when in-domain", () => {
   assert.match(reason ?? "", /read-only/);
 });
 
+// AE5 / R11 second line of defense: even when U2's preflight has
+// populated `state.activeOverrides` for a reviewer-typed worker with an
+// override that grants `upsert: true` on a path the static config
+// forbids, the type-policy layer in `enforceDomainForTool` still
+// rejects the mutation. U2's pre-flight stops reviewer-write at the
+// dispatch site (see dispatch-domain-override.test.ts AE5/R11); this
+// test pins the in-process guard so a future refactor that bypasses
+// preflight (e.g., a `delegate_agent` call from inside a worker
+// session, or a future custom tool path) cannot silently let a
+// reviewer upsert through. The merged scope deliberately allows the
+// path the test writes to — the type layer must still win.
+test("enforce: reviewer upsert blocked by type even when override grants the path (AE5/R11)", () => {
+  // Static blocks all writes. The override grants upsert at a path
+  // inside the override scope; domain layer would pass (and would have
+  // passed without the override too, if static allowed it) — only the
+  // type-policy check stands between the reviewer and a write.
+  const reviewerRuntime = runtime("Rev", { agentType: "reviewer", domain: [{ path: ".", read: true, upsert: false, delete: false }] });
+  const state = stateWith([reviewerRuntime]) as any;
+  state.activeOverrides = {
+    delegationId: "dov-test-ae5",
+    worker: "rev",
+    mergedScope: [{ path: ".worktrees/feat-x/src/", upsert: true, delete: false }],
+    staticReference: "0".repeat(64),
+  };
+  const reason = block(state, "Rev", { toolName: "write", input: { path: ".worktrees/feat-x/src/app.ts" } });
+  assert.ok(reason, "reviewer override-path write must still be rejected");
+  // Type-layer signature ("may not upsert files" / "read-only") — NOT
+  // the domain-layer signature ("cannot modify"), so we know the
+  // override is widening the domain check rather than shadowing the
+  // type check.
+  assert.match(reason, /may not upsert files/);
+  assert.match(reason, /read-only/);
+  assert.doesNotMatch(reason, /cannot modify/, "denial must come from the type-policy layer, not the domain layer");
+  // Sanity: `enforceDomainForTool` is a pure read — it does not clear
+  // or mutate `state.activeOverrides`. The dispatch `finally` (U2) is
+  // responsible for clearing it; this test covers the read-side only.
+  assert.ok(state.activeOverrides, "enforceDomainForTool must not clear state.activeOverrides; U2's finally does");
+});
+
+// AE5 / R11 — concurrency path: the same guard applies when the
+// merged scope is threaded through the explicit 4th arg instead of
+// `state.activeOverrides`. The type layer is independent of how the
+// merged scope arrived (closure capture vs shared field), so the
+// reviewer's read-only fence cannot be widened by either KTD4
+// variant.
+test("enforce: reviewer upsert blocked by type even when effectiveDomain (4th arg) grants the path (AE5/R11, KTD4 thread)", () => {
+  const state = stateWith([runtime("Rev", { agentType: "reviewer", domain: [{ path: ".", read: true, upsert: false, delete: false }] })]);
+  const effectiveDomain = [{ path: ".worktrees/feat-x/src/", read: true, upsert: true, delete: false }];
+  // Pass the merged scope via the 4th arg; bypass shared `state` to
+  // also prove concurrency-safe callers (closure capture) hit the
+  // same fence.
+  const reason = runAsAgent("Rev", () =>
+    enforceDomainForTool(state as any, { toolName: "write", input: { path: ".worktrees/feat-x/src/app.ts" } } as any, ctx, effectiveDomain)?.reason,
+  );
+  assert.ok(reason, "threaded override + reviewer write must still be rejected");
+  assert.match(reason ?? "", /may not upsert files/);
+  assert.match(reason ?? "", /read-only/);
+  assert.doesNotMatch(reason ?? "", /cannot modify/, "denial must come from the type-policy layer, not the domain layer");
+});
+
 test("enforce: planner blocked from code, allowed spec", () => {
   const specDomain = [{ path: ".", read: true, upsert: true, delete: false }];
   const state = stateWith([runtime("Plan", { agentType: "planner", domain: specDomain })]);
