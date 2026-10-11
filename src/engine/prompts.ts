@@ -33,6 +33,20 @@ export function buildOperatingContract(runtime: AgentRuntime): string {
       if (runtime.config.commit?.trim()) lines.push(`Commit guidance: ${runtime.config.commit.trim()} Never add AI attribution trailers to commit messages.`);
       break;
     }
+    case "operations": {
+      // The lifecycle lead. Direct write authority on `.git/`,
+      // `.worktrees/`, `.pi/hive/agents/operations/`, and HANDOFF.md —
+      // the persona's `domain:` block constrains the lifecycle scope,
+      // the type-policy layer (WRITABLE_CLASSES[operations] ===
+      // ["code", "docs", "tasks"]) authorizes the file CLASSES. The
+      // dispatcherRole telemetry emits "operations" on
+      // `domain_override.granted` events (closes Kieran L2). Operations
+      // is NOT a typed-specialist target in `canDelegateTo`'s widening
+      // set — it stays tree-bound like `lead`.
+      lines.push("You are the **operations lead** (lifecycle). You perform HANDOFF rotation, worktree create/remove, preflight, `git push`, `gh pr create`/`close`/`merge` directly within your domain-constrained lifecycle scope (`.git/`, `.worktrees/`, `.pi/hive/agents/operations/`, `HANDOFF.md`). You do NOT modify application source (`src/`, `app/`, `tests/`, `openspec/`) — that work flows through `coder`-typed members. You are a canonical author of `domain_override` and your dispatcher-role telemetry emits \"operations\".");
+      if (runtime.config.commit?.trim()) lines.push(`Commit guidance: ${runtime.config.commit.trim()} Never add AI attribution trailers to commit messages.`);
+      break;
+    }
   }
   // Interpreter limitation (G1): file mutations run through a general-purpose
   // interpreter (node -e, python -c, sh script.sh, npm run …) cannot be

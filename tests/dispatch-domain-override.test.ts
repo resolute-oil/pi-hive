@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { dispatchAgent, type CreateAgentSession } from "../src/engine/dispatch.ts";
-import { runAtDelegationDepth } from "../src/engine/session.ts";
+import { runAsAgent, runAtDelegationDepth } from "../src/engine/session.ts";
 import type { AgentConfig, AgentRuntime, DomainScope, OverrideEntry } from "../src/core/types.ts";
 
 // ── helpers ─────────────────────────────────────────────────────────────
@@ -33,13 +33,14 @@ function runtimeFor(opts: {
   name: string;
   sessionFile: string;
   agentType?: AgentConfig["agentType"];
+  role?: AgentConfig["role"];
   domain?: DomainScope[];
   governance?: AgentConfig["governance"];
 }): AgentRuntime {
   return {
     config: {
       name: opts.name, slug: opts.name.toLowerCase(),
-      path: `${opts.name}.md`, role: "member",
+      path: `${opts.name}.md`, role: opts.role || "member",
       agentType: opts.agentType || "lead", routingTags: [],
       domain: opts.domain || [], tools: "read", model: "test/model", thinking: "off",
       ...(opts.governance ? { governance: opts.governance } : {}),
@@ -237,6 +238,60 @@ test("dispatchAgent U2 AE5/R11 — reviewer + write override rejected by preflig
   assert.equal(result.exitCode, 1);
   assert.match(result.output, /reviewer/i, "rejection must name the agent-type policy");
   assert.equal(grants(readEmittedEvents(state.session.observabilityLog)).length, 0);
+});
+
+// AE5 / R11 mirror — operations + write override is NOT rejected.
+//
+// The fence at `src/engine/dispatch.ts:147` is `agentType === "reviewer"`
+// (and only "reviewer"). Operations is the canonical author of
+// `domain_override` (the lifecycle lead routes `git push`,
+// `gh pr create`, `git worktree add` through writes that the static
+// config forbids); the validator must let operations through. This
+// test pins that the validator's check is reviewer-exclusive so a
+// future refactor that broadens the fence to "any read-only agent
+// type" or "operations too" surfaces here.
+test("dispatchAgent U2 AE5/R11 mirror — operations + write override is NOT rejected by preflight", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-uo-operations-"));
+  const operations = runtimeFor({
+    name: "Operations",
+    agentType: "operations",
+    role: "lead",
+    sessionFile: join(dir, "o.jsonl"),
+    domain: [
+      { path: ".git/", read: true, upsert: true, delete: true },
+      { path: ".worktrees/", read: true, upsert: true, delete: true },
+      { path: ".pi/hive/agents/operations/", read: true, upsert: true, delete: true },
+    ],
+  });
+  // Worker is `lead`-typed (not coder/tester) to bypass the hive-mode
+  // execution-gate preflight at `src/engine/dispatch.ts:110` — that
+  // gate requires an approved change id, which these unit tests do
+  // not stand up. The AE5/R11 fence being tested is reviewer-exclusive
+  // and independent of the worker's own agent-type.
+  const worker = runtimeFor({
+    name: "Builder",
+    sessionFile: join(dir, "b.jsonl"),
+    agentType: "lead",
+    domain: [{ path: "src/", read: true, upsert: false, delete: false }],
+  });
+  // canDelegateTo is the tree-bound fence at
+  // `src/engine/domain.ts:18`. The CALLER (Operations here, set via
+  // `runAsAgent` below) needs the target in its allowedAgents —
+  // mirroring the production orchestrator→Operations tree.
+  (operations.config as any).allowedAgents = ["Builder"];
+  const state = fixture({ dir, worker });
+  state.runtimes.set(operations.config.name.toLowerCase(), operations);
+  const ctx = { ...baseCtx, cwd: dir } as any;
+  const create: CreateAgentSession = (async () => ({ session: cleanSession() })) as any;
+
+  const override: OverrideEntry[] = [{ path: ".worktrees/feat-x/app/", upsert: true, delete: false }];
+  const result = await runAsAgent("Operations", () => dispatchAgent(state, "Builder", "mutate", ctx, create, undefined, undefined, override));
+
+  assert.equal(result.exitCode, 0, "operations + write override must NOT be rejected by preflight; got: " + result.output);
+  assert.doesNotMatch(result.output, /reviewer/i, "rejection must not name the reviewer fence (operations is reviewer-exclusive)");
+  const events = readEmittedEvents(state.session.observabilityLog);
+  assert.equal(grants(events).length, 1, "exactly one grant must fire for the operations-dispatched delegation");
+  assert.equal(grants(events)[0].payload.dispatcherRole, "operations", "R8: dispatcherRole is 'operations' for the operations-dispatched grant");
 });
 
 // ── AE11 / R9 — isReadOnly + write override is rejected (names both) ─────

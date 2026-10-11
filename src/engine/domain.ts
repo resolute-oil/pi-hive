@@ -833,6 +833,18 @@ export function enforceDomainForTool(state: HiveState, event: ToolCallEvent, ctx
     // the SDK's runtime contract; the Custom variant can't have toolName
     // === "bash" by definition.
     const command = String((event.input as { command?: string }).command || "");
+    // `operations` is write-capable (the same file classes as `coder` per
+    // WRITABLE_CLASSES — see src/engine/policy.ts). It deliberately does
+    // NOT enter the read-only-command allowlist below — `git push`,
+    // `gh pr create`, `git worktree add|remove`, `tar xf`, `patch -p1`,
+    // `npm install`, and the rest of the lifecycle surface are all
+    // mutations and must pass through the standard kind/domain/type
+    // checks below. The persona's `domain:` block + the `commit:` field
+    // gate are the constraints, not the inspection allowlist. The new
+    // `agent-type: operations` tier was added in the same commit that
+    // re-read this line; `lead` stays read-only because the default
+    // persona template is read-only by design. Operations is NOT added
+    // to this `readOnlyType` fence.
     const readOnlyType = runtime.config.agentType === "reviewer" || runtime.config.agentType === "lead";
 
     // Read-only types get a positive allowlist before the broader mutation and

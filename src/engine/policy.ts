@@ -23,6 +23,20 @@ const WRITABLE_CLASSES: Record<AgentType, FileClass[]> = {
   tester: ["code", "docs", "tasks"],
   reviewer: [],
   lead: [],
+  // Operations is the lifecycle lead. The type layer grants the same
+  // file classes as `coder` because the lifecycle surface writes to
+  // `.git/` (refs/FETCH_HEAD writes for `git push` / `git fetch`),
+  // `.worktrees/<change-id>/...` (worktree add/remove), and
+  // `.pi/hive/agents/operations/operations-mental-model.yaml` (persona
+  // self-maintenance) — all three classify as `code` under the
+  // classifier's RULES (none match `**/*.md`, `**/tasks.md`,
+  // `openspec/**`). The persona's `domain:` block constrains the path
+  // scope to the lifecycle surface (see SETUP.md §9b.1) — type policy
+  // decides WHAT KIND of file an agent may touch, domain decides WHICH
+  // PATH. A narrower set like `["docs", "tasks"]` would let the persona
+  // write HANDOFF.md and the operations.md body but block every actual
+  // lifecycle command at the type layer.
+  operations: ["code", "docs", "tasks"],
 };
 
 const WRITE_SUMMARY: Record<AgentType, string> = {
@@ -31,6 +45,7 @@ const WRITE_SUMMARY: Record<AgentType, string> = {
   tester: "Testers write code/docs/tasks (tests within their domain), not spec files.",
   reviewer: "Reviewers are read-only and may only submit verdicts.",
   lead: "Leads delegate and coordinate; they do not modify files.",
+  operations: "Operations writes HANDOFF.md, .pi/hive/agents/operations/ persona files, .git/ refs, and .worktrees/ entries; the persona's domain: block constrains the lifecycle scope — Operations does not modify application source code (src/, app/, tests/) outside worktree commits that flow through coder-typed members.",
 };
 
 function denyWrite(agentType: AgentType, fileClass: FileClass, action: "upsert" | "delete"): PolicyDecision {

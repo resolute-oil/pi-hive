@@ -302,7 +302,7 @@ test("routeAgents prefers Operations for HANDOFF/worktree/push/PR-open task stri
     runtime("Orchestrator", { role: "orchestrator", allowedAgents: ["Operations"] }),
     runtime("Operations", {
       role: "lead",
-      agentType: "lead",
+      agentType: "operations",
       groupName: "Operations",
       routingTags: ["handoff", "worktree", "push", "pull request"],
       consultWhen: "HANDOFF cycle rotation, worktree create, preflight, push, PR-open",
@@ -344,6 +344,48 @@ test("routeAgents prefers Operations for HANDOFF/worktree/push/PR-open task stri
       inspection.some((m) => m.name === "Frontend Coder"),
       `Frontend Coder should surface for react-related inspection; got: ${inspection.map((m) => m.name).join(", ")}`,
     );
+  });
+});
+
+// Parallel fixture for the legacy `agent-type: lead` Operations shape.
+// The routing layer is type-agnostic — it scores by `routing-tags` and
+// `consult-when` overlap regardless of agent-type. The transition from
+// `agent-type: lead` (read-only) to `agent-type: operations` (write-capable
+// for the lifecycle scope) does NOT change routing behavior. This test
+// keeps the legacy shape green as a regression guard for projects that
+// haven't yet migrated their Operations persona.
+test("routeAgents prefers Operations (agent-type: lead, legacy/transitional shape) for HANDOFF/worktree/push/PR-open task strings", () => {
+  const state = stateWith([
+    runtime("Orchestrator", { role: "orchestrator", allowedAgents: ["Operations"] }),
+    runtime("Operations", {
+      role: "lead",
+      agentType: "lead",
+      groupName: "Operations",
+      routingTags: ["handoff", "worktree", "push", "pull request"],
+      consultWhen: "HANDOFF cycle rotation, worktree create, preflight, push, PR-open",
+    }),
+    runtime("Frontend Coder", {
+      role: "member",
+      agentType: "coder",
+      groupName: "Engineering",
+      routingTags: ["react", "ui"],
+    }),
+  ]);
+
+  runAsAgent("Orchestrator", () => {
+    for (const task of [
+      "rotate the HANDOFF cycle for next session",
+      "git worktree create for fix/foo",
+      "git push the changes to remote",
+      "open a pull request for fix/foo",
+    ]) {
+      const matches = routeAgents(state, task, 3);
+      assert.equal(
+        matches[0]?.name,
+        "Operations",
+        `expected legacy-shape Operations to top-match "${task}"; got: ${matches.map((m) => m.name).join(", ")}`,
+      );
+    }
   });
 });
 

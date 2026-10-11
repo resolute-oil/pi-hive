@@ -30,6 +30,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { dispatchAgent, type CreateAgentSession } from "../src/engine/dispatch.ts";
+import { runAsAgent } from "../src/engine/session.ts";
 import type { AgentConfig, AgentRuntime, DomainScope, OverrideEntry } from "../src/core/types.ts";
 
 // ── helpers ─────────────────────────────────────────────────────────────
@@ -37,14 +38,16 @@ import type { AgentConfig, AgentRuntime, DomainScope, OverrideEntry } from "../s
 function runtimeFor(opts: {
   name: string;
   sessionFile: string;
+  agentType?: AgentConfig["agentType"];
+  role?: AgentConfig["role"];
   domain?: DomainScope[];
   governance?: AgentConfig["governance"];
 }): AgentRuntime {
   return {
     config: {
       name: opts.name, slug: opts.name.toLowerCase(),
-      path: `${opts.name}.md`, role: "member",
-      agentType: "lead", routingTags: [],
+      path: `${opts.name}.md`, role: opts.role || "member",
+      agentType: opts.agentType || "lead", routingTags: [],
       domain: opts.domain || [], tools: "read", model: "test/model", thinking: "off",
       ...(opts.governance ? { governance: opts.governance } : {}),
     } as AgentConfig,
@@ -205,6 +208,123 @@ test("U4 AE9 — exactly one grant then one revoke per delegation, R8 field set 
   // as the grant that authorized it. This is the load-bearing invariant
   // the audit log joins on.
   assert.equal(r.delegationId, g.delegationId, "AE9: revoke must reference the same delegationId as its grant");
+});
+
+// ── dispatcherRole reflects the caller's agent-type (Kieran L2 closure) ──
+//
+// `TelemetryAgentRole` was widened to include "operations" in the same
+// commit that added the `agent-type: operations` tier. The grant event
+// at `src/engine/dispatch.ts:498` now emits `dispatcherRole: "operations"`
+// when the caller's agent-type is "operations"; every other caller
+// falls back to "orchestrator" (the prior hardcoded value). The
+// audit-log consumer can now distinguish operations-dispatched grants
+// (lifecycle writes authored by the operations lead) from
+// orchestrator-dispatched grants (top-down coordination).
+
+test("U4 Kieran-L2 — dispatcherRole is 'operations' when the caller is agent-type: operations", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-uo-telemetry-ops-role-"));
+  const operations = runtimeFor({
+    name: "Operations",
+    role: "lead",
+    agentType: "operations",
+    sessionFile: join(dir, "o.jsonl"),
+    domain: [
+      { path: ".git/", read: true, upsert: true, delete: true },
+      { path: ".worktrees/", read: true, upsert: true, delete: true },
+      { path: ".pi/hive/agents/operations/", read: true, upsert: true, delete: true },
+    ],
+  });
+  // Worker is `lead`-typed (not coder/tester) to bypass the hive-mode
+  // execution-gate preflight at `src/engine/dispatch.ts:110` — that
+  // gate requires an approved change id, which these unit tests do
+  // not stand up. The Kieran L2 closure being tested is
+  // `dispatcherRole` emission, which is independent of the worker's
+  // own agent-type.
+  const worker = runtimeFor({
+    name: "Builder",
+    sessionFile: join(dir, "b.jsonl"),
+    agentType: "lead",
+    domain: [{ path: "src/", read: true, upsert: false, delete: false }],
+  });
+  // canDelegateTo (src/engine/domain.ts:18) is the tree-bound fence:
+  // Operations has no `allowedAgents` in production (it acts on the
+  // lifecycle directly), but the test stand-up gives it a single
+  // direct-report so the dispatch path can reach the worker. This
+  // mirrors how the orchestrator delegates to Operations in the real
+  // tree: orchestrator.allowedAgents includes "Operations".
+  (operations.config as any).allowedAgents = ["Builder"];
+  const state = fixture({ dir, worker });
+  // Add the operations caller to state.runtimes so
+  // `resolveRuntime(state, currentAgentName())` at the grant site
+  // finds it. resolveRuntime lowercases the name and looks up by
+  // slug, so the keyed entry must use the lowercase form.
+  state.runtimes.set(operations.config.name.toLowerCase(), operations);
+  const ctx = { ...baseCtx, cwd: dir } as any;
+  const create: CreateAgentSession = (async () => ({ session: cleanSession() })) as any;
+  const override: OverrideEntry[] = [{ path: ".worktrees/feat-x/app/", upsert: true, delete: false }];
+
+  // `runAsAgent` seeds the AsyncLocalStorage that dispatchAgent's
+  // `currentAgentName()` reads — the dispatch body sees "Operations"
+  // as the caller, looks up its runtime, and emits the new role.
+  const result = await runAsAgent("Operations", () =>
+    dispatchAgent(state, "Builder", "operations dispatches the worker", ctx, create, undefined, undefined, override),
+  );
+
+  assert.equal(result.exitCode, 0, "operations-dispatched happy path should exit 0; got: " + result.output);
+
+  const events = readEmittedEvents(state.session.observabilityLog);
+  const gs = grants(events);
+  assert.equal(gs.length, 1, "exactly one grant must fire for the operations-dispatched delegation");
+  const g = gs[0].payload;
+  assert.equal(g.dispatcher, "Operations", "R8: dispatcher name reflects the AsyncLocalStorage caller");
+  assert.equal(
+    g.dispatcherRole,
+    "operations",
+    "R8: dispatcherRole is 'operations' when the caller's agent-type is 'operations' (Kieran L2 closure)",
+  );
+  assert.equal(g.worker, "builder", "R8: worker slug is unchanged");
+  assert.deepEqual(g.overrideEntries, override, "R8: overrideEntries mirrors the call's input verbatim");
+});
+
+test("U4 Kieran-L2 — dispatcherRole falls back to 'orchestrator' when the caller's agent-type is not 'operations'", async () => {
+  // Regression guard for the fallback path: a non-operations caller
+  // (here a `lead`-typed Engineering Lead) must still emit
+  // 'orchestrator' so existing audit consumers don't see a new value
+  // they don't know how to render. The fallback is the prior
+  // hardcoded behavior. Worker is `lead`-typed to bypass the
+  // hive-mode execution-gate preflight (see Kieran-L2 test above).
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-uo-telemetry-lead-fallback-"));
+  const engineeringLead = runtimeFor({
+    name: "Engineering Lead",
+    role: "lead",
+    agentType: "lead",
+    sessionFile: join(dir, "el.jsonl"),
+  });
+  // Tree-match: Engineering Lead has Builder as a direct report. The
+  // runtimeFor helper signature does not expose `allowedAgents`, so
+  // patch the config object directly (matches the canDelegateTo
+  // input contract).
+  (engineeringLead.config as any).allowedAgents = ["Builder"];
+  const worker = runtimeFor({
+    name: "Builder",
+    sessionFile: join(dir, "b.jsonl"),
+    agentType: "lead",
+    domain: [{ path: "src/", read: true, upsert: false, delete: false }],
+  });
+  const state = fixture({ dir, worker });
+  state.runtimes.set(engineeringLead.config.name.toLowerCase(), engineeringLead);
+  const ctx = { ...baseCtx, cwd: dir } as any;
+  const create: CreateAgentSession = (async () => ({ session: cleanSession() })) as any;
+  const override: OverrideEntry[] = [{ path: ".worktrees/feat-x/app/", upsert: true, delete: false }];
+
+  await runAsAgent("Engineering Lead", () =>
+    dispatchAgent(state, "Builder", "engineering dispatches the worker", ctx, create, undefined, undefined, override),
+  );
+
+  const events = readEmittedEvents(state.session.observabilityLog);
+  const gs = grants(events);
+  assert.equal(gs.length, 1);
+  assert.equal(gs[0].payload.dispatcherRole, "orchestrator", "R8: non-operations caller falls back to 'orchestrator'");
 });
 
 // ── AE10 — staticReference is deterministic per static config ──────────

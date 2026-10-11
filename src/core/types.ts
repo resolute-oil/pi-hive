@@ -33,7 +33,15 @@ export function canonicalMode(mode: string | undefined): HiveMode {
 // boundary) by the type-policy layer: it decides which ACTIONS an agent may
 // perform on which KIND of file. Distinct from the derived tree role
 // (orchestrator/lead/member) which only governs delegation.
-export type AgentType = "planner" | "coder" | "tester" | "reviewer" | "lead";
+//
+// `operations` is the lifecycle lead (worktree, remote-git, PR, persona
+// self-maintenance). Its WRITABLE_CLASSES match `coder`'s, but the persona's
+// `domain:` block is expected to constrain operations to the lifecycle
+// scope (`.git/`, `.worktrees/`, `.pi/hive/agents/operations/`) — the type
+// policy decides WHAT KINDS of files an agent may touch; the domain layer
+// decides WHICH PATHS. Operations is tree-bound at the canDelegateTo layer
+// just like `lead`; it does not receive the typed-specialist widening.
+export type AgentType = "planner" | "coder" | "tester" | "reviewer" | "lead" | "operations";
 
 export interface KnowledgeRef {
   path: string;

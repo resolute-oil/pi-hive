@@ -90,7 +90,12 @@ export type HiveTelemetryEventType =
   | "domain_override.revoked";
 
 export type TelemetryAgentStatus = "idle" | "running" | "waiting" | "done" | "error";
-export type TelemetryAgentRole = "orchestrator" | "lead" | "member";
+// `operations` is the lifecycle lead role. The R8 grant event at
+// `src/engine/dispatch.ts:498` emits `dispatcherRole: "operations"` when
+// the dispatcher's persona has `agent-type: operations`. Adding the union
+// member closes the Kieran L2 finding (the runtime previously hardcoded
+// `"orchestrator"` because this union did not include `"operations"`).
+export type TelemetryAgentRole = "orchestrator" | "lead" | "member" | "operations";
 
 export interface HiveTelemetryEvent<P = JsonRecord> {
   event_id: string;

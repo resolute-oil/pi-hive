@@ -495,17 +495,22 @@ export async function dispatchAgent(
       mergedScope,
       staticReference,
     };
-    // R8 grant event. `dispatcherRole` is locked as `"orchestrator"` —
-    // the project's persona types (see TelemetryAgentRole in
-    // src/shared/telemetry.ts) are orchestrator / lead / member; the
-    // design's plan registered `"orchestrator" | "operations"` but
-    // `operations` is not a recognized role in this codebase, so
-    // `"orchestrator"` is the safe fallback for any caller. U4 may
-    // revisit when the role hierarchy grows.
+    // R8 grant event. `dispatcherRole` reflects the caller's agent-type
+    // when the caller is `operations` (the lifecycle lead — the
+    // canonical author of `domain_override` per the AE5/R11 fence at
+    // `:147`); every other caller — orchestrator, lead, member — falls
+    // back to `"orchestrator"` as the safe default. Closes the Kieran
+    // L2 finding (the runtime previously hardcoded `"orchestrator"`
+    // because `TelemetryAgentRole` did not include `"operations"`; the
+    // union was widened in src/shared/telemetry.ts to accept the new
+    // tier).
+    const callerRuntime = resolveRuntime(state, currentAgentName());
+    const dispatcherRole: "orchestrator" | "operations" =
+      callerRuntime?.config.agentType === "operations" ? "operations" : "orchestrator";
     emitHiveEvent(state, "domain_override.granted", {
       delegationId,
       dispatcher: currentAgentName(),
-      dispatcherRole: "orchestrator",
+      dispatcherRole,
       worker: agentSlug(runtime.config),
       changeId: currentChangeId() ?? null,
       grantedAt: new Date().toISOString(),
