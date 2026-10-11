@@ -312,20 +312,21 @@ hive:
               path: .pi/hive/agents/<lead-b>/<sub-lead>/<member>/<member>.md
     # Operations lead (optional). Owns the cross-worktree lifecycle:
     # worktree create/remove, remote git, PR open/close/merge, and the
-    # HANDOFF cycle. Configured with `agent-type: operations` (the lifecycle
-    # tier — see §7.1) so Operations performs those calls directly within
-    # its `domain:`-constrained scope. The persona carries `network: true`
-    # for the project's PR CLI (`gh` for GitHub, `glab` for GitLab,
-    # equivalents for Bitbucket/Gitea). No `git-operator` member is
-    # required on the new tier.
+    # HANDOFF cycle. The agent's `.md` frontmatter must set
+    # `agent-type: operations` (see §9b.1 for the template) so Operations
+    # performs those calls directly within its `domain:`-constrained scope.
+    # The persona carries `network: true` for the project's PR CLI (`gh` for
+    # GitHub, `glab` for GitLab, equivalents for Bitbucket/Gitea). No
+    # `git-operator` member is required on the new tier.
     - name: Operations
       color: "#fab387"
       path: .pi/hive/agents/operations/operations.md
       routing-tags: [handoff, worktree, push, "pull request", preflight]
-      members:
-        - name: Git Operator
-          color: "#94e2d5"
-          path: .pi/hive/agents/operations/git-operator/git-operator.md
+      # legacy lead-tier pattern (do not scaffold on new projects — see §12):
+      # members:
+      #   - name: Git Operator
+      #     color: "#94e2d5"
+      #     path: .pi/hive/agents/operations/git-operator/git-operator.md
 ```
 
 > **Both blocks are required.** `hive-config.yaml` must define *both* a `hive:` team block and a `planning:` team block — the loader hard-throws otherwise. There is no top-level `orchestrator:` / `agents:` shape: keeping the two hierarchies explicit is deliberate so a project cannot silently run plan mode against its coding tree.
@@ -359,10 +360,10 @@ Every agent (orchestrator, leads, members) is a Markdown file: **YAML frontmatte
 | `name` | yes | string | Must match the name in `hive-config.yaml`. |
 | `model` | **yes** | string | `provider/id` (e.g. `openai-codex/gpt-5.5`) or `inherit` (use the live session model). No global default — every agent declares it. |
 | `thinking` | **yes** | string | One of `off, minimal, low, medium, high, xhigh`. |
-| `agent-type` | **yes** | string | One of `planner, coder, tester, reviewer, lead`. Enforced capability type (see §7.1). Config **hard-fails** if missing/invalid. The orchestrator and every lead/routing node is `lead`. |
+| `agent-type` | **yes** | string | One of `planner, coder, tester, reviewer, lead, operations`. Enforced capability type (see §7.1). Config **hard-fails** if missing/invalid. The orchestrator and every lead/routing node is `lead`; the lifecycle lead is `operations`. |
 | `stages` | no | list | **Planner-only.** Which OpenSpec artifacts this planner may write: any of `proposal, design, specs, tasks`. Omitted = all four. The old `requirements` value is accepted only as a deprecated alias for `specs`. Error if set on a non-planner. |
-| `network` | no | boolean | Enables network commands for this worker. Defaults to `false`; the local pi-hive dashboard API remains blocked. |
-| `commit` | no | string | Optional commit guidance. Its **presence** unlocks the commit gate for a write-capable agent. It never overrides the read-only `reviewer`/`lead` type policy. |
+| `network` | no | boolean | Enables network commands for this worker. Defaults to `false`; the local pi-hive dashboard API remains blocked. (Required on `agent-type: operations` for the lifecycle lead; see §7.1, §9b.1.) |
+| `commit` | no | string | Optional commit guidance. Its **presence** unlocks the commit gate for a write-capable agent. It never overrides the read-only `reviewer`/`lead` type policy. (Required when Operations runs commits directly on the lifecycle tier.) |
 | `tools` | no | list | Allow-list of tool names for this agent. Falls back to `default-tools` if omitted. See §7. |
 | `context` | no | list of `{path, use-when, updatable?, allow-outside-project?}` | Files **always inlined** into the prompt (full content). The agent's always-on knowledge. See sub-keys below. |
 | `skills` | no | list of `{path, use-when, updatable?, allow-outside-project?}` | On-demand procedures using Pi's native skill system. Worker launches disable ambient discovery with `--no-skills` and pass these paths explicitly with `--skill`. See sub-keys below. |
@@ -394,7 +395,7 @@ These extension tools can be granted via an agent's `tools` list:
 
 | Tool | Grant to | Purpose |
 |---|---|---|
-| `delegate_agent` | **leads only** (anyone with members) | Delegate a focused task to a direct report, or to a typed specialist (`coder`/`tester`/`reviewer`/`planner`) for a read-only inspection. `lead`-typed targets stay tree-bound. The core fan-out tool. Accepts an optional `domain_override` (see §7.1.1) so orchestrator and Operations personas can grant a per-dispatch write scope inside a worktree. |
+| `delegate_agent` | **leads only** (anyone with members) | Delegate a focused task to a direct report, or to a typed specialist (`coder`/`tester`/`reviewer`/`planner`) for a read-only inspection. `lead`-typed targets stay tree-bound. The core fan-out tool. Accepts an optional `domain_override` (shape: `{path, upsert, delete, include?, exclude?}`; see §7.1.1) so orchestrator and Operations personas can grant a per-dispatch write scope inside a worktree. |
 | `route_agent` | leads / orchestrator | Score which agent should handle a task before delegating. |
 | `team_status` | any | Inspect live session, active runs, per-agent tokens/cost. |
 | `team_conversation` | any | Read **one named agent's** transcript (scoped; requires an `agent` arg). Used to inspect e.g. what a reviewer found. |
@@ -406,7 +407,7 @@ Type-scoped hive tools (granted automatically by `agent-type`, NOT listed in `to
 - Reviewers: `submit_review_verdict`.
 - Leads/orchestrator: `plan_new` / `plan_select` / `plan_task_complete`, plus the **12 operator commands** and **2 introspection tools** enumerated below.
 
-**Operator commands (12 LLM-callable, granted by `agent-type: lead`)** — the orchestrator's path to the same operator surface the dashboard exposes to humans:
+**Operator commands (12 LLM-callable, granted by `agent-type: lead`)** — the orchestrator's path to the same operator surface the dashboard exposes to humans (intentionally NOT granted to `agent-type: operations` — Operations is the executor being acted upon, not the operator; operator commands stay with the orchestrator/lead):
 
 | Tool | Purpose |
 |---|---|
@@ -430,7 +431,7 @@ Type-scoped hive tools (granted automatically by `agent-type`, NOT listed in `to
 | `hive_read_policy(agent?)` | Return the resolved `WorkerBudgetPolicy` (tokens / `costUsd` / runs / depth caps and the per-dimension context cap when set) plus the global `budgets.strategies` block (`on-approaching-limit.threshold`, `on-exhaustion.action`, `summary.max-tokens`). Omit `agent` to see team-wide defaults from `budgets.per-worker.*` / `budgets.per-team.*`. Use it to predict whether a `delegate_agent` call will pass the pre-flight gate before you invoke it. |
 | `hive_explain_rejection(agent)` | Return the structured `BudgetBlock` from the most recent pre-flight gate refusal for the named agent — scope, resource, remaining, limit, timestamp. When `delegate_agent` fails with a "Delegation blocked" message, call this to choose between `hive_respawn_worker`, `hive_compact_worker`, `hive_force_kill_worker`, or a re-delegation with different parameters. |
 
-Both operator commands and introspection tools are **type-scoped** (granted automatically by `agent-type: lead`, not by an agent's `tools` list), so a `coder`/`tester`/`reviewer`/`planner` does NOT see them. The dashboard buttons and the LLM tools share the same underlying `operator-command-pickup.jsonl` consumer as worker-self cooperative calls.
+Both operator commands and introspection tools are **type-scoped** (granted automatically by `agent-type: lead`, not by an agent's `tools` list), so a `coder`/`tester`/`reviewer`/`planner` does NOT see them (and neither does `agent-type: operations` — Operations is the executor being acted upon, not the operator; operator commands stay with the orchestrator/lead). The dashboard buttons and the LLM tools share the same underlying `operator-command-pickup.jsonl` consumer as worker-self cooperative calls.
 
 Human approval happens only in the authenticated dashboard review UI; there is no approval tool for agents.
 
@@ -448,7 +449,7 @@ Guidance:
 
 Every agent declares an **`agent-type`** in its frontmatter. This is **required** — the config **hard-fails to load** if any agent (including the orchestrator) is missing or has an invalid type. Run `/hive:doctor` to list offenders with a suggested type per agent.
 
-Agent type is **separate from the derived tree role** (orchestrator/lead/member). The tree role governs *delegation*; the agent type governs *what actions an agent may take on what kind of file*. The five types:
+Agent type is **separate from the derived tree role** (orchestrator/lead/member). The tree role governs *delegation*; the agent type governs *what actions an agent may take on what kind of file*. The six types:
 
 | `agent-type` | May mutate | Verdicts | Commits | Typical use |
 |---|---|---|---|---|
@@ -457,7 +458,7 @@ Agent type is **separate from the derived tree role** (orchestrator/lead/member)
 | `tester` | tests (drawn by its domain `include`/`exclude` globs) | no | only with `commit:` | Writes tests, not production code. |
 | `reviewer` | **nothing (read-only)** — explicit inspection-command allowlist only | **yes** — `submit_review_verdict` (reviewer-only tool) | no | Reads and reviews; delegates tests to a tester; submits a structured red/yellow/green verdict. |
 | `lead` | **nothing (read-only)** — explicit inspection-command allowlist only | no | no | Delegates and coordinates. Includes the orchestrator. The `lead` tier is blocked from mutations at both the type-policy layer (`WRITABLE_CLASSES[lead] === []` in `src/engine/policy.ts`) and the bash gate (`readOnlyType === lead` in `src/engine/domain.ts`). |
-| `operations` | `code` / `docs` / `tasks` — **never `spec`**, **never application source** unless the persona's `domain:` widens to it (the canonical template keeps the domain at `.git/`, `.worktrees/`, `.pi/hive/agents/operations/`, `HANDOFF.md`) | no | only if it has a `commit:` field | The **lifecycle lead**. Performs the cross-worktree lifecycle (HANDOFF rotation, worktree create/remove, preflight, `git push`, PR open/close/merge) directly within its `domain:`-constrained scope. `WRITABLE_CLASSES[operations] === ["code", "docs", "tasks"]` (same file classes as `coder`); the `domain:` block is the path-scope fence. Not routed through `readOnlyCommandDecision` — the bash gate's read-only fence still covers `reviewer | lead` only. The persona's `domain_override` writes emit `dispatcherRole: "operations"` on the telemetry stream (closes the Kieran L2 finding; `TelemetryAgentRole` is widened in `src/shared/telemetry.ts`). Tree-bound at the delegation gate (not in `{coder, tester, reviewer, planner}`). PR CLI is project-agnostic — `gh` for GitHub, `glab` for GitLab, equivalents for Bitbucket/Gitea; the lifecycle shape is the same regardless of host. See §9b.1 for the persona template. |
+| `operations` | `code` / `docs` / `tasks` — **never `spec`**, **never application source** unless the persona's `domain:` widens to it (the canonical template keeps the domain at `.git/`, `.worktrees/`, `.pi/hive/agents/operations/`, `HANDOFF.md`) | no | only if it has a `commit:` field | The **lifecycle lead**. Performs the cross-worktree lifecycle (HANDOFF rotation, worktree create/remove, preflight, `git push`, PR open/close/merge) directly within its `domain:`-constrained scope. `WRITABLE_CLASSES[operations] === ["code", "docs", "tasks"]` (same file classes as `coder`); the `domain:` block is the path-scope fence. Not routed through `readOnlyCommandDecision` — the bash gate's read-only fence still covers `reviewer | lead` only. When Operations is the dispatcher, `domain_override.granted` events carry `dispatcherRole: "operations"` (the union was widened in `src/shared/telemetry.ts`). Tree-bound at the delegation gate (not in `{coder, tester, reviewer, planner}`). PR CLI is project-agnostic — `gh` for GitHub, `glab` for GitLab, equivalents for Bitbucket/Gitea; the lifecycle shape is the same regardless of host. See §9b.1 for the persona template. |
 
 **Two layers gate every mutation; both must pass.** (1) The **domain** globs (§8) — "may this agent touch this path at all?" (2) The **type policy** — "may this *type* perform this *action* on this *kind of file?" So a `coder` whose domain allows the project root still cannot write an `openspec/changes/**` artifact (wrong type), and a `planner` cannot write `src/**` even if its domain allows it (wrong type × class).
 
@@ -502,7 +503,7 @@ The default delegation gate (`canDelegateTo` in `src/engine/domain.ts`) is the t
 
 **Validation rules (the override is a domain-layer delta, not a fence loosener).** `dispatchAgent()` runs the override through `preflightCheck` before the worker session starts; any rejection returns a structured error and the worker never spawns (the grant event is not emitted). The five predicates: (1) no entry grants a **reserved path** (`.git/**`, `.env*`, `**/*.key`, `**/*.pem`, `config/master.key`, `config/credentials*`, `.pi/hive/sessions/**`, plus every entry in `settings.secret-paths` — see §5); (2) no entry grants `upsert: true` or `delete: true` to a `reviewer`-typed worker; (3) the merged scope does not exceed the agent's static `budgets:` cap; (4) the merged scope does not violate the configured `depth.cap`; (5) `isReadOnly: true` plus any write-bearing entry is rejected as inconsistent state. An empty `domain_override: []` is treated as no override — no grant event, no scope widening.
 
-**Audit trail.** Every dispatch emits two Hive telemetry events through `emitHiveEvent`: a `domain_override.granted` record (with `delegationId`, `dispatcher`, `dispatcherRole`, `worker`, `changeId`, `grantedAt`, `overrideEntries`, `staticReference`) immediately before the worker runs, and a `domain_override.revoked` record (with `delegationId`, `revokedAt`, `terminationReason` — one of `return` / `error` / `abort` / `crash` / `budget-exhausted` / `queue-cancelled`) on every termination path, including orchestrator crash. To reconstruct the effective scope for a past dispatch, join the two events on `delegationId` in the dashboard's session archive (see `README.md` "Hive telemetry"). The `staticReference` field is a digest of the static `domain:` block at grant time — re-deriving it from the worker's `.md` lets an auditor detect a drift between the recorded grant and the current config.
+**Audit trail.** Every dispatch emits two Hive telemetry events through `emitHiveEvent`: a `domain_override.granted` record (with `delegationId`, `dispatcher`, `dispatcherRole`, `worker`, `changeId`, `grantedAt`, `overrideEntries`, `staticReference`) immediately before the worker runs, and a `domain_override.revoked` record (with `delegationId`, `revokedAt`, `terminationReason` — one of `return` / `error` / `abort` / `crash` / `budget-exhausted` / `queue-cancelled`) on every termination path, including orchestrator crash. To reconstruct the effective scope for a past dispatch, join the two events on `delegationId` in the dashboard's session archive (see `README.md` "Hive telemetry", and §8.1 step 3 for the operator-side join). The `staticReference` field is a digest of the static `domain:` block at grant time — re-deriving it from the worker's `.md` lets an auditor detect a drift between the recorded grant and the current config.
 
 ---
 
@@ -729,12 +730,14 @@ Return: <the lead's deliverable shape — goals/scope/decisions, or findings/ris
 name: Operations
 model: inherit
 thinking: medium
-agent-type: lead
+network: true   # required on the operations tier for the project's PR CLI — see §6, §9b.1
+agent-type: operations
 tools:
   - read
   - grep
   - find
   - ls
+  - bash              # lifecycle shell calls (git, gh/glab, worktree) — gated by domain policy
   - delegate_agent
   - route_agent
   - team_status
@@ -769,6 +772,11 @@ domain:
     read: true
     upsert: true
     delete: true   # persona can update itself when the lifecycle reveals a new convention
+  - path: ./HANDOFF.md
+    read: true
+    upsert: true
+    delete: false
+    description: rotate HANDOFF.md at hive→normal handoff
   - path: .
     read: true
     upsert: false
@@ -997,7 +1005,7 @@ Naming: prefix by scope — `behavior-*` (cross-cutting), `<role>-*` (role-owned
 **Validation checklist (every item must hold):**
 - [ ] `.pi/hive/hive-config.yaml` exists (this is what activates the extension).
 - [ ] Every `path` in the config points to a file that **exists**.
-- [ ] Every agent `.md` has **`name`, `model`, `thinking`, `agent-type`** in frontmatter (these are required — missing `model`/`thinking`/`agent-type` throws at load). The orchestrator and every lead are `agent-type: lead`.
+- [ ] Every agent `.md` has **`name`, `model`, `thinking`, `agent-type`** in frontmatter (these are required — missing `model`/`thinking`/`agent-type` throws at load). The orchestrator and every lead are `agent-type: lead`; the lifecycle lead (Operations) is `agent-type: operations`.
 - [ ] `stages` appears only on `agent-type: planner` agents. `network` is a boolean and is enabled only where external access is required. `commit:` unlocks the commit gate only for a write-capable agent; it cannot override a `reviewer`/`lead` read-only boundary.
 - [ ] Every `name` is **unique** across the tree and **matches** between config and the agent's frontmatter `name`.
 - [ ] Every agent has a sibling `<stem>-mental-model.yaml` with a valid spine and `owner` = the agent's name.
@@ -1029,11 +1037,13 @@ done
 
 ## 12. Anti-patterns (do not do these)
 
-- **Declaring tree roles or delegation permissions in frontmatter.** The *tree role* (orchestrator/lead/member) and delegation permissions are derived from the `members` nesting in `hive-config.yaml`. Don't add `role:` or `allowed-agents:` to frontmatter. (The `agent-type` capability field **is** required in frontmatter — that's a different axis; see §7.1. The agent-type axis widens `canDelegateTo` to reach typed specialists directly, but `lead`-typed agents stay tree-bound — they don't get the widening even though their `agent-type` is also declared in frontmatter.)
+- **Declaring tree roles or delegation permissions in frontmatter.** The *tree role* (orchestrator/lead/member) and delegation permissions are derived from the `members` nesting in `hive-config.yaml`. Don't add `role:` or `allowed-agents:` to frontmatter. (The `agent-type` capability field **is** required in frontmatter — that's a different axis; see §7.1. The agent-type axis widens `canDelegateTo` to reach typed specialists directly, but lead-tier agents (`lead`, `operations`) stay tree-bound — they don't get the widening even though their `agent-type` is also declared in frontmatter.)
 - **Giving a lead or the orchestrator a mutating agent-type.** Leads (including the orchestrator) are `agent-type: lead`; registered mutation tools deny their writes. The `operations` tier is the only lead-tier type allowed to mutate, and only within its `domain:`-constrained scope. Route all application-source edits through `coder`/`tester` members.
 - **Setting `agent-type: lead` on the Operations persona when `agent-type: operations` is available.** On the `lead` tier the runtime's type-policy and bash allowlist gates fence lifecycle writes (`WRITABLE_CLASSES[lead] === []` in `src/engine/policy.ts`, `readOnlyType === lead` in `src/engine/domain.ts:836`), so every `git push` / PR CLI call / `git worktree add|remove` routes through a `git-operator` (or other `coder`-typed) member under Operations. The `operations` tier flips both gates — Operations performs the writes directly within its `domain:` scope and emits `dispatcherRole: "operations"` on `domain_override.granted` events. Use the `operations` tier whenever the persona is configured to own the lifecycle directly.
 - **Giving the orchestrator file tools.** It routes and synthesizes only.
 - **Granting `edit`/`write` without a matching `upsert` domain** (or vice versa) — the agent will be blocked or unable to act.
+- **Passing `domain_override` from a lead or worker persona.** Only the orchestrator and Operations personas can declare `domain_override` on `delegate_agent`; lead and worker personas are rejected at the pre-flight gate (see §7.1.1). The override is the operator's per-dispatch write scope, not a leaf worker's privilege escalation lever.
+- **Combining `isReadOnly: true` with `domain_override` write entries.** The pre-flight gate rejects this as inconsistent state — `isReadOnly` says "this dispatch is an inspection" while a write-bearing override says "this dispatch may mutate"; both intents cannot be true at once (see §7.1.1, AE11).
 - **Telling agents to read the whole shared conversation log.** `team_conversation` is scoped per-agent on purpose; bulk reads blow up context.
 - **A lead with a single member** — collapse it or add the missing sibling.
 - **Fat `shared_context`.** It's paid on every delegation. Put per-role knowledge in each agent's `context:`/`skills:` instead.
@@ -1045,4 +1055,4 @@ done
 - **Setting both `budgets.per-worker.context.tokens` AND `budgets.per-worker.context.percent`.** The `context:` constraint accepts **exactly one** of `tokens:` (nominal cap) or `percent:` (fill on the 0–100 scale). Setting both, or neither, fails at config-load with a path-bearing error pointing at the offending tier. This is enforced by `validateBudgetsConfig` post-typebox (see `src/core/schema.ts`).
 - **Hand-rolling remote-git or PR work in a `coder` member that is not under Operations.** Remote writes that cross the worktree boundary (push, merge gate, PR open/close, HANDOFF rotation) belong under the Operations lead, not under Engineering or Validation. The actual `git push` and project PR CLI calls (`gh pr *`, `glab mr *`, equivalents) run in Operations' session (on `agent-type: operations`) or in Operations' `git-operator` member (on the legacy `lead` tier); the audit log captures them under Operations' `groupName`. A `coder` outside Operations performing the same calls defeats the routing/audit invariant and is treated as a regression.
 - **`Operations` performing destructive operations (`git push --force`, `git worktree remove`, the project's PR CLI merge-to-default-branch command) without surfacing them to the Operator first.** The destructive confirmation gate lives in `.pi/hive/knowledge/operations-handoff-contract.md`, not in pi-hive's runtime, and applies whether Operations writes directly (on `agent-type: operations`) or via a `git-operator` member (on the legacy `lead` tier). Non-destructive operations (regular `git push`, `git worktree add`, PR create/close, merge to non-default branches) do not need the same gate. See §7.1 and §9b.1.
-- **Granting `network: true` to a `lead`-typed Operations persona** (when it should be `agent-type: operations`). On the new tier, Operations is the executor — it issues the project PR CLI calls directly, so `network: true` is part of the persona's correct shape. On the legacy `lead` tier, only the `git-operator` (or other executing) member needs network access.
+- **Typing Operations as `agent-type: lead` instead of `agent-type: operations`.** On the `lead` tier the runtime's type-policy and bash allowlist gates fence lifecycle writes (`WRITABLE_CLASSES[lead] === []` in `src/engine/policy.ts`, `readOnlyType === lead` in `src/engine/domain.ts:836`), so every `git push` / PR CLI call / `git worktree add|remove` routes through a `git-operator` (or other `coder`-typed) member under Operations. The `operations` tier flips both gates — Operations performs the writes directly within its `domain:` scope and emits `dispatcherRole: "operations"` on `domain_override.granted` events. (`network: true` is the correct shape on the new tier — the persona issues the project PR CLI calls directly, so granting network access there is part of the fix, not a separate mistake. On the legacy `lead` tier, only the `git-operator` (or other executing) member needs network access.)
